@@ -196,6 +196,7 @@
   min-width: 0;
   flex: 0 0 auto;
   align-items: center;
+  justify-content: flex-end;
   gap: 2px;
   border-top: 1px solid var(--line);
   padding: 5px 0 2px;
