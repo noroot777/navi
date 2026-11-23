@@ -1,7 +1,7 @@
 import AppKit
 
-/// `navi://open?project=&task=&instance=&fallback=`：桌面端飞书卡片上「在 Navi 中打开」点下去，落到本机服务的
-/// `/open-in-navi`，由服务 `open` 这条链接（server/src/im/open-in-navi.ts；飞书只肯开 http，所以不直接写在卡上）。系统把它交给 app（Info.plist 的 CFBundleURLTypes，build.sh 生成）。
+/// `navi://open?project=&task=&instance=&fallback=`：桌面端飞书卡片上「在 Navi 中打开」那条（server/src/im/app-link.ts
+/// 只在服务只听本机时放在按钮的 pc_url 上）。系统把它交给 app（Info.plist 的 CFBundleURLTypes，build.sh 生成）。
 ///
 /// 发卡的那份 Navi 不一定是这个 app 连着的那份（另一台 Mac 发的卡、这台 app 指着别处），所以链接自带来源：
 /// `instance` 是发卡那份的指纹（server/src/instance-tag.ts），`fallback` 是原来那条 http 地址。自家服务报的

@@ -3,12 +3,11 @@
 //   ② 远程访问回到普通自用实例的样子：本机看得到远程访问页和访问密钥；转进来的请求拿访问密钥认成机主，
 //      不带凭证 401（不是本机模式那句拒绝）；
 //   ③ 卡片深链：放开了网络（http 在每台电脑上都打得开）就不给 pc_url，按钮和整行可点的项都只有 default_url；
-//      只听本机时才给本机回环的 `/open-in-navi`（飞书桌面端只肯开 http），带着这份 Navi 的指纹和原来那条
-//      http 地址，认不出的 id 不拼；`/open-in-navi` 只认本机直连、指纹对上才替用户拉起 app 窗口（`open navi://`），
-//      对不上说清楚并给原地址；深链地址的说明（只听本机 / 回环地址）按开关组合给出；
+//      只听本机时才给 navi://，而且带着这份 Navi 的指纹和原来那条 http 地址（收到的 app 据此认是不是冲着
+//      自己来的、对不上退回 http），认不出的 id 不拼；深链地址的说明（只听本机 / 回环地址）按开关组合给出；
 //   ④ 换了链接策略（只听本机 ⇄ 放开网络、旧格式没带来源）之后，库里存着的卡不分种类按新策略重写：
 //      还在等人的决策卡渲染指纹对不上（上一版算的指纹也对不上），对账会整张重渲染；已收尾的、只推标题那版、
-//      还没发的、旧格式（裸 navi://、上一版直接写在 pc_url 上的 navi://）都被换掉，14 天内发出的排上改卡；超过 14 天的、已撤回的、发不出去的不动；
+//      还没发的、旧格式裸 navi:// 都被换掉，14 天内发出的排上改卡；超过 14 天的、已撤回的、发不出去的不动；
 //      同一个策略只扫一次；
 //   ⑤ 「库里改好了」不等于「飞书上改好了」：发出去的卡重写后逐张记着欠账（link_due），额度降级挡住只往后挪、
 //      额度回来了接着改，改到了才销账；改卡放弃了（failed / skipped）下次起通道重新排上；过了 14 天销账不再改。
@@ -69,11 +68,6 @@ api.get("/canary", (c) => c.json({ secret: "任务标题" }));
 const app = new Hono();
 app.use("*", authGate());
 app.route("/api", api);
-const { mountOpenInNavi } = await import("../src/im/open-in-navi.js");
-const { instanceTag } = await import("../src/instance-tag.js");
-const opened: string[] = [];
-let openOk = true;
-mountOpenInNavi(app, async (url) => { opened.push(url); return openOk; }, true);
 
 const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }) as Server;
 await new Promise<void>((resolve) => (server.listening ? resolve() : server.once("listening", () => resolve())));
@@ -131,39 +125,19 @@ try {
   const link = "http://mbp.tail97f3a6.ts.net:4317/?project=p_1&task=dZL_L1D4ZCAb";
   const closed = { localOnly: true, desktopApp: true };
   const tag = () => "AB12-CD34";
-  const origin = () => "http://127.0.0.1:4317";
-  const app = desktopAppLink(link, closed, tag, origin);
-  assert.ok(app, "只听本机的 app 服务给桌面端一条回环地址");
+  const app = desktopAppLink(link, closed, tag);
+  assert.ok(app, "只听本机的 app 服务给 navi://");
   const parsed = new URL(app);
-  assert.equal(`${parsed.origin}${parsed.pathname}`, "http://127.0.0.1:4317/open-in-navi", "飞书桌面端只肯开 http：pc_url 不再是 navi://");
+  assert.equal(parsed.protocol, "navi:");
+  assert.equal(parsed.host, "open");
   assert.deepEqual(Object.fromEntries(parsed.searchParams),
     { project: "p_1", task: "dZL_L1D4ZCAb", instance: "AB12-CD34", fallback: link }, "带着来源：指纹和原来那条 http 地址");
-  const other = new URL(desktopAppLink("http://another-mac.tailnet.ts.net:4317/?project=p_1&task=dZL_L1D4ZCAb", closed, tag, origin)!);
+  const other = new URL(desktopAppLink("http://another-mac.tailnet.ts.net:4317/?project=p_1&task=dZL_L1D4ZCAb", closed, tag)!);
   assert.notEqual(other.searchParams.get("fallback"), parsed.searchParams.get("fallback"), "两个来源不会变成同一条链接");
-  assert.equal(desktopAppLink(link), null, "这份服务放开了网络：http 每台电脑都打得开，不给 pc_url");
-  assert.equal(desktopAppLink(link, { localOnly: true, desktopApp: false }, tag), null, "不是 app 起的服务不给 pc_url");
+  assert.equal(desktopAppLink(link), null, "这份服务放开了网络：http 每台电脑都打得开，不给 navi://");
+  assert.equal(desktopAppLink(link, { localOnly: true, desktopApp: false }, tag), null, "不是 app 起的服务不给 navi://");
   assert.equal(desktopAppLink("http://x:4317/?task=t1", closed, tag), null, "没有项目的不是任务链接");
-  assert.equal(desktopAppLink("http://x:4317/?project=p&task=a%22b", closed, tag), null, "认不出的 id 不拼进链接");
-
-  // 飞书桌面端点下去落到的那一页：本机直连、指纹对上才替用户拉起 app
-  const here = instanceTag();
-  const q = (params: Record<string, string>) => `/open-in-navi?${new URLSearchParams(params)}`;
-  const mine = await call(q({ project: "p_1", task: "dZL_L1D4ZCAb", instance: here, fallback: link }));
-  assert.equal(mine.status, 200, mine.text);
-  assert.match(mine.text, /已在 Navi 里打开/);
-  assert.deepEqual(opened, [`navi://open?project=p_1&task=dZL_L1D4ZCAb&instance=${here}`], "交给系统 open 的是只带 id 和指纹的 navi://");
-  const foreign = await call(q({ project: "p_1", task: "dZL_L1D4ZCAb", instance: "FFFF-0000", fallback: link }));
-  assert.equal(foreign.status, 409);
-  assert.match(foreign.text, /不是这台 Navi 发的/);
-  assert.ok(foreign.text.includes(link.replaceAll("&", "&#38;")), "给出原来那条地址");
-  assert.equal(opened.length, 1, "指纹对不上不拉起 app");
-  const relayedOpen = await call(q({ project: "p_1", task: "t", instance: here }), { headers: relayed });
-  assert.equal(relayedOpen.status, 403, "转进来的请求不是坐在这台电脑前的人");
-  assert.equal((await call(q({ project: "p_1", task: "a\"b", instance: here }))).status, 400, "认不出的 id 不办");
-  assert.equal(opened.length, 1);
-  openOk = false;
-  const noApp = await call(q({ project: "p_1", task: "t2", instance: here }));
-  assert.equal(noApp.status, 302, "拉不起 app 就在浏览器里打开那个任务");
+  assert.equal(desktopAppLink("http://x:4317/?project=p&task=a%22b", closed, tag), null, "认不出的 id 不拼进 navi://");
   const card = JSON.stringify(renderCard({
     title: "t", tone: "green",
     blocks: [
@@ -186,19 +160,17 @@ try {
   assert.equal(deepLinkWarning(null, { localOnly: true, desktopApp: true }), null);
 
   // ④ 存着的卡按新策略重写
-  assert.equal(linkPolicy(), "3:http");
-  assert.equal(linkPolicy(closed, tag, origin), "3:local:http://127.0.0.1:4317:AB12-CD34");
-  assert.notEqual(linkPolicy(closed, tag, origin), linkPolicy(closed, () => "FFFF-0000", origin), "换了指纹（库搬到别的机器）也算换了策略");
-  assert.notEqual(linkPolicy(closed, tag, origin), linkPolicy(closed, tag, () => "http://127.0.0.1:4318"), "换了端口也算");
+  assert.equal(linkPolicy(), "2:http");
+  assert.equal(linkPolicy(closed, tag), "2:navi:AB12-CD34");
+  assert.notEqual(linkPolicy(closed, tag), linkPolicy(closed, () => "FFFF-0000"), "换了指纹（库搬到别的机器）也算换了策略");
   const turnView = { task: { id: "t1", projectId: "p_1", title: "任务" }, projectName: "项目", turn: { kind: "failed", generation: "g1" } };
   const dest = { receiveType: "open_id" as const, receiveId: "ou_1", recipientOpenId: "ou_1" };
   const legacyKey = createHash("sha256").update(JSON.stringify(["任务", "项目", turnView.turn, "open_id", link, false])).digest("hex").slice(0, 16);
   assert.notEqual(renderKeyOf(turnView as never, dest, "http://mbp.tail97f3a6.ts.net:4317", []), legacyKey,
     "上一版算的指纹没带链接策略：对上了就会把带旧 pc_url 的决策卡当成不用改");
 
-  const navi = desktopAppLink(link, closed, tag, origin)!;
+  const navi = desktopAppLink(link, closed, tag)!;
   const bare = "navi://open?project=p_1&task=dZL_L1D4ZCAb";
-  const previous = `navi://open?project=p_1&task=dZL_L1D4ZCAb&instance=AB12-CD34&fallback=${encodeURIComponent(link)}`;
   const stale = (pc: string) => JSON.stringify({
     header: { title: { tag: "plain_text", content: "任务" } },
     body: { elements: [
@@ -221,7 +193,6 @@ try {
     briefOnly: { kind: "question", state: "resolved", messageId: "om_3", sentAt: ago(1), patchState: null, content: fresh, brief: stale(navi) },
     unsent: { kind: "notice", state: "held", messageId: null, sentAt: null, patchState: null, content: stale(navi) },
     legacy: { kind: "accept", state: "sent", messageId: "om_4", sentAt: ago(1), patchState: "failed", content: stale(bare) },
-    previous: { kind: "accept", state: "resolved", messageId: "om_9", sentAt: ago(1), patchState: "done", content: stale(previous) },
     recall: { kind: "question", state: "resolved", messageId: "om_5", sentAt: ago(1), patchState: "recall", content: stale(navi) },
     old: { kind: "accept", state: "resolved", messageId: "om_6", sentAt: ago(15), patchState: "done", content: stale(navi) },
     recalled: { kind: "question", state: "resolved", messageId: "om_7", sentAt: ago(1), patchState: "recalled", content: stale(navi) },
@@ -229,9 +200,9 @@ try {
     current: { kind: "accept", state: "sent", messageId: "om_8", sentAt: ago(1), patchState: "done", content: fresh },
   };
   for (const [id, row] of Object.entries(rows)) await db.insert(imOutbox).values({ ...base, id, subject: id, ...row });
-  assert.equal(await relinkStoredCards(undefined, at), 7, "open/resolved/briefOnly/unsent/legacy/previous/recall 七行要换");
+  assert.equal(await relinkStoredCards(undefined, at), 6, "open/resolved/briefOnly/unsent/legacy/recall 六行要换");
   const read = async (id: string) => (await db.select().from(imOutbox).where(eq(imOutbox.id, id)))[0]!;
-  for (const id of ["open", "resolved", "unsent", "legacy", "previous", "recall"]) {
+  for (const id of ["open", "resolved", "unsent", "legacy", "recall"]) {
     assert.equal((await read(id)).content, fresh, `${id}：换成现在的链接`);
   }
   assert.equal((await read("briefOnly")).brief, fresh, "只推标题时换上的那版也换");
@@ -244,12 +215,12 @@ try {
   for (const id of ["old", "recalled", "dead"]) assert.equal((await read(id)).content, stale(navi), `${id}：飞书上改不了 / 没有它，不动`);
   assert.equal((await read("old")).patchState, "done");
   assert.equal((await read("current")).patchState, "done", "本来就对的不改卡");
-  for (const id of ["open", "resolved", "briefOnly", "legacy", "previous", "recall"]) assert.equal((await read(id)).linkDue, "3:http", `${id}：记着飞书上还欠新链接`);
+  for (const id of ["open", "resolved", "briefOnly", "legacy", "recall"]) assert.equal((await read(id)).linkDue, "2:http", `${id}：记着飞书上还欠新链接`);
   for (const id of ["unsent", "old", "current"]) assert.equal((await read(id)).linkDue, null, `${id}：不欠（没发 / 改不了 / 本来就对）`);
-  assert.equal(await readMeta("link_policy"), "3:http");
+  assert.equal(await readMeta("link_policy"), "2:http");
   await db.update(imOutbox).set({ content: stale(navi) }).where(eq(imOutbox.id, "current"));
   assert.equal(await relinkStoredCards(undefined, at), 0, "同一个策略只扫一次");
-  assert.equal(await relinkStoredCards("3:local:http://127.0.0.1:4317:AB12-CD34", at), 1, "策略一换就再扫");
+  assert.equal(await relinkStoredCards("2:navi:AB12-CD34", at), 1, "策略一换就再扫");
 
   // ⑤ 欠账要送到飞书才算完
   let level: Parameters<typeof purposeAllowed>[0] = "essential";
@@ -270,12 +241,12 @@ try {
     patchState: "done", scope: JSON.stringify({ kind: "system" }), createdAt: stamp, updatedAt: stamp };
   await db.insert(imOutbox).values({ ...owed, id: "quota", subject: "quota", content: stale(bare) });
   await relinkStoredCards(undefined, clock);
-  assert.deepEqual({ linkDue: (await read("quota")).linkDue, patchState: (await read("quota")).patchState }, { linkDue: "3:http", patchState: "pending" });
+  assert.deepEqual({ linkDue: (await read("quota")).linkDue, patchState: (await read("quota")).patchState }, { linkDue: "2:http", patchState: "pending" });
   await reconciler.sender.drainNow();
   let row = await read("quota");
   assert.equal(patches, 0, "额度降级到只保底：已收尾的卡不改");
   assert.equal(row.patchState, "pending", "挡住只往后挪，不记成 skipped");
-  assert.equal(row.linkDue, "3:http");
+  assert.equal(row.linkDue, "2:http");
   assert.ok(row.nextAt && Date.parse(row.nextAt) > clock, "过一阵再试");
   level = "normal";
   await reconciler.sender.drainNow();
@@ -287,7 +258,7 @@ try {
   assert.deepEqual({ patchState: row.patchState, linkDue: row.linkDue }, { patchState: "done", linkDue: null }, "送到了才销账");
 
   // 额度挡住之后调高额度、重启：起通道时往后挪着的当场就试，不再干等一轮
-  await db.update(imOutbox).set({ linkDue: "3:http", patchState: "pending", nextAt: new Date(clock + 30 * 60_000).toISOString() })
+  await db.update(imOutbox).set({ linkDue: "2:http", patchState: "pending", nextAt: new Date(clock + 30 * 60_000).toISOString() })
     .where(eq(imOutbox.id, "quota"));
   await relinkStoredCards(undefined, clock);
   assert.equal((await read("quota")).nextAt, null);
@@ -296,12 +267,12 @@ try {
   assert.equal(patches, 2, "重启之后马上改");
   assert.deepEqual({ patchState: row.patchState, linkDue: row.linkDue }, { patchState: "done", linkDue: null }, "送到了才销账");
 
-  await db.update(imOutbox).set({ linkDue: "3:http", patchState: "failed", attempts: 7 }).where(eq(imOutbox.id, "quota"));
-  await db.insert(imOutbox).values({ ...owed, id: "expired", subject: "expired", content: fresh, linkDue: "3:http", patchState: "skipped",
+  await db.update(imOutbox).set({ linkDue: "2:http", patchState: "failed", attempts: 7 }).where(eq(imOutbox.id, "quota"));
+  await db.insert(imOutbox).values({ ...owed, id: "expired", subject: "expired", content: fresh, linkDue: "2:http", patchState: "skipped",
     sentAt: new Date(clock - 15 * 24 * 3600_000).toISOString() });
   assert.equal(await relinkStoredCards(undefined, clock), 0, "策略没变：不再重写全表");
   row = await read("quota");
-  assert.deepEqual({ patchState: row.patchState, attempts: row.attempts, linkDue: row.linkDue }, { patchState: "pending", attempts: 0, linkDue: "3:http" },
+  assert.deepEqual({ patchState: row.patchState, attempts: row.attempts, linkDue: row.linkDue }, { patchState: "pending", attempts: 0, linkDue: "2:http" },
     "改卡放弃了的欠账，起通道时重新排上");
   assert.deepEqual({ patchState: (await read("expired")).patchState, linkDue: (await read("expired")).linkDue }, { patchState: "skipped", linkDue: null },
     "过了 14 天飞书不让改：销账，不再排");
@@ -310,7 +281,7 @@ try {
   assert.equal((await read("quota")).linkDue, null);
 
   // 欠着链接时点了卡上的按钮、结果卡随回执带回去（acking），没等到确认就退出：起通道当场补改一次
-  await db.update(imOutbox).set({ linkDue: "3:http", patchState: "acking", nextAt: new Date(clock + 6_000).toISOString() })
+  await db.update(imOutbox).set({ linkDue: "2:http", patchState: "acking", nextAt: new Date(clock + 6_000).toISOString() })
     .where(eq(imOutbox.id, "quota"));
   await relinkStoredCards(undefined, clock);
   row = await read("quota");

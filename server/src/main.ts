@@ -13,7 +13,6 @@ import { inspectPortCommand, inspectProcessSync, killPidsCommand, listenerPidsSy
 import { stampHumanActionToken } from "./auth/human-action-token.js";
 import { IS_PREVIEW_INSTANCE } from "./preview-instance.js";
 import { LOCAL_ONLY, LOCAL_ONLY_HOSTNAME, SINGLE_ONLY, SINGLE_ONLY_REFUSAL } from "./local-only.js";
-import { mountOpenInNavi } from "./im/open-in-navi.js";
 import { CODE_DIR, DATA_DIR, REPO_DIR } from "./paths.js";
 import { recordListeningPort } from "./listening-port.js";
 import { guardMonitorHook } from "./monitor-hook-failsafe.js";
@@ -423,9 +422,6 @@ app.route("/api", api);
 // 这两种都指向同一个真实成因:**服务端跑的代码比前端旧**——web/dist 是从磁盘现读的
 // (重新 build 就生效),server 得重新 build 且重启进程才换代码,一旦只做了前者,新界面
 // 就会去调一个老服务端没有的接口。所以这里直接把成因说出来。
-// 飞书桌面端「在 Navi 中打开」落到这里，再由它拉起 app 窗口（im/open-in-navi.ts）。也得在 SPA 兜底之前。
-mountOpenInNavi(app);
-
 app.all("/api/*", (c) =>
   c.json({
     error: `接口 ${c.req.method} ${new URL(c.req.url).pathname} 不存在。` +
