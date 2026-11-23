@@ -144,7 +144,7 @@ const server=createServer((request,response)=>{
   }
   if(request.url==='/api/runtime-handover'){
     let body='';request.on('data',chunk=>body+=chunk);request.on('end',()=>{
-      const message=JSON.parse(body);event({handoff:request.method,...message});
+      const message=JSON.parse(body);event({handoff:request.method,at:performance.now(),maintenance:existsSync(data+'/.mac-maintenance.json'),...message});
       if(options.acceptHandover){
         if(!message.check&&!message.release&&++handovers<=(options.handoverFailures||0)){response.writeHead(409);response.end('{}');return}
         response.end(JSON.stringify(message.check?{valid:true}:message.release?{released:true}:{protocol:1,lease:'safe-lease'}));return;
@@ -213,17 +213,62 @@ server.listen(0,'127.0.0.1',()=>writeFileSync(${JSON.stringify(ready)},JSON.stri
     }
     console.log("✓ automatic handover waits silently on busy or unverified service without touching tasks, maintenance or backups");
 
-    for (const options of [{ clearAfter: 3 }, { clearImpact: true, handoverFailures: 1 }]) {
+    for (const options of [{ clearAfter: 3 }, { clearImpact: true, handoverFailures: 1 }, { clearImpact: true, handoverFailures: 2 }]) {
       await scenario({ ...options, acceptHandover: true }, async ({ run, pid, recorded, backupFiles }) => {
         const output = await run(0, { MANUAL_SWITCH: "0", AUTO_SWITCH: "1", WAIT_FOR_SWITCH: "1", ANSWERS: "" });
         assert.doesNotMatch(output, /PROMPT|REPORT|PHASE blocked/);
         assert.equal(isPidAlive(pid), false);
         assert.equal(recorded().filter((event) => event.signal).length, 1);
-        assert.equal(recorded().filter((event) => event.handoff && event.schema).length, options.handoverFailures ? 2 : 1);
+        const attempts = recorded().filter((event) => event.handoff && event.schema);
+        assert.equal(attempts.length, (options.handoverFailures ?? 0) + 1);
+        assert.ok(attempts.every((event) => !event.maintenance));
+        for (let attempt = 1; attempt < attempts.length; attempt++) {
+          assert.ok(attempts[attempt].at - attempts[attempt - 1].at >= 50 * 2 ** attempt - 20, JSON.stringify(attempts));
+        }
+        assert.equal((output.match(/^HOLD /gm) ?? []).length, 1, output);
+        assert.equal((output.match(/^RELEASE$/gm) ?? []).length, 1, output);
         assert.equal(backupFiles().length, 2);
       });
     }
     console.log("✓ a ready takeover window and an acquisition race both complete automatically without waiting for the surviving task to finish");
+
+    await scenario({ clearImpact: true, acceptHandover: true, handoverFailures: 6 }, async ({ run, pid, data, recorded, backupFiles }) => {
+      const output = await run(3, { MANUAL_SWITCH: "0", AUTO_SWITCH: "1", WAIT_FOR_RETRY_LIMIT: "1", ANSWERS: "" });
+      assert.match(output, /RETRY_LIMIT 重试切换新版服务/);
+      assert.doesNotMatch(output, /PROMPT|REPORT|HOLD |RELEASE/);
+      assert.equal(isPidAlive(pid), true);
+      const attempts = recorded().filter((event) => event.handoff && event.schema);
+      assert.equal(attempts.length, 4, JSON.stringify(attempts));
+      for (let attempt = 1; attempt < attempts.length; attempt++) {
+        assert.ok(attempts[attempt].at - attempts[attempt - 1].at >= 50 * 2 ** attempt - 20, JSON.stringify(attempts));
+      }
+      assert.ok(attempts.every((event) => !event.maintenance));
+      assert.equal(recorded().some((event) => event.signal), false);
+      assert.equal(existsSync(join(data, ".mac-maintenance.json")), false);
+      assert.deepEqual(backupFiles(), []);
+    });
+    console.log("✓ repeated refusals back off and stop after four attempts without covering, reloading or sealing the workspace indefinitely");
+
+    await scenario({ clearImpact: true, acceptHandover: true, changeAfterBackup: true, change: "pid" }, async ({ run, pid, data, recorded }) => {
+      const output = await run(2, { MANUAL_SWITCH: "0", VERIFY_NO_STOP: "1", ANSWERS: "" });
+      assert.match(output, /UNCHANGED_WORKSPACE/);
+      assert.doesNotMatch(output, /PROMPT|REPORT|HOLD |RELEASE/);
+      assert.equal(isPidAlive(pid), true);
+      assert.equal(recorded().filter((event) => event.handoff && event.schema).length, 1);
+      assert.equal(recorded().some((event) => event.release === "safe-lease"), true);
+      assert.equal(recorded().some((event) => event.signal), false);
+      assert.equal(existsSync(join(data, ".mac-maintenance.json")), false);
+    });
+    console.log("✓ a changed service after lease acquisition releases the lease and maintenance without reloading the untouched workspace");
+
+    await scenario({ clearImpact: true }, async ({ run, pid }) => {
+      const output = await run(0, { MANUAL_SWITCH: "0", AUTO_SWITCH: "1", WAIT_FOR_RETRY_LIMIT: "1", RECONSIDER: "1" });
+      assert.match(output, /RETRY_LIMIT 重试切换新版服务/);
+      assert.match(output, /打断任务并切换服务/);
+      assert.equal((output.match(/^HOLD /gm) ?? []).length, 1, output);
+      assert.equal(isPidAlive(pid), false);
+    });
+    console.log("✓ a paused automatic retry budget retains the explicit recovery path in the menu");
 
     for (const answers of ["cancel", "wait", "recover,cancel"]) {
       await scenario({}, async ({ run, pid, data, recorded, backupFiles }) => {
