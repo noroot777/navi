@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import type { Page } from "playwright-core";
 
-export async function checkComputerPreviewLayout(page: Page, screenshots: string, changeTarget: () => void, nextTurn: () => void) {
+type ChangeTarget = (windowTitle?: string, application?: string) => void;
+
+export async function checkComputerPreviewLayout(page: Page, screenshots: string, changeTarget: ChangeTarget, nextTurn: () => void) {
   const computer = page.getByRole("complementary", { name: "电脑操作" });
   const liveImage = computer.getByRole("img", { name: "电脑操作实时画面" });
   const cases = [
@@ -51,6 +53,7 @@ export async function checkComputerPreviewLayout(page: Page, screenshots: string
   await page.setViewportSize({ width: 1600, height: 1000 });
   await page.evaluate(() => { (window as any).previewSize = { width: 640, height: 400 }; });
   await liveImage.waitFor();
+  await checkKeyboardAndRecovery(page, screenshots, changeTarget);
   const starts = await page.evaluate(() => (window as any).previewMessages.filter((message: any) => message.action === "start").length);
   await computer.getByRole("button", { name: "关闭操作预览" }).click();
   await computer.waitFor({ state: "hidden" });
@@ -75,9 +78,66 @@ export async function checkComputerPreviewLayout(page: Page, screenshots: string
   await computer.waitFor({ state: "hidden" });
   nextTurn();
   await liveImage.waitFor();
+  await computer.getByRole("button", { name: "关闭操作预览" }).focus();
   await page.keyboard.press("Escape");
   await computer.waitFor({ state: "hidden" });
   assert.equal(await page.evaluate(() => (window as any).previewMessages.at(-1).action), "stop");
   nextTurn();
   await liveImage.waitFor();
+}
+
+async function checkKeyboardAndRecovery(page: Page, screenshots: string, changeTarget: ChangeTarget) {
+  const computer = page.getByRole("complementary", { name: "电脑操作" });
+  const liveImage = computer.getByRole("img", { name: "电脑操作实时画面" });
+  const reply = page.getByRole("textbox", { name: "回复任务", exact: true });
+  await reply.focus();
+  await page.keyboard.press("Escape");
+  assert.equal(await reply.getAttribute("data-escapes"), "1");
+  assert.equal(await computer.count(), 1);
+  const openDialog = page.getByRole("button", { name: "确认操作", exact: true });
+  const dialog = page.getByRole("dialog", { name: "确认操作" });
+  await openDialog.click();
+  await dialog.waitFor();
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await computer.count(), 1);
+
+  await endCurrentPreview(page);
+  await openDialog.click();
+  await dialog.waitFor();
+  changeTarget("回车验证窗口");
+  await liveImage.waitFor();
+  await page.screenshot({ path: join(screenshots, "computer-review-modal-enter.png") });
+  await page.keyboard.press("Enter");
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await openDialog.getAttribute("data-confirmations"), "1");
+  assert.equal(await computer.count(), 1);
+
+  await endCurrentPreview(page);
+  await openDialog.click();
+  await dialog.waitFor();
+  changeTarget("Esc验证窗口", "com.apple.Calculator");
+  await liveImage.waitFor();
+  await page.screenshot({ path: join(screenshots, "computer-review-modal-escape.png") });
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await openDialog.getAttribute("data-confirmations"), "1");
+  assert.equal(await computer.count(), 1);
+  const previousSource = await liveImage.getAttribute("src");
+  await page.waitForFunction((source) => document.querySelector(".runtime-computer-target img")?.getAttribute("src") !== source, previousSource);
+
+  await endCurrentPreview(page);
+  changeTarget("回车验证窗口");
+  await liveImage.waitFor();
+  await page.screenshot({ path: join(screenshots, "computer-review-recovered.png") });
+  assert.equal(await computer.getByRole("button", { name: "关闭操作预览" }).count(), 1);
+}
+
+async function endCurrentPreview(page: Page) {
+  await page.evaluate(() => {
+    const request = (window as any).previewMessages.findLast((message: any) => message.action === "start");
+    window.dispatchEvent(new CustomEvent("navi:computer-preview", { detail: { id: request.id, state: "ended" } }));
+  });
+  await page.getByRole("complementary", { name: "电脑操作" }).waitFor({ state: "hidden" });
+  assert.equal(await page.evaluate(() => (window as any).previewMessages.at(-1).action), "stop");
 }
