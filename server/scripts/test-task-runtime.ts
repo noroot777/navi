@@ -303,8 +303,8 @@ try {
     assert.equal(activations.length, beforeClick + 1);
     assert.deepEqual(activations.at(-1), computerTarget);
     assert.equal(await page.getByRole("dialog").count(), 0);
-    await checkComputerPreviewLayout(page, screenshots, () => {
-      appendSessionTrace("runtime", "computer-session", computerTurn, { kind: "attachment", path: "/data/uploads/runtime-computer.png", computer: "cua_repl.js", computerTarget: { ...computerTarget, windowTitle: "另一个窗口" } });
+    await checkComputerPreviewLayout(page, screenshots, (windowTitle = "另一个窗口", application = computerTarget.application) => {
+      appendSessionTrace("runtime", "computer-session", computerTurn, { kind: "attachment", path: "/data/uploads/runtime-computer.png", computer: "cua_repl.js", computerTarget: { ...computerTarget, application, windowTitle } });
     }, () => {
       clearTurnActive("computer-session", computerTurn);
       computerTurn = new Date(Date.parse(computerTurn) + 1).toISOString();

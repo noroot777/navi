@@ -7,6 +7,7 @@ import { ServiceInspector } from "../../src/task-runtime/ServiceInspector.tsx";
 import { BrowserInspector } from "../../src/task-runtime/TaskBrowserPane.tsx";
 import { RuntimeActivityPreview } from "../../src/task-runtime/RuntimeActivityPreview.tsx";
 import { RuntimeAutoOpen } from "../../src/task-runtime/RuntimeAutoOpen.tsx";
+import { ConfirmDialog } from "../../src/task-detail/ConfirmDialog.tsx";
 import "../../src/styles/global.css";
 
 // 测试用 `?running=1` 模拟任务正在执行（服务端此时拒绝用户重启）。
@@ -23,6 +24,9 @@ const DESCRIPTORS: readonly InspectorDescriptor<TaskRuntime>[] = [
 // 「切换任务」：同一份 hook 先后服务两个任务（任务页换任务时 TaskDetail 不重挂，右栏按任务重挂）。
 function Fixture() {
   const [taskId, setTaskId] = useState("runtime");
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [confirmations, setConfirmations] = useState(0);
+  const [escapes, setEscapes] = useState(0);
   const runtime = useTaskRuntime(taskId);
   const { service, browser } = runtime.state;
   const descriptors = useMemo(() => surfaceTabWhenUsed(
@@ -32,15 +36,20 @@ function Fixture() {
   return <InspectorHost contextKey={`task:${taskId}`} descriptors={descriptors} context={runtime}>
     {({ openTab }) => <main style={{ position: "relative", display: "flex", flex: 1, minWidth: 0, flexDirection: "column", color: "var(--ink)", background: "var(--panel)" }}>
       <header style={{ padding: "14px 20px", borderBottom: "0.5px solid var(--line)", fontSize: 14 }}>额度控制台 · 浏览器验证
-        <button type="button" style={{ marginLeft: 12 }} onClick={() => setTaskId(taskId === "runtime" ? "other" : "runtime")}>切换任务</button></header>
+        <button type="button" style={{ marginLeft: 12 }} onClick={() => setTaskId(taskId === "runtime" ? "other" : "runtime")}>切换任务</button>
+        <button type="button" style={{ marginLeft: 12 }} data-confirmations={confirmations} onClick={() => setDialogOpen(true)}>确认操作</button></header>
       <section style={{ flex: 1, padding: "32px", overflow: "auto" }} aria-label="任务会话">
         <p style={{ color: "var(--faint)", fontSize: 12 }}>Codex</p>
         <h1 style={{ fontSize: 22, marginBlock: 12 }}>页面已完成，正在验证</h1>
         <p style={{ color: "var(--muted)", lineHeight: 1.9 }}>我已启动任务工作区的服务。接下来核对输入、保存与手机布局。</p>
       </section>
-      <div style={{ padding: "16px 20px" }}><textarea aria-label="回复任务" placeholder="继续这个任务…" style={{ width: "100%", resize: "none", padding: 12, border: "1px solid var(--line)", borderRadius: 12 }} /></div>
+      <div style={{ padding: "16px 20px" }}><textarea aria-label="回复任务" placeholder="继续这个任务…" data-escapes={escapes}
+        onKeyDown={(event) => { if (event.key === "Escape") setEscapes((count) => count + 1); }}
+        style={{ width: "100%", resize: "none", padding: 12, border: "1px solid var(--line)", borderRadius: 12 }} /></div>
       <RuntimeAutoOpen taskId={taskId} browser={browser} openTab={openTab} />
       <RuntimeActivityPreview runtime={runtime} />
+      {dialogOpen && <ConfirmDialog title="确认操作" message="确认这次验证操作？" confirmLabel="确认"
+        onClose={() => setDialogOpen(false)} onConfirm={() => { setConfirmations((count) => count + 1); setDialogOpen(false); }} />}
     </main>}
   </InspectorHost>;
 }
