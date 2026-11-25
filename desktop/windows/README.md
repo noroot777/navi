@@ -7,7 +7,7 @@
 ```bash
 npm run bundle:win-runtime                     # → desktop/windows/build/runtime（在 mac 上就能做）
 WIN_REMOTE_KEY=… npm run smoke:win-runtime:remote   # 送到测试机 192.168.1.187 上跑冒烟
-WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs --reclaim   # 只清上次没清完的对端目录
+WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs --reclaim   # 只清上次没清完的对端目录和本机暂存
 ```
 
 `scripts/bundle-runtime.mjs` 组装的目录与仓库同形（布局写在脚本顶部）：

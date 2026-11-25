@@ -2,7 +2,7 @@
 // 在开发机上把 bundle-runtime.mjs 做出的 Windows 运行时送到测试机（192.168.1.187）上跑 smoke-runtime.mjs。
 //
 //   WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs [运行时目录]   # 缺省 desktop/windows/build/runtime
-//   WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs --reclaim      # 只清上次没清完的对端目录
+//   WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs --reclaim      # 只清上次没清完的对端目录和本机暂存
 //
 // 通道是 scripts/win-remote 的那套（对端 Navi 的终端 API，见 docs/win-remote.md）。运行时有一两百 MB、不进 git，
 // 所以不走 win-remote sync：这边打一个 tar.gz、起一个只活这一次的 HTTP 服务（随机端口 + 随机路径），对端
@@ -38,9 +38,10 @@ const TIMEOUT_MS = Number(process.env.NAVI_WIN_SMOKE_TIMEOUT_MS || 30 * 60_000);
 // 记账时就把目标机器定下来：回收时按账上的地址去，不看那时的环境变量。
 const HOST = DEFAULT_HOST;
 
-if (process.argv[2] === "--reclaim") {
-  process.exit((await reclaimPending({ exec: rexec, closeSession })) ? 1 : 0);
-}
+// 上一次被打断留下的：对端目录（账本里属主已经不在的）和本机暂存。清不掉不拦这一次，账留着；--reclaim 只做这一步。
+const pending = await reclaimPending({ exec: rexec, closeSession });
+for (const directory of reclaimScratch(tmpdir(), "navi-win-remote-smoke-").removed) console.log(`✓ 收掉上一次留下的本机暂存 ${directory}`);
+if (process.argv[2] === "--reclaim") process.exit(pending ? 1 : 0);
 
 const runtime = resolve(process.argv[2] || join(HERE, "..", "build", "runtime"));
 if (!existsSync(join(runtime, ".runtime.json"))) {
@@ -48,9 +49,6 @@ if (!existsSync(join(runtime, ".runtime.json"))) {
   process.exit(2);
 }
 
-// 上一次被打断留下的：对端目录（账本里属主已经不在的）和本机暂存。清不掉不拦这一次，账留着。
-await reclaimPending({ exec: rexec, closeSession });
-for (const directory of reclaimScratch(tmpdir(), "navi-win-remote-smoke-").removed) console.log(`✓ 收掉上一次留下的本机暂存 ${directory}`);
 
 // 暂存目录、账、HTTP 服务都在下面那段 try 里才建出来，哪一步失败都走同一段 settle：建出来几样就收几样。
 const id = randomBytes(6).toString("hex");
