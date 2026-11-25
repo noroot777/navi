@@ -178,13 +178,13 @@ setInterval(() => fs.writeFileSync(${JSON.stringify(activity)}, fs.readFileSync(
     setOptions({ impact: { ...empty, resumes: [{ id: "team", title: "active team" }] } });
     assert.match(await drive("update", url()), /PROCEED/);
     process.kill(service.pid, 0);
-    assert.match(await drive("stale", url()), /WAITING 切换新版服务/);
+    assert.match(await drive("stale", url()), /WAITING 等待安全切换新版服务/);
     process.kill(service.pid, 0);
     assert.equal(existsSync(requests), false, "known team blockers must never request a lease");
     console.log("✓ 团队回合不阻止 Sparkle 换 app，服务接管延后且不弹强制中断选项");
 
     setOptions({ impact: empty, gatewayUnavailable: true });
-    assert.match(await drive("stale", url()), /WAITING 切换新版服务/);
+    assert.match(await drive("stale", url()), /WAITING 等待安全切换新版服务/);
     assert.equal(existsSync(requests), false, "disabled gateway without tasks must remain a side-effect-free wait");
     process.kill(service.pid, 0);
     setOptions({});
