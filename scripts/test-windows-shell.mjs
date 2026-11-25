@@ -159,6 +159,11 @@ try {
     registry = { command: `"C:\\Old\\Navi.exe" --start-server`, approvedFlag: 2 };
     assert.equal(item.reconcileAtLaunch(), "moved", "开着但 exe 换了位置：重写");
     assert.ok(pointsAt(registry.command, installed));
+    registry = { command: null, approvedFlag: null };
+    assert.equal(item.reconcileAtLaunch(), "restored", "想开着、卸载重装把 Run 项删了：补回");
+    assert.equal(registry.command, `"${installed}" --start-server`);
+    registry = { command: null, approvedFlag: 3 };
+    assert.equal(item.reconcileAtLaunch(), "kept", "任务管理器里停用过的，Run 项没了也不补");
     registry = { command: `"C:\\Old\\Navi.exe" --start-server`, approvedFlag: 3 };
     assert.equal(item.isEnabled(), false, "任务管理器里停用了按「没开」显示");
     assert.equal(item.reconcileAtLaunch(), "kept", "停用的不重写（会把停用标记清掉）");
@@ -166,7 +171,7 @@ try {
     assert.ok(pointsAt(`"c:/users/ME/appdata/local/programs/navi/navi.exe" --start-server`, "C:\\Users\\me\\AppData\\Local\\Programs\\Navi\\Navi.exe"), "引号、大小写、斜杠方向都不计较");
     assert.ok(pointsAt(`C:\\Navi\\Navi.exe --start-server`, "C:\\Navi\\Navi.exe"));
     assert.ok(!pointsAt(`"C:\\Navi\\Navi.exe.bak" --start-server`, "C:\\Navi\\Navi.exe"));
-    console.log("✓ 登录项：首次默认开、尊重关掉、换位置重写、任务管理器停用的不动、解压目录不登记");
+    console.log("✓ 登录项：首次默认开、尊重关掉、换位置重写、卸载重装后补回、任务管理器停用的不动、解压目录不登记");
   }
 
   // ── 交给服务的环境 ───────────────────────────────────────────────────────

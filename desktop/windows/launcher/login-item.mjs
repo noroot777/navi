@@ -7,6 +7,8 @@
 //     时整个 Job 一起收掉；Run 项由 explorer 拉起，起出来的服务没有这层牵连。
 //   · 用户看得见、关得掉：任务管理器「启动应用」页列的就是它，在那里停掉记在 StartupApproved\Run 里，
 //     这里读到就按「没开」显示，不替用户再打开。
+// 卸载（含重装时选了「先卸载」）会删掉 Run 项、留下数据根，所以用户的意思另记在 settings.json（loginWanted）：
+// 想开着、Run 项却没了，下次打开窗口时补回去；在任务管理器里停用过的（StartupApproved 还记着）照旧不动。
 // 只在登录那一刻跑一次，不守护：用户手动停掉服务（比如要让开发实例临时占用端口）时不会被立刻拉回来。
 // Run 项只在 Windows 上有，路径一律按 Windows 的规矩比（mac 上跑回归时也是）。
 import { win32 } from "node:path";
@@ -45,16 +47,17 @@ export function createLoginItem(cfg, { read = () => readRunEntry(RUN_VALUE), wri
     setEnabled(enabled) {
       if (!exe) throw new Error("不知道壳的可执行文件在哪，没法登记登录项。");
       write(enabled ? runCommand(exe) : null);
-      writeSettings(cfg, { loginConfigured: true });
+      writeSettings(cfg, { loginConfigured: true, loginWanted: enabled });
       if (state().enabled !== enabled) throw new Error(enabled ? "登录项没写进去（注册表写入后读回来不对）。" : "登录项没删掉。");
     },
-    /** 壳启动时调：装好后第一次打开默认开上；之后尊重菜单里的开关。开着、但 exe 换了位置时重写一份。 */
+    /** 壳启动时调：装好后第一次打开默认开上；之后尊重菜单里的开关。开着、但 exe 换了位置时重写一份；想开着却被卸载删了时补回。 */
     reconcileAtLaunch() {
       if (!isInstalledLocation(cfg, exe)) return "skipped";
       if (!readSettings(cfg).loginConfigured) { this.setEnabled(true); return "enabled"; }
       // 在任务管理器里停用过的不动：重写会把那个「已停用」一起清掉。
       const { entry, disabled } = state();
       if (entry.command && !disabled && !pointsAt(entry.command, exe)) { this.setEnabled(true); return "moved"; }
+      if (!entry.command && !disabled && readSettings(cfg).loginWanted === true) { this.setEnabled(true); return "restored"; }
       return "kept";
     },
   };

@@ -7,23 +7,26 @@
 //   { type: "route", route }                   页面在着时原地换路由（推一条历史、发一次 popstate，同 web 的 navigation.ts）
 //   { type: "reload" } { type: "window", size } { type: "front" } { type: "openExternal", url } { type: "openPath", path }
 //   { type: "dialog", id, title, detail, buttons }  弹原生对话框，壳回 { type: "dialogResult", id, index }
-//   { type: "menu", remote, login }            托盘菜单里两个勾此刻的样子
+//   { type: "menu", remote, login, switch }    托盘菜单里两个勾此刻的样子，和「切换到新版服务…」在不在（handover.mjs）
+//   { type: "updateCheck" | "updateInstall" }   查更新、装更新（updates.mjs，壳回 updateResult / updateProgress）
 // 壳发来的：started（主框架开始载一份文档）、report（页面表态：size:<setup|work> / titlebar / broken:<地址>；
 //   url:<地址> 是页面内换了地址，不换文档）、
 //   navigationBlocked（壳的导航前认人没过）、action（本地那一屏上的按钮）、menu（托盘菜单）、link（navi:// 链接）、dialogResult。
 import { mkdirSync } from "node:fs";
 import { runtimeId } from "./config.mjs";
 import { decideLink, parseLink } from "./deep-link.mjs";
+import { createHandover } from "./handover.mjs";
 import { isServing, mismatch, ours, probe as probeHealth } from "./health.mjs";
 import { activeHold, beginMaintenance } from "./maintenance.mjs";
 import { assessImpact, stopServer, widened } from "./restart.mjs";
 import { allowsOtherDevices, writeSettings } from "./settings.mjs";
+import { createUpdates } from "./updates.mjs";
 
 export const INSTANCE_COOKIE = "navi_instance";
 /** 新文档开始载入后最多等它多久表态。认约定的页面身份确认通常在一秒内；再久就是出事了。 */
 const PRESENT_TIMEOUT_MS = 15_000;
 
-export function createController({ cfg, send, launcher, loginItem, timing = {}, overrides = {} }) {
+export function createController({ cfg, send, launcher, loginItem, log = () => {}, updatesEnabled, timing = {}, overrides = {} }) {
   const deps = {
     probeMain: () => probeHealth(cfg.baseURL),
     probeWindow: () => probeHealth(cfg.windowURL),
@@ -38,6 +41,23 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
     guard: null, guardProbing: false, unreachable: 0, poll: null, starting: null,
     linkSerial: 0, welcoming: null, served: null, remoteBusy: false, dialogs: new Map(), dialogSerial: 0,
   };
+  const handover = createHandover({
+    cfg,
+    timing: { poll: t.handover ?? 5_000 },
+    overrides: overrides.handover,
+    ui: {
+      log, menu: () => pushMenu(), hold: (title, detail) => showInstalling(title, detail), release: () => loadHome(),
+      ask: (...args) => ask(...args), alert: (...args) => alert(...args),
+    },
+  });
+  const updates = createUpdates({
+    cfg, send, enabled: updatesEnabled, timing: t.updates,
+    ui: {
+      log, ask: (...args) => ask(...args), alert: (...args) => alert(...args), done: () => loadHome(),
+      progress: (version, percent) => showInstalling(`正在下载 Navi ${version}`,
+        `${Number.isFinite(percent) ? `${percent}%，` : ""}下完自动安装，Navi 会自己重新打开。在跑的服务和任务都不停。`),
+    },
+  });
 
   const sameOrigin = (url) => {
     try { return new URL(url).origin === new URL(cfg.windowURL).origin; } catch { return false; }
@@ -171,6 +191,7 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
   function observe(instance) {
     state.served = instance;
     pushMenu();
+    handover.observe(instance);
   }
 
   /** 端口上不再是认过的那一份：页面连同它的轮询、SSE 一起撤掉（一个请求都不再发给新来的那份），记下路由，回到 loadHome 认一遍。 */
@@ -356,6 +377,7 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
         enabled: cfg.isLocal && !state.remoteBusy,
       },
       login: { checked: loginEnabled === true, enabled: Boolean(cfg.shellExe) && loginEnabled !== null },
+      switch: handover.menu(),
     });
   }
 
@@ -487,6 +509,8 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
     toggleRemote: () => void toggleRemote(),
     toggleLogin: () => void toggleLogin(),
     about: () => void about(),
+    checkUpdates: () => updates.checkNow(),
+    switchRuntime: () => handover.reconsider(),
   };
 
   function receive(message) {
@@ -497,6 +521,7 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
       case "action": return state.actions.get(message.id)?.();
       case "menu": return menuActions[message.id]?.();
       case "link": return void openLink(String(message.url ?? ""));
+      case "updateResult": case "updateProgress": return updates.receive(message);
       case "dialogResult": {
         const resolve = state.dialogs.get(message.id);
         state.dialogs.delete(message.id);
@@ -518,8 +543,13 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
         }
         refreshLogin();
       }, 0);
+      updates.start();
     },
-    stop() { resetPageConnection(); },
+    stop() {
+      resetPageConnection();
+      updates.stop();
+      handover.stop();
+    },
     state,
   };
 }

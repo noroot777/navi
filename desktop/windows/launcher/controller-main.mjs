@@ -49,7 +49,7 @@ const send = (message) => {
   log(`→ ${message.type} ${describe(message)}`.trimEnd());
   process.stdout.write(`${JSON.stringify(message)}\n`);
 };
-const controller = createController({ cfg, send, launcher, loginItem: createLoginItem(cfg) });
+const controller = createController({ cfg, send, launcher, log, loginItem: createLoginItem(cfg) });
 
 process.on("uncaughtException", (error) => { log(`uncaught ${error.stack ?? error}`); });
 process.on("unhandledRejection", (error) => { log(`unhandled ${error?.stack ?? error}`); });
