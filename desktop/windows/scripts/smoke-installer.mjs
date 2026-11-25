@@ -40,6 +40,9 @@ export async function smokeInstaller(installer, { runtime } = {}) {
   const home = join(local, "Navi");
   assert.equal(regValue(UNINSTALL_KEY, "UninstallString"), null, "这台机器上已经装着 Navi：不覆盖用户的安装");
   assert.ok(!existsSync(dir), `${dir} 已经在了：不覆盖`);
+  // 收尾失败时要删的这几样，开工前都得不在：那样收尾删到的就只会是这一次装上的
+  assert.equal(regValue(PROTOCOL_ROOT, "URL Protocol"), null, "navi:// 已经登记着（别处的 Navi）：不覆盖");
+  for (const shortcut of shortcuts()) assert.ok(!existsSync(shortcut), `${shortcut} 已经在了：不覆盖`);
   const homeExisted = existsSync(home);
   const marker = join(home, "data", `smoke-installer-${process.pid}.txt`);
   let installed = false;
@@ -47,8 +50,8 @@ export async function smokeInstaller(installer, { runtime } = {}) {
   let failed = false;
   try {
     // ── 1. 装 ──
-    installed = true; // 退出码不是 0 也可能装了一半：收尾一样要卸
     const install = spawnSync(resolve(installer), ["/S"], { windowsHide: true, timeout: 10 * 60_000 });
+    installed = !install.error || install.error.code === "ETIMEDOUT"; // 起来了（退出码不是 0 也可能装了一半）收尾就要卸
     assert.equal(install.status, 0, `安装包退出码 ${install.status ?? install.error?.message}`);
     const exe = join(dir, "Navi.exe");
     assert.ok(existsSync(exe), `没装到 ${dir}`);
@@ -106,6 +109,14 @@ export async function smokeInstaller(installer, { runtime } = {}) {
   }
 }
 
+/** 安装包会建的两处快捷方式（开始菜单、静默安装时的桌面）。 */
+function shortcuts() {
+  return [
+    join(process.env.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs", "Navi.lnk"),
+    join(process.env.USERPROFILE ?? "", "Desktop", "Navi.lnk"),
+  ];
+}
+
 /** 冒烟中途失败时卸掉这次装上的：先让卸载程序卸，卸不了就直接删目录、登记和快捷方式。返回没收干净的那些。 */
 function removeInstall(dir, { uninstall }) {
   const problems = [];
@@ -115,15 +126,14 @@ function removeInstall(dir, { uninstall }) {
     if (result.status !== 0) problems.push(`卸载程序退出码 ${result.status ?? result.error?.message}，改成直接删`);
   }
   try { rmSync(dir, { recursive: true, force: true }); } catch (error) { problems.push(`删不掉 ${dir}：${error.message}`); }
-  for (const key of [UNINSTALL_KEY, PROTOCOL_ROOT]) {
-    if (regValue(key, key === UNINSTALL_KEY ? "UninstallString" : "URL Protocol") === null) continue;
+  // 开工前它们都不在（见 smokeInstaller 开头），这时在的就是这一次装上的；登记还要指着这次的安装目录才删
+  const ours = (value) => Boolean(value?.toLowerCase().includes(dir.toLowerCase()));
+  for (const [key, value] of [[UNINSTALL_KEY, regValue(UNINSTALL_KEY, "UninstallString")], [PROTOCOL_ROOT, regValue(PROTOCOL_KEY)]]) {
+    if (!ours(value)) continue;
     const removed = spawnSync("reg.exe", ["delete", key, "/f"], { encoding: "utf8", windowsHide: true });
     if (removed.status !== 0) problems.push(`删不掉注册表 ${key}`);
   }
-  for (const shortcut of [
-    join(process.env.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs", "Navi.lnk"),
-    join(process.env.USERPROFILE ?? "", "Desktop", "Navi.lnk"),
-  ]) {
+  for (const shortcut of shortcuts()) {
     try { rmSync(shortcut, { force: true }); } catch (error) { problems.push(`删不掉 ${shortcut}：${error.message}`); }
   }
   return problems;

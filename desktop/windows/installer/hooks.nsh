@@ -8,8 +8,8 @@
 ;   · 动安装目录之前，先等壳拉起的控制器（安装目录里那份 node 跑的 controller-main.mjs）退干净。壳一被关掉它就自己
 ;     退，但比安装包开始拷文件慢一拍，那一下 node.exe 还占着，覆盖会失败。别的程序还用着安装目录里的文件就不动手，
 ;     说清是谁；绝不碰外置服务和 agent —— 它们跑在 %LOCALAPPDATA%\Navi\runtimes 下发布出来的那份里，不在这里。
-;     控制器正在做完一趟换服务（立着「正在交接」的牌子）时也不收它：它可能是唯一会把新版服务起起来的那一个，
-;     等它做完；等不到就这次不动手、说清楚（installdir.ps1 退出码 6）。
+;     控制器从来不强杀：它可能正在做完一趟换服务、是唯一会把新版服务起起来的那一个，这边看不出来；等它自己退，
+;     等不到就这次不动手、说清楚（installdir.ps1 退出码 6）。
 ;   · 覆盖安装前先删掉旧的 runtime\：运行时内容清单要和目录一字不差，旧版多出来的文件留着，新版第一次发布就校验不过。
 ;   · 卸载时勾了「同时删除 Navi 的数据」才删，而且只在没有任何进程还在用那块地时删：先整块改名（有文件被打开就改不了），
 ;     改成了再删。服务还在跑就不删、说清楚，卸载不停服务。
@@ -37,7 +37,7 @@ FunctionEnd
 !macro NaviReleaseInstallDir
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   ${If} ${FileExists} "$INSTDIR\runtime\node\node.exe"
-    !insertmacro NaviScript Release '-InstallDir "$INSTDIR" -NaviHome "$LOCALAPPDATA\Navi"'
+    !insertmacro NaviScript Release '-InstallDir "$INSTDIR"'
     ${If} $0 == 6
       IfSilent +2
       MessageBox MB_ICONEXCLAMATION "$(naviHandoverBusy)"

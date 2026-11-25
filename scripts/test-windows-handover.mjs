@@ -515,12 +515,9 @@ try {
     const shutdown = controller.shutdown().then(() => { finished = true; events.push("shutdown"); });
     await sleep(40);
     assert.equal(finished, false, "这一趟没做完不退");
-    const mark = join(dirname(r.cfg.settingsFile), "handover-active.json");
-    assert.equal(JSON.parse(readFileSync(mark, "utf8")).pid, process.pid, "收尾期间立着「正在交接」的牌子：安装包、卸载器看到就不强杀它");
     events.push("stopped");
     open();
     await shutdown;
-    assert.ok(!existsSync(mark), "做完撤牌子");
     assert.ok(starts > before, "旧服务停了：退出前把新版起起来");
     assert.ok(lines.some((line) => line.includes("先把新版服务起起来")) && lines.some((line) => line.includes("新版服务起来了")),
       "是退出这一步自己起的新版，不靠窗口那边重连");
@@ -541,7 +538,6 @@ try {
     await waitFor("起来时连一次", () => idleStarts === 1);
     await quiet.shutdown();
     assert.equal(idleStarts, 1, "没在切换：直接退，不碰服务");
-    assert.ok(!existsSync(join(dirname(idle.cfg.settingsFile), "handover-active.json")), "没在切换：不立牌子");
 
     const failing = rig("shutdown-note");
     const sentNotes = [];

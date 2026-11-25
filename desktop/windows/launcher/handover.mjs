@@ -173,7 +173,9 @@ export function createHandover({ cfg, ui, busy = () => null, timing = {}, overri
       return { kind: "changed", why: other };
     }
     setPhase("switching");
-    ui.hold("正在切换到新版 Navi 服务", "在跑的任务不停，新版服务起来后接着接管它们。");
+    ui.hold("正在切换到新版 Navi 服务", force
+      ? "你确认过会被打断的那些会停下；别的在跑的任务不停，新版服务起来后接着接管它们。"
+      : "在跑的任务不停，新版服务起来后接着接管它们。");
     state.inflight = run(instance, compat, force ? confirmed : undefined, force);
     const outcome = await state.inflight;
     state.inflight = null;
