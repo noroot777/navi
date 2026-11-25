@@ -1,0 +1,169 @@
+<!doctype html>
+<!-- 壳自己的那一屏（对应 mac 的 OfflineView / FirstRunView）：页面载不进来时说原因，数据根还空着时问数据从哪来。
+     画哪一屏由控制器定（desktop/windows/launcher/controller.mjs 的 show），这里只照着画：载进来时取一次，之后收「screen」事件。
+     loader.svg、icon.svg 构建时从 docs/logo 拷进来（shell/build.rs），不进仓库。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>Navi</title>
+<style>
+  :root {
+    --chrome: #efeff0; --panel: #ffffff; --raised: #f6f6f6; --line: #e4e4e4; --ink: #1b1b1b;
+    --muted: #5c5c5e; --faint: #9c9d9f; --red: #d93d4c; --hover: #ededed; --brand: #000000;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --chrome: #151518; --panel: #202023; --raised: #262729; --line: #313134; --ink: #e8e8ea;
+      --muted: #a2a3a8; --faint: #717277; --red: #ef6b7b; --hover: #303033; --brand: #0c0c0e;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--chrome); color: var(--ink); overflow: hidden; user-select: none; cursor: default;
+    font: 400 13px/1.6 "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  }
+  [hidden] { display: none !important; }
+  .selectable { user-select: text; cursor: auto; }
+  button { font: inherit; color: inherit; }
+
+  /* 起不来、被占着、正在启动 */
+  #offline { height: 100%; display: flex; align-items: center; justify-content: center; padding: 28px; }
+  #offline .stack { width: min(440px, 100%); display: flex; flex-direction: column; align-items: center; text-align: center; margin-top: -24px; }
+  #offline .mark { width: 128px; height: 128px; border-radius: 30px; border: 1px solid var(--line); background: var(--panel);
+    display: flex; align-items: center; justify-content: center; margin-bottom: 28px; }
+  #offline .mark svg { width: 80px; height: 80px; }
+  #offline .mark .navi-mark__needle { animation-play-state: paused; }
+  #offline .mark.busy .navi-mark__needle { animation-play-state: running; }
+  @media (prefers-reduced-motion: reduce) { #offline .mark .navi-mark__needle { animation: none !important; } }
+  #offline h1 { font-size: 22px; font-weight: 600; margin: 0 0 10px; line-height: 1.3; }
+  #offline .detail { color: var(--muted); white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 46vh; overflow: auto; }
+  #offline .actions { display: flex; gap: 8px; margin-top: 22px; }
+  .push { min-width: 88px; padding: 6px 16px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; font-weight: 500; }
+  .push:hover { background: var(--hover); }
+  .push.primary { background: #000; border-color: #000; color: #fff; }
+  .push.primary:hover { background: #262626; }
+  @media (prefers-color-scheme: dark) { .push.primary { background: #fff; border-color: #fff; color: #000; } .push.primary:hover { background: #e4e4e4; } }
+
+  /* 首启：左边是 Navi 和首次配置要走的几站，右边问数据从哪来 */
+  #first { height: 100%; display: grid; grid-template-columns: 340px 1fr; background: var(--panel); }
+  #first .brand { background: var(--brand); color: #fff; padding: 56px 40px 40px; display: flex; flex-direction: column; justify-content: space-between; }
+  #first .brand img { width: 44px; height: 44px; margin-bottom: 22px; display: block; }
+  #first .brand .name { font-size: 30px; font-weight: 600; line-height: 1.2; margin-bottom: 10px; }
+  #first .brand .pitch { color: rgba(255,255,255,.62); font-size: 14px; line-height: 1.75; }
+  #first .steps { display: flex; flex-direction: column; gap: 14px; }
+  #first .step { display: flex; align-items: center; gap: 12px; color: rgba(255,255,255,.45); }
+  #first .step i { width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; }
+  #first .step i::before { content: ""; width: 8px; height: 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,.4); }
+  #first .step.current { color: #fff; font-weight: 500; }
+  #first .step.current i::before { background: #fff; border: 0; }
+  #first .column { padding: 0 56px; display: flex; flex-direction: column; justify-content: center; position: relative; }
+  #first h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; line-height: 1.3; }
+  #first .note { color: var(--muted); margin: 0 0 28px; }
+  .choice { display: flex; align-items: center; gap: 14px; width: 100%; text-align: left; padding: 14px 16px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--raised); cursor: pointer; }
+  .choice:hover:not(:disabled) { background: var(--hover); }
+  .choice:disabled { cursor: default; }
+  .choice .text { flex: 1; }
+  .choice .title { font-weight: 600; font-size: 14px; }
+  .choice .sub { color: var(--muted); }
+  .spinner { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--ink); animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #first .problem { color: var(--red); margin: 16px 0 0; white-space: pre-wrap; }
+  #first .location { position: absolute; left: 56px; right: 56px; bottom: 40px; color: var(--faint); font-size: 12px; word-break: break-all; }
+</style>
+</head>
+<body>
+<section id="offline" hidden>
+  <div class="stack">
+    <div class="mark" aria-hidden="true"></div>
+    <h1 class="selectable"></h1>
+    <p class="detail selectable"></p>
+    <div class="actions"></div>
+  </div>
+</section>
+
+<section id="first" hidden>
+  <aside class="brand">
+    <div>
+      <img alt="" src="icon.svg">
+      <div class="name">Navi</div>
+      <div class="pitch">把活派给本机的 claude、codex，<br>进度、审查、验收都在这一处。</div>
+    </div>
+    <div class="steps">
+      <div class="step current"><i></i>数据</div>
+      <div class="step"><i></i>供应商</div>
+      <div class="step"><i></i>执行器</div>
+      <div class="step"><i></i>项目</div>
+    </div>
+  </aside>
+  <main class="column">
+    <h1>数据从哪儿来</h1>
+    <p class="note">只在第一次打开时问这一次。</p>
+    <button class="choice" id="fresh">
+      <span class="text"><span class="title">全新开始</span><br><span class="sub">从空白开始，接着配好供应商、执行器和项目。</span></span>
+      <span class="spinner" hidden></span>
+    </button>
+    <p class="problem selectable" hidden></p>
+    <div class="location selectable"></div>
+  </main>
+</section>
+
+<script>
+  const tauri = window.__TAURI__;
+  const offline = document.getElementById("offline");
+  const first = document.getElementById("first");
+  const press = (id) => tauri.core.invoke("shell_action", { id });
+  // 那个标是 loader.svg 原样嵌进来的：正在启动时指针转，载不进来、被占着时停着（同 mac 的 OfflineBrandView）。
+  const mark = offline.querySelector(".mark");
+  fetch("loader.svg").then((answer) => answer.text()).then((svg) => { mark.innerHTML = svg; }).catch(() => {});
+
+  function render(screen) {
+    const kind = screen && screen.kind;
+    offline.hidden = kind !== "offline";
+    first.hidden = kind !== "firstRun";
+    if (kind === "offline") renderOffline(screen);
+    if (kind === "firstRun") renderFirst(screen);
+  }
+
+  function renderOffline(screen) {
+    offline.querySelector("h1").textContent = screen.title || "";
+    const detail = offline.querySelector(".detail");
+    detail.textContent = screen.detail || "";
+    detail.hidden = !screen.detail;
+    mark.classList.toggle("busy", Boolean(screen.busy));
+    const row = offline.querySelector(".actions");
+    row.replaceChildren(...(screen.actions || []).map((action, index, all) => {
+      const button = document.createElement("button");
+      button.className = index === all.length - 1 ? "push primary" : "push";
+      button.textContent = action.title;
+      button.onclick = () => press(action.id);
+      return button;
+    }));
+    row.hidden = row.children.length === 0;
+    const last = row.lastElementChild;
+    if (last) last.focus();
+  }
+
+  function renderFirst(screen) {
+    const fresh = document.getElementById("fresh");
+    const busy = Boolean(screen.busy);
+    fresh.disabled = busy;
+    fresh.querySelector(".sub").textContent = busy ? screen.busy : "从空白开始，接着配好供应商、执行器和项目。";
+    fresh.querySelector(".spinner").hidden = !busy;
+    const problem = first.querySelector(".problem");
+    problem.textContent = screen.problem || "";
+    problem.hidden = !screen.problem;
+    first.querySelector(".location").textContent = screen.dataPath ? `数据放在 ${screen.dataPath}` : "";
+  }
+
+  document.getElementById("fresh").onclick = () => press("fresh");
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !first.hidden && !document.getElementById("fresh").disabled) press("fresh");
+  });
+  tauri.event.listen("screen", (event) => render(event.payload)).then(() => tauri.core.invoke("shell_screen")).then(render);
+</script>
+</body>
+</html>
