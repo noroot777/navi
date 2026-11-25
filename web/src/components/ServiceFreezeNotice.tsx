@@ -16,7 +16,7 @@ function shown(freeze: Freeze | undefined): Shown {
  * 服务冻着的时候（准备重启 / 换新版服务，server/src/restart-freeze.ts）新回合、新终端都在等它解冻：
  * 点了「运行」却迟迟不动，没有这一句就只像卡住了。开页时从 `/api/health` 取一次，之后跟
  * `service.freeze` 事件；断线重连再取一次（解冻那一刻可能正好断着）。到了期限自己收起，不等事件。
- * 取 health 期间来过事件就不认那份答复：它是事件之前采的样，晚到也不能把新状态盖回去。
+ * 取 health 期间来过事件、或者后面又发了一次 health，就不认那份答复：它是更早采的样，晚到也不能把新状态盖回去。
  */
 export function ServiceFreezeNotice() {
   const [freeze, setFreeze] = useState<Shown>(null);
@@ -24,12 +24,14 @@ export function ServiceFreezeNotice() {
   useEffect(() => {
     let alive = true;
     let events = 0;
+    let asked = 0;
     const refetch = () => {
       const before = events;
+      const mine = ++asked;
       void fetch("/api/health", { cache: "no-store" })
         .then((response) => (response.ok ? response.json() : null))
         .then((health: { freeze?: Freeze } | null) => {
-          if (alive && health && events === before) setFreeze(shown(health.freeze));
+          if (alive && health && events === before && mine === asked) setFreeze(shown(health.freeze));
         })
         .catch(() => {});
     };

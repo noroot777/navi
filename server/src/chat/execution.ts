@@ -1,4 +1,5 @@
 import { mkdtemp, rm, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
@@ -111,8 +112,11 @@ export async function invokeChat(member: ChatMember, owner: string | null, promp
       env: withoutTurnIdentity({ ...env }),
     });
     signal.addEventListener("abort", abort, { once: true });
+    // 编号是这一次执行的，不是成员的：同一个成员前台回复、后台摘要可以同时跑，前一份结束后一份接上也不是同一份；
+    // 重启确认按编号比「多出了谁」（restart-freeze.ts）。
+    const run = randomUUID();
     releaseShutdown = registerShutdownCleanup(
-      () => [{ kind: "chat", id: member.id, label: `聊天执行 ${member.agentType}`, projectId }], abort,
+      () => [{ kind: "chat", id: run, label: `聊天执行 ${member.agentType}`, projectId }], abort,
     );
     const consume = async () => {
       let text = "";

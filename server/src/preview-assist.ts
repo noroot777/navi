@@ -95,11 +95,19 @@ type Executor = Awaited<ReturnType<typeof resolveExecutorFor>>;
 /**
  * 已经开工的作业（等过冻结的那些）。进度只在内存里，重启一下就整份丢了，所以它们算「随服务一起关掉」的
  * 资源，摆进重启确认（restart-freeze.ts 的快照）。还在等冻结的不算：那时候它还什么都没起。
+ *
+ * 说了「会关掉」就得真关掉：服务退出时下面那个 finally 跑不到，而智能体自成进程组、父进程退了它照样跑，
+ * 新起的页面又查不到、停不了它。所以退出时把正在跑的那一轮杀掉（同「停止」按钮那一下）。
  */
 const working = new Map<Job, string>();
 registerShutdownCleanup(
   () => [...working].map(([job, cwd]) => ({ kind: "preview-assist", id: job.state.jobId, label: `AI 协助 ${cwd}`, projectId: job.state.projectId })),
-  () => {},
+  () => {
+    for (const job of working.keys()) {
+      job.canceled = true;
+      try { job.handle?.kill(); } catch { /* 已经退了 */ }
+    }
+  },
 );
 
 async function loop(

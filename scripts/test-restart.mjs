@@ -314,8 +314,10 @@ writeFileSync(stubborn, `import { writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 process.on("SIGTERM", () => {});
 createServer((req, res) => {
+  // 认 ?shutdown=1、不认冻结的那种老服务:随服务关掉的终端也要如实列出来
+  const shutdown = req.url?.includes("shutdown=1") ? ',"shutdown":{"version":1,"resources":[{"kind":"terminal","id":"t","label":"终端 old"}]}' : "";
   const body = req.url?.startsWith("/api/restart-impact")
-    ? '{"survives":[],"resumes":[],"interrupted":[],"mcpDisrupted":[]}'
+    ? '{"survives":[],"resumes":[],"interrupted":[],"mcpDisrupted":[]' + shutdown + '}'
     : JSON.stringify({ ok: true, pid: process.pid });
   res.writeHead(200, { "content-type": "application/json" });
   res.end(body);
@@ -342,6 +344,7 @@ await sleep(200);
 if (blockedOutput.includes("已就绪")) fail("旧进程还占着端口,却打印了「已就绪」", blockedOutput);
 // 它的判据里没有冻结协议号 = 老版本服务:要如实说一句,不能当成冻住了。
 if (!blockedOutput.includes("这一版服务端没有重启前冻结")) fail("老版本服务没有冻结关口时要如实说一句", blockedOutput);
+if (!blockedOutput.includes("会随服务一起关掉 1 个:终端 old")) fail("不认冻结的老服务也要把随服务关掉的终端列出来", blockedOutput);
 if (!blockedOutput.includes("仍有一个 Navi 在应答")) {
   fail("失败信息没说清「旧的没下线」这个成因", blockedOutput);
 }

@@ -29,6 +29,7 @@ import { acknowledgeTaskStart } from "../task-start-receipt.js";
 import { runEnvForOwner } from "../auth/run-env.js";
 import { applyAutoTitle } from "../auto-title-apply.js";
 import { waitServiceThaw } from "../runtime-handover-state.js";
+import { registerShutdownCleanup } from "../shutdown-resources.js";
 
 // duet 的所有权与 single 共用 runs.ts 那把单飞锁。这里原来是个模块内的 `running`
 // Set:调用方看不见它,于是 /run、/fire、/retry、scheduler 都能声称「已启动」而第二次
@@ -421,9 +422,15 @@ async function genDuetTitle(
     const env = await runEnvForOwner(runOwner, ex.type);
     await waitServiceThaw(); // 服务准备重启时先不拉起(restart-freeze.ts)
     const handle = ex.run({ prompt: P.title(said), cwd, env });
+    // 起名是尽力而为,重启时不值得摆进确认(名单里不列),但进程得跟着服务一起走:服务一退没人读它、也没人杀得到它。
+    const release = registerShutdownCleanup(() => [], () => { try { handle.kill(); } catch { /* 已经退了 */ } });
     let text = "";
-    for await (const event of handle.events) {
-      if (event.kind === "text") text += event.text;
+    try {
+      for await (const event of handle.events) {
+        if (event.kind === "text") text += event.text;
+      }
+    } finally {
+      release();
     }
     const line = text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
     const newTitle = line.replace(/^标题[:：]\s*/, "").replace(/[`*"「」]/g, "").trim().slice(0, 20);

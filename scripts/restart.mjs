@@ -82,8 +82,16 @@ const say = (line) => process.stdout.write(`${line}\n`);
 
 // 单实例锁的路径口径跟 server 一致(NAVI_DB 覆盖,默认 data 下的库),否则找错文件。
 const LOCK_FILE = lockFileFor(REPO);
-const impact = () => queryImpact(PORT, LOCK_FILE);
+const impact = () => queryImpact(PORT, LOCK_FILE, { includeShutdown: true });
 const freezeSend = restartFreezeSender(PORT, LOCK_FILE);
+
+/** 随服务一起关掉的终端、聊天、AI 协助、预览试跑:不为它们中止(见下刀前那段),只如实列出来。 */
+function sayClosing(resources) {
+  const closing = Array.isArray(resources) ? resources : [];
+  if (closing.length) {
+    say(`  ⚠ 会随服务一起关掉 ${closing.length} 个:${closing.slice(0, 6).map((r) => r.label || r.kind).join("、")}${closing.length > 6 ? " 等" : ""}`);
+  }
+}
 
 /** 手上拿着的冻结(第 2 步下刀前后)。中止的每条出路都先放掉它:服务还活着,别让它冻到期才解。 */
 let freeze = null;
@@ -201,6 +209,7 @@ if (old.length) {
     if (noVerdictReason(data) !== null) break;
     if (!supportsRestartFreeze(data)) {
       say("  ⚠ 这一版服务端没有重启前冻结:下面的判据是即时问的,从这一刻到停下之间新起的任务不在里面,仍可能被打断。");
+      sayClosing(data.shutdown?.resources);
       break;
     }
     const got = await acquireRestartFreeze(freezeSend);
@@ -255,10 +264,7 @@ if (old.length) {
     if (extra.length) say(`  ⚠ FORCE:冻结之后又多了 ${extra.length} 个会被打断的任务,一并打断。`);
     // 随服务一起关掉的终端、聊天、AI 协助、预览试跑:这条脚本不为它们中止 —— 它常常就是在 Navi 自己的终端里
     // 跑的,拦下就永远重启不了;如实列出来,别让人事后才发现终端没了。
-    const closing = renewed.impact.shutdown?.resources ?? [];
-    if (closing.length) {
-      say(`  ⚠ 会随服务一起关掉 ${closing.length} 个:${closing.slice(0, 6).map((r) => r.label || r.kind).join("、")}${closing.length > 6 ? " 等" : ""}`);
-    }
+    sayClosing(renewed.impact.shutdown?.resources);
   }
   // 走到这儿时判据一定是问到了的(问不到 impactOrAbort 已经中止);保护名单怎么用见 killListeners。
   let how = "signal";

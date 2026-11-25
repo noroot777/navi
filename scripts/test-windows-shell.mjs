@@ -172,6 +172,10 @@ try {
     assert.equal(await renewFreeze(renewing(now({ shutdown: { version: 1, resources: [{ kind: "terminal", id: "t", label: "终端 zsh" }] } })), agreed),
       "确认之后又多了会被打断的：终端 zsh", "随服务关掉的也算");
     assert.match(await renewFreeze(renewing({}), agreed), /核对不了/, "续期没带此刻的名单：核对不了就不下刀");
+    const chat = (id) => ({ kind: "chat", id, label: "聊天执行 claude" });
+    const oneChat = { ...agreed, items: disruptedItems({ ...impact([]), shutdown: { version: 1, resources: [chat("run-1")] } }) };
+    assert.equal(await renewFreeze(renewing({ impact: { ...impact([]), shutdown: { version: 1, resources: [chat("run-1"), chat("run-2")] } } }), oneChat),
+      "确认之后又多了会被打断的：聊天执行 claude", "同一个成员又起了一份执行：按每次执行的编号比，多出来的那份看得见");
     assert.deepEqual(disruptedItems(now({ shutdown: { version: 1, resources: [{ kind: "chat", id: "c", label: "聊天 x" }] } }).impact).map((item) => item.why),
       ["会被判失败", "会随服务一起关掉"], "随服务一起关掉的终端、聊天也摆进确认");
 

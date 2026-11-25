@@ -121,7 +121,7 @@ export class TerminalSessionManager {
     const reservation = this.capacity.reserve(projectId, commandId, replaceLive);
     let finish!: () => void;
     const done = new Promise<void>((resolve) => { finish = resolve; });
-    const creation = { projectId, reservation, controller: new AbortController(), done, finish };
+    const creation = { id: id(), projectId, reservation, controller: new AbortController(), done, finish };
     this.creations.add(creation);
     return creation;
   }

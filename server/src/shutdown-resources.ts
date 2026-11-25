@@ -1,5 +1,6 @@
 export type ShutdownResource = {
   kind: string;
+  /** 这一份运行自己的编号，从登记到注销不变、同一 kind 下不复用：重启确认按 `kind:id` 比「多出了谁」。 */
   id: string;
   label: string;
   projectId?: string;
