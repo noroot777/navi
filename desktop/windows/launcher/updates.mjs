@@ -9,6 +9,9 @@
 // 没收到一个字节（壳收到字节就报，有没有总长度都报），就叫壳收掉那一趟。下载那一屏的「取消」走同一条路。
 // 取消是壳裁决的（updateCancel → updateCancelResult）：它说收掉了才放开状态、页面回来；它说已经在装，就照实
 // 摆「正在安装」，不说取消了。请求号带着这一代控制器的标识：重开的控制器认不成上一代那一趟的答复。
+// 整趟只有一个最终期限（t.install，再加 t.settle 的余量），哪个阶段都消耗不掉它：到点还在下就叫壳收掉，再到余量用完
+// 不管停在哪个阶段都收场。收场分两种说法：壳认过的结局（没装上 / 取消了）和结果不明（壳没答、或者停在「正在安装」
+// —— 安装程序可能还在跑；壳在它结束前不会开始第二次安装）。
 // 别处占着窗口那一屏（换运行时、按新设置重启服务，controller.mjs 的 occupied）时不下。
 import { randomBytes } from "node:crypto";
 import { readSettings, writeSettings } from "./settings.mjs";
@@ -19,9 +22,10 @@ export const CHECK_LIMIT_MS = 60_000;
 export const INSTALL_LIMIT_MS = 16 * 60_000;
 export const STALL_LIMIT_MS = 90_000;
 export const CANCEL_REPLY_MS = 15_000;
+export const SETTLE_GRACE_MS = 30_000;
 
 export function createUpdates({ cfg, send, ui, enabled = process.env.NAVI_WIN_UPDATES === "1", busy = () => null, timing = {} }) {
-  const t = { first: FIRST_CHECK_MS, interval: INTERVAL_MS, check: CHECK_LIMIT_MS, install: INSTALL_LIMIT_MS, stall: STALL_LIMIT_MS, cancelReply: CANCEL_REPLY_MS, ...timing };
+  const t = { first: FIRST_CHECK_MS, interval: INTERVAL_MS, check: CHECK_LIMIT_MS, install: INSTALL_LIMIT_MS, stall: STALL_LIMIT_MS, cancelReply: CANCEL_REPLY_MS, settle: SETTLE_GRACE_MS, ...timing };
   const state = { serial: 0, generation: randomBytes(4).toString("hex"), pending: new Map(), timer: null, busy: false, installing: null, download: null };
 
   /** 发给壳、等它回话；给了 limitMs，到了还没回就按 { error, timedOut } 收场。返回 { id, done, settle }。 */
@@ -53,7 +57,10 @@ export function createUpdates({ cfg, send, ui, enabled = process.env.NAVI_WIN_UP
       return;
     }
     if (state.installing) {
-      if (manual) await ui.alert("正在更新", `正在下载 Navi ${state.installing}，下载那一屏上可以取消。`);
+      const detail = state.download?.phase === "installing"
+        ? `正在安装 Navi ${state.installing}，装完会自己重新打开。`
+        : `正在下载 Navi ${state.installing}，下载那一屏上可以取消。`;
+      if (manual) await ui.alert("正在更新", detail);
       return;
     }
     if (state.busy) return;
@@ -97,18 +104,27 @@ export function createUpdates({ cfg, send, ui, enabled = process.env.NAVI_WIN_UP
     state.installing = version;
     const download = { ...request({ type: "updateInstall", version }), version, received: 0, percent: null, phase: "downloading", stall: null, reply: null, aborting: null };
     state.download = download;
-    // 到了总时限：还在下就叫壳收掉；已经在装（取消不了）还没有结局，就不再等它了。
-    const limit = setTimeout(() => (download.phase === "installing" ? download.settle({ error: "安装一直没有结束" }) : abandon("下载超过了时限")), t.install);
+    // 最终期限：到点还在下就叫壳收掉（它裁决），余量用完不管停在哪儿都收场。两个计时器只在收场时清。
+    const limit = setTimeout(() => abandon("下载超过了时限"), t.install);
+    const hard = setTimeout(() => download.settle({
+      error: download.phase === "installing" ? "一直停在「正在安装」，没有等到结果" : "过了时限，壳一直没给出这一趟的结局",
+      unknown: true,
+    }), t.install + t.settle);
     beat();
     const result = await download.done;
-    // 装成了走不到这里：壳把安装包交出去就退出了。回来的只有失败、超时和取消 —— 都是壳认过的结局。
+    // 装成了走不到这里：壳把安装包交出去就退出了。回来的只有失败、取消和结果不明。
     clearTimeout(limit);
+    clearTimeout(hard);
     clearTimeout(download.stall);
     clearTimeout(download.reply);
     state.download = null;
     state.installing = null;
     ui.done();
     if (result.cancelled) return ui.log(`取消了更新到 ${version}`);
+    if (result.unknown) {
+      ui.log(`更新到 ${version} 结果不明：${result.error}`);
+      return void await ui.alert("更新结果不明", `${result.error}\n\n安装程序可能还在运行，装完 Navi 会自己重新打开；它结束之前不会开始第二次安装。一直没有动静的话，可以从托盘菜单「检查更新…」再试。`);
+    }
     ui.log(`更新到 ${version} 没装上：${result.error}`);
     await ui.alert("更新没装上", `${result.error || "原因不明"}\n\n现在的版本照常能用，可以稍后从托盘菜单「检查更新…」再试。`);
   }
@@ -133,23 +149,28 @@ export function createUpdates({ cfg, send, ui, enabled = process.env.NAVI_WIN_UP
     if (!download || download.aborting || download.phase !== "downloading") return;
     download.aborting = { why, user };
     send({ type: "updateCancel", id: download.id });
-    // 壳一直不答（它多半已经没了）：不能一直挂着那一屏。
-    download.reply = setTimeout(() => download.settle({ error: `${why}；壳没有回应取消` }), t.cancelReply);
+    // 壳一直不答（它多半已经没了，也可能正在装）：不能一直挂着那一屏，但也不能说成没装上。
+    download.reply = setTimeout(() => download.settle({ error: `${why}；壳没有回应取消`, unknown: true }), t.cancelReply);
     beat();
   }
 
   function cancel() { abandon("已取消", { user: true }); }
 
+  /** 进了安装（壳报的进度、或者取消时壳说已经在装）：从这以后取消不了，等它的结局或者最终期限。 */
+  function installing(download) {
+    if (download.aborting) ui.log(`要取消更新时已经在装了：${download.aborting.why}`);
+    clearTimeout(download.reply);
+    download.aborting = null;
+    download.phase = "installing";
+    beat();
+  }
+
   function decided(download, outcome) {
     const { why, user } = download.aborting ?? {};
     if (outcome === "cancelled") return download.settle({ error: why, cancelled: user });
+    if (outcome === "installing") return installing(download);
     clearTimeout(download.reply);
     download.aborting = null;
-    if (outcome === "installing") {
-      download.phase = "installing";
-      ui.log(`要取消更新时已经在装了：${why}`);
-      return beat();
-    }
     // gone：壳那边这一趟已经结束了，它的结局（updateResult）就在路上；再等一会儿，还没有就按没装上收场。
     download.reply = setTimeout(() => download.settle({ error: why }), t.cancelReply);
   }
@@ -159,10 +180,9 @@ export function createUpdates({ cfg, send, ui, enabled = process.env.NAVI_WIN_UP
     const current = download && message.id === download.id;
     if (message.type === "updateProgress") {
       if (!current) return;
-      if (message.installing) download.phase = "installing";
       if (Number.isFinite(message.received)) download.received = message.received;
       if (Number.isFinite(message.percent)) download.percent = message.percent;
-      return beat();
+      return message.installing ? installing(download) : beat();
     }
     if (message.type === "updateCancelResult") return void (current && download.aborting && decided(download, message.outcome));
     state.pending.get(message.id)?.(message);
@@ -175,5 +195,7 @@ export function createUpdates({ cfg, send, ui, enabled = process.env.NAVI_WIN_UP
     receive,
     cancel,
     get installing() { return state.installing; },
+    /** 在更新的那一趟：{ version, phase: downloading | installing }，没有是 null。 */
+    get stage() { return state.download ? { version: state.download.version, phase: state.download.phase } : null; },
   };
 }

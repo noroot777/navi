@@ -16,7 +16,7 @@ import { loadConfig } from "../desktop/windows/launcher/config.mjs";
 import { createController } from "../desktop/windows/launcher/controller.mjs";
 import { backupDatabase, KEEP } from "../desktop/windows/launcher/db-backup.mjs";
 import { blockersOf, compatibilityOf, createHandover } from "../desktop/windows/launcher/handover.mjs";
-import { activeHold } from "../desktop/windows/launcher/maintenance.mjs";
+import { activeHold, beginMaintenance } from "../desktop/windows/launcher/maintenance.mjs";
 
 reclaimScratch(tmpdir(), "navi-windows-handover-");
 const temporary = realpathSync(claimScratch(tmpdir(), "navi-windows-handover-"));
@@ -43,7 +43,7 @@ function runtime(dir, id, extra = {}) {
 }
 
 /** 一套假的：运行时仓库里有旧版那份，安装目录里是新版发布源；旧服务的答复、许可、停服务、留底都可编排。 */
-function rig(name) {
+function rig(name, timing = {}) {
   const home = join(temporary, name);
   const bundled = runtime(join(home, "Programs", "Navi", "runtime"), NEW, { ".handover.json": COMPAT });
   const cfg = loadConfig({ LOCALAPPDATA: home, NAVI_URL: "http://127.0.0.1:14998", NAVI_WIN_RUNTIME: bundled }, process.platform);
@@ -69,7 +69,7 @@ function rig(name) {
     handover: async (id, body) => {
       r.calls.push(`handover:${JSON.stringify(body)}`);
       if (body.release) return { released: true };
-      if (body.commit) return { committed: r.valid };
+      if (body.commit) return r.commitAnswer ? r.commitAnswer() : { committed: r.valid };
       return r.grant();
     },
     stop: async (target) => {
@@ -79,10 +79,11 @@ function rig(name) {
       return r.stopped;
     },
     backup: async (from) => { r.calls.push(`backup:${from}`); return r.backup(); },
+    begin: (note) => (r.begin ? r.begin(note) : beginMaintenance(cfg, note, 50_000)),
   };
   r.handover = createHandover({
     cfg,
-    timing: { poll: 15 },
+    timing: { poll: 15, ...timing },
     busy: () => r.busy,
     ui: {
       log: (line) => r.logs.push(line), menu: () => {}, hold: (title) => r.held.push(title), release: () => { r.released += 1; },
@@ -180,6 +181,7 @@ try {
     v.handover.observe(v.health.instance);
     await waitFor("许可失效", () => v.handover.state.why?.includes("失效"));
     assert.ok(!v.calls.some((call) => call.startsWith("stop")));
+    assert.equal(v.handover.successorPending(), false, "服务端明说兑现不了：旧服务原样在，不欠起新版");
     v.handover.stop();
     console.log("✓ 拿不到许可、留底失败、许可兑现不了：一律不停旧服务并归还许可；连着 4 次拿不到就停下，菜单留重试");
   }
@@ -318,6 +320,83 @@ try {
     console.log("✓ 切换前留底：SQLite 在线备份（WAL 里的也在），按时间命名，只留最近 5 份");
   }
 
+  // ── 起新版的责任：撤不回的那一步之前就记下，亲眼看到结果才结清 ───────────────
+  {
+    const fresh = (r) => r.instance(join(r.cfg.runtimeStore, NEW), { id: "new-1", pid: 77 });
+
+    // 兑现发出去了、答复丢了，旧服务其实已经下线：照样算停了，欠着起新版
+    const lost = rig("commit-lost-gone", { grace: 300, beat: 5 });
+    lost.commitAnswer = () => { lost.health = { kind: "down" }; return { error: "socket hang up" }; };
+    lost.handover.observe(lost.health.instance);
+    await waitFor("换完", () => lost.released === 1);
+    assert.ok(lost.calls.includes("stop:41"), "确认它下线了，再核一遍它退干净了");
+    assert.equal(lost.handover.state.phase, "idle");
+    assert.equal(lost.handover.successorPending(), true, "答复丢了不等于没兑现：起新版的责任还在");
+    lost.handover.observe(lost.instance(lost.oldDir));
+    assert.equal(lost.handover.successorPending(), true, "宽限期里看到的还是交出去的那一份：不算结清");
+    lost.handover.observe(fresh(lost));
+    assert.equal(lost.handover.successorPending(), false, "看到新版才结清");
+
+    // 答复丢了，旧服务也一直在：不去停它（它可能已经解封在接活），过了宽限期还在答话就结清
+    const alive = rig("commit-lost-alive", { grace: 60, beat: 5 });
+    alive.commitAnswer = () => ({ error: "timeout" });
+    alive.handover.observe(alive.health.instance);
+    await waitFor("没切换", () => alive.handover.state.why?.includes("一直没有答复"));
+    assert.ok(!alive.calls.some((call) => call.startsWith("stop")), "没确认兑现、它也没下线：不停");
+    assert.equal(alive.calls.filter((call) => call.startsWith('handover:{"commit"')).length, 3, "兑现是幂等的，没答复就再兑现两次");
+    assert.equal(alive.handover.successorPending(), true);
+    alive.handover.stop();
+    await sleep(80);
+    alive.handover.observe(alive.instance(alive.oldDir));
+    assert.equal(alive.handover.successorPending(), false, "过了宽限期它还在答话：它没下线，责任结清");
+    alive.handover.stop();
+
+    // 停完松锁出错：这一趟照样收尾，欠的起新版不丢
+    const lock = rig("end-throws");
+    lock.begin = async (note) => {
+      const end = await beginMaintenance(lock.cfg, note, 50_000);
+      return () => { end(); throw new Error("维护标记删不掉"); };
+    };
+    lock.handover.observe(lock.health.instance);
+    await waitFor("换完", () => lock.released === 1);
+    assert.ok(lock.logs.some((line) => line.includes("松开维护锁出错：维护标记删不掉")));
+    assert.equal(await lock.handover.settled(), null, "收尾不会抛出去");
+    assert.equal(lock.handover.successorPending(), true);
+
+    // 强制切换：停是撤不回的。停的结果不明（超时）也欠着；还没动手就发现不对，不欠
+    const forced = rig("force-stop-failed");
+    forced.impact = { runtimeHandover: { blocked: [{ id: "t9", title: "调度台", reason: "x" }], target: COMPAT }, shutdown: { resources: [] } };
+    forced.stopped = { kind: "failed", why: "服务进程 41 20 秒内没有退出" };
+    forced.handover.observe(forced.health.instance);
+    await waitFor("在等", () => forced.handover.state.items.length === 1);
+    forced.handover.reconsider();
+    await waitFor("说明", () => forced.alerts.length === 1);
+    assert.equal(forced.handover.successorPending(), true, "已经动手停了：不管结局都欠着起新版");
+    forced.handover.stop();
+    const early = rig("force-stop-changed");
+    early.impact = forced.impact;
+    early.stopped = { kind: "changed", why: "端口上换成了别的 Navi" };
+    early.handover.observe(early.health.instance);
+    await waitFor("在等", () => early.handover.state.items.length === 1);
+    early.handover.reconsider();
+    await waitFor("说明", () => early.alerts.length === 1);
+    assert.equal(early.handover.successorPending(), false, "停之前就发现不对、什么都没动：不欠");
+    early.handover.stop();
+
+    // 退出前结清：起不来就一直起，起到新版为止；限时内起不来就交回原因
+    const owed = rig("discharge", { discharge: 200, retry: 10 });
+    owed.handover.observe(owed.health.instance);
+    await waitFor("换完", () => owed.released === 1);
+    let tries = 0;
+    assert.deepEqual(await owed.handover.discharge(async () => (++tries < 3 ? { kind: "failed", message: "端口被占" } : { kind: "ready", instance: fresh(owed) })), { ok: true });
+    assert.equal(tries, 3, "起不来就再起");
+    const stuck = rig("discharge-fails", { discharge: 60, retry: 10 });
+    stuck.handover.observe(stuck.health.instance);
+    await waitFor("换完", () => stuck.released === 1);
+    assert.deepEqual(await stuck.handover.discharge(async () => ({ kind: "failed", message: "端口被占" })), { ok: false, why: "端口被占" });
+    console.log("✓ 起新版的责任：兑现、强停之前就记下；答复丢了照样欠着，看到新版（或者旧那份过了宽限期还在答话）才结清；松锁出错不丢；退出前一直起到新版");
+  }
+
   // ── 壳在切换途中退出：控制器先把这一趟做完，旧服务交出去了就把新版起起来再退 ────────
   {
     const r = rig("shutdown-mid-switch");
@@ -353,7 +432,7 @@ try {
     open();
     await shutdown;
     assert.ok(starts > before, "旧服务停了：退出前把新版起起来");
-    assert.ok(lines.some((line) => line.includes("先把新版服务起起来")) && lines.some((line) => line.includes("新版服务起来了（进程 77）")),
+    assert.ok(lines.some((line) => line.includes("先把新版服务起起来")) && lines.some((line) => line.includes("新版服务起来了")),
       "是退出这一步自己起的新版，不靠窗口那边重连");
     assert.ok(events.indexOf("stopped") < events.lastIndexOf(`ensure:${starts}`), "起新版在旧服务停下之后");
     assert.equal(activeHold(r.cfg), null, "松开了维护锁");
@@ -372,7 +451,33 @@ try {
     await waitFor("起来时连一次", () => idleStarts === 1);
     await quiet.shutdown();
     assert.equal(idleStarts, 1, "没在切换：直接退，不碰服务");
-    console.log("✓ 壳在切换途中退出：等这一趟做完，旧服务交出去了就把新版起起来再退；没在切换就直接退");
+
+    const failing = rig("shutdown-note");
+    const sentNotes = [];
+    const broken = createController({
+      cfg: failing.cfg, updatesEnabled: false, send: () => {},
+      launcher: { isInitialized: () => true, approveFreshStart() {}, ensureRunning: async () => (failing.calls.includes("stop:41") ? { kind: "failed", message: "新版起不来：端口被占" } : { kind: "ready", instance: failing.health.instance }) },
+      loginItem: { isEnabled: () => false, setEnabled() {}, reconcileAtLaunch: () => "skipped" },
+      timing: { poll: 10_000, handover: 15, handoverTiming: { discharge: 50, retry: 10 }, updates: { first: 10_000 } },
+      overrides: { handover: failing.overrides, probeWindow: async () => ({ kind: "down" }) },
+    });
+    broken.start();
+    await waitFor("停了旧服务", () => failing.calls.includes("stop:41"));
+    await sleep(20);
+    await broken.shutdown();
+    broken.stop();
+    const reopened = createController({
+      cfg: failing.cfg, updatesEnabled: false, send: (message) => sentNotes.push(message),
+      launcher: { isInitialized: () => true, approveFreshStart() {}, ensureRunning: async () => ({ kind: "failed", message: "假的" }) },
+      loginItem: { isEnabled: () => false, setEnabled() {}, reconcileAtLaunch: () => "skipped" },
+      timing: { poll: 10_000, updates: { first: 10_000 } },
+      overrides: { probeWindow: async () => ({ kind: "down" }) },
+    });
+    reopened.start();
+    const told = await waitFor("下次打开时说一声", () => sentNotes.find((message) => message.type === "dialog" && message.title === "上次退出时新版服务没起来"));
+    assert.match(told.detail, /新版起不来：端口被占/);
+    reopened.stop();
+    console.log("✓ 壳在切换途中退出：等这一趟做完，旧服务交出去了就把新版起起来再退；起不来留纸条、下次打开说给用户；没在切换就直接退");
   }
 
 } finally {

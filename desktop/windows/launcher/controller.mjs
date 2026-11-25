@@ -16,6 +16,7 @@ import { mkdirSync } from "node:fs";
 import { runtimeId } from "./config.mjs";
 import { decideLink, parseLink } from "./deep-link.mjs";
 import { createHandover } from "./handover.mjs";
+import { noteUnfinished, takeUnfinished } from "./handover-duty.mjs";
 import { isServing, mismatch, ours, probe as probeHealth } from "./health.mjs";
 import { activeHold, beginMaintenance } from "./maintenance.mjs";
 import { assessImpact, stopServer, widened } from "./restart.mjs";
@@ -43,7 +44,7 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
   };
   const handover = createHandover({
     cfg,
-    timing: { poll: t.handover ?? 5_000 },
+    timing: { poll: t.handover ?? 5_000, ...t.handoverTiming },
     busy: () => occupied(),
     overrides: overrides.handover,
     ui: {
@@ -65,7 +66,8 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
    * 做完再载回工作区，半路被另一件盖掉，取消按钮、进度就没了，或者两边一起去停服务。开始之前问这里，有人占着就说是谁。
    */
   function occupied() {
-    if (updates.installing) return `正在下载 Navi ${updates.installing} 的更新`;
+    const update = updates.stage;
+    if (update) return update.phase === "installing" ? `正在安装 Navi ${update.version}` : `正在下载 Navi ${update.version} 的更新`;
     if (handover.state.phase === "switching") return "正在切换到新版服务";
     if (state.remoteBusy) return "正在改「允许其他设备访问」";
     return null;
@@ -577,6 +579,8 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
         refreshLogin();
       }, 0);
       updates.start();
+      const note = takeUnfinished(cfg);
+      if (note) void alert("上次退出时新版服务没起来", `${note.why}\n\n这次打开时已经重新起服务；还起不来的话，托盘菜单「日志」里有服务日志。`);
     },
     stop() {
       resetPageConnection();
@@ -589,11 +593,14 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
      */
     async shutdown() {
       this.stop();
-      await handover.settled();
+      try { await handover.settled(); } catch (error) { log(`切换收尾出错：${error.message}`); }
       if (!handover.successorPending()) return;
       log("壳退出了，旧服务已经交出去：先把新版服务起起来再退");
-      const outcome = await launcher.ensureRunning();
-      log(outcome.kind === "ready" ? `新版服务起来了（进程 ${outcome.instance?.pid}）` : `新版服务没起来：${outcome.message ?? outcome.kind}`);
+      const result = await handover.discharge(() => launcher.ensureRunning());
+      if (result.ok) return log("新版服务起来了");
+      log(`新版服务没起来：${result.why}`);
+      // 这时没有窗口可说：留张纸条，下次打开 Navi 时告诉用户（那一次照常会再起服务）。
+      try { noteUnfinished(cfg, result.why); } catch (error) { log(`纸条也没留下：${error.message}`); }
     },
     state,
   };

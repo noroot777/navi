@@ -82,7 +82,7 @@ pub fn install(shell: &Arc<Shell>, id: Value, version: &str) {
   // 锁一直攥到登记好这一趟：worker 下完来认人时，登记一定已经在了。
   let mut slot = shell.download.lock().unwrap();
   if slot.is_some() {
-    return shell.send(json!({ "type": "updateResult", "id": id, "error": "上一次更新还在下载" }));
+    return shell.send(json!({ "type": "updateResult", "id": id, "error": "上一次更新还在下载或安装" }));
   }
   let (worker, mine) = (shell.clone(), id.clone());
   let handle = tauri::async_runtime::spawn(async move {

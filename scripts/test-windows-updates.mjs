@@ -158,8 +158,9 @@ try {
     await sleep(120);
     assert.equal(ui.done, 1, "在装：页面不回来、也不按停滞收掉");
     assert.ok(!ui.alerts.length);
+    assert.equal(updates.stage.phase, "installing");
     updates.checkNow();
-    await alerted("正在更新");
+    assert.match((await alerted("正在更新")).detail, /正在安装 Navi 0\.0\.3，装完会自己重新打开/, "在装时的提示不说「可以取消」");
     ui.alerts.length = 0;
     updates.receive({ type: "updateResult", id: late.id, error: "安装程序起不来" });
     assert.match((await alerted("更新没装上")).detail, /安装程序起不来/);
@@ -187,9 +188,21 @@ try {
     const mute = await offer();
     ui.cancel();
     await next("updateCancel");
-    assert.match((await alerted("更新没装上")).detail, /壳没有回应取消/);
+    assert.match((await alerted("更新结果不明")).detail, /壳没有回应取消[\s\S]*不会开始第二次安装/, "壳没答取消：它可能正在装，不说成没装上");
     assert.equal(updates.installing, null);
     assert.notEqual(mute.id, gone.id);
+
+    // 取消发出去以后，壳先报了「进了安装」、取消的裁决没到：照实摆「正在安装」，不再按「没回应取消」报没装上
+    ui.alerts.length = 0;
+    const racing = await offer();
+    ui.cancel();
+    await next("updateCancel");
+    updates.receive({ type: "updateProgress", id: racing.id, installing: true });
+    assert.equal(ui.screens.at(-1).phase, "installing", "安装进度盖过「正在取消」");
+    await sleep(100);
+    assert.deepEqual(ui.alerts, [], "已经知道在装了：不按取消没回应收场");
+    updates.receive({ type: "updateResult", id: racing.id, error: "安装程序起不来" });
+    assert.match((await alerted("更新没装上")).detail, /安装程序起不来/);
 
     // 请求号分代：另一个控制器（壳里重开的）同一个序号也认不成这一代的
     const other = [];
@@ -211,6 +224,34 @@ try {
     assert.match((await alerted("现在不能更新")).detail, /正在切换到新版服务/);
     assert.ok(!sent.some((message) => message.type === "updateInstall" && !message.taken), "别处占着窗口时不下更新");
     console.log("✓ 查更新、下更新有期限；停滞按收到的字节算；取消等壳裁决（收掉了才回来、在装就照实摆）；请求号分代；记不下跳过只说一声；别处占着时不下");
+  }
+
+  // ── 最终期限哪个阶段都消耗不掉：过了总时限叫壳收掉，壳说已经在装、之后一直没结局，余量用完照样收场 ────
+  {
+    const cfg = loadConfig({ LOCALAPPDATA: join(temporary, "updates-final"), NAVI_WIN_VERSION: "0.0.1" }, process.platform);
+    const sent = [];
+    const ui = { alerts: [], screens: [], done: 0 };
+    const updates = createUpdates({
+      cfg, enabled: true, timing: { first: 10_000, check: 1_000, install: 50, settle: 60, stall: 10_000, cancelReply: 10_000 },
+      send: (message) => sent.push(message),
+      ui: {
+        log: () => {}, done: () => { ui.done += 1; }, progress: (version, progress) => ui.screens.push(progress),
+        ask: async () => 0, alert: async (title, detail) => { ui.alerts.push({ title, detail }); },
+      },
+    });
+    updates.checkNow();
+    const check = await waitFor("updateCheck", () => sent.find((message) => message.type === "updateCheck"));
+    updates.receive({ type: "updateResult", id: check.id, version: "0.0.4" });
+    const install = await waitFor("updateInstall", () => sent.find((message) => message.type === "updateInstall"));
+    const cancel = await waitFor("过了总时限叫壳收掉", () => sent.find((message) => message.type === "updateCancel"));
+    assert.equal(cancel.id, install.id);
+    updates.receive({ type: "updateCancelResult", id: install.id, outcome: "installing" });
+    assert.equal(ui.screens.at(-1).phase, "installing");
+    const stuck = await waitFor("余量用完收场", () => ui.alerts.find((item) => item.title === "更新结果不明"), 1_000);
+    assert.match(stuck.detail, /一直停在「正在安装」/);
+    assert.equal(ui.done, 1, "页面回来");
+    assert.equal(updates.installing, null, "状态放开，可以再查；壳那边在装完之前不会开始第二次安装");
+    console.log("✓ 最终期限跨阶段：过了总时限转进「正在安装」，之后没结局也按「结果不明」收场，不会一直卡着");
   }
 
   // ── 接进控制器：菜单、壳的答复分给 updates、下载那一屏的取消、和改访问设置互斥 ──────

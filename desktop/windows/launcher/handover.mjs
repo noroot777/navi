@@ -9,8 +9,9 @@
 //     之前服务端在封口之后再看一次终端这些，有就不发）→ 给库留底 → 兑现许可（核验和下线是旧服务里同一步：兑现了
 //     它就自己退出，撤不回）→ 等它退干净（没退就停掉，agent 的进程树保住，见 restart.mjs）→ 松开维护锁，
 //     窗口重连时 launcher 用新运行时起服务，新服务按 pid 认回 agent。
-// 旧服务一停，起新版就是这里的事：壳被关掉、崩了（控制器的 stdin 断了）也先把这一趟做完、把新版起起来再退
-// （settled / successorPending，controller-main.mjs）。
+// 旧服务一停，起新版就是这里的事：兑现、强停这两步撤不回，发出去之前先记下这份责任（handover-duty.mjs），亲眼看到
+// 新版（或者一份照常答话的服务）才结清。壳被关掉、崩了（控制器的 stdin 断了）也先把这一趟做完、把责任结清再退
+// （settled / successorPending / discharge，controller-main.mjs）。
 // 中途哪一步不成都不停旧服务，回去接着等；连着 4 次拿不到许可就不再自动试，菜单里留「重试切换到新版服务…」。
 // 用户也可以从菜单「切换到新版服务…」现在就换：把会被打断的摆给他看，他点了才不等。他点的是那一刻那一份服务、
 // 那一张名单 —— 维护锁里再核一遍，换了一份服务、或者名单里多了他没见过的，就不停，把新名单再摆给他。
@@ -19,12 +20,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { publishedRuntime, samePath, storeContains } from "./config.mjs";
 import { backupDatabase } from "./db-backup.mjs";
+import { createDuty, GRACE_MS } from "./handover-duty.mjs";
 import { ours, probe as probeHealth } from "./health.mjs";
 import { publishRuntime } from "./launcher.mjs";
 import { activeHold, beginMaintenance } from "./maintenance.mjs";
 import { hostToken, stopServer } from "./restart.mjs";
 
 const RETRY_LIMIT = 4;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const NOTE = "正在切换到新版 Navi 服务…";
 
 /** 新运行时自报的接管协议（bundle-runtime 写的 .handover.json）：{ protocol: 1, schema }，认不出是 null。 */
@@ -64,10 +67,11 @@ export function createHandover({ cfg, ui, busy = () => null, timing = {}, overri
     begin: (note) => beginMaintenance(cfg, note, 50_000),
     ...overrides,
   };
-  const t = { poll: 5_000, ...timing };
+  const t = { poll: 5_000, grace: undefined, beat: 200, discharge: 90_000, retry: 2_000, ...timing };
   // phase：idle 不用换 / waiting 在等 / blocked 自动切换停了、等用户 / switching 正在换
-  // inflight：正在做的那一趟（攥锁到松锁）；successor：旧服务停了、还没认出新版起来
-  const state = { phase: "idle", items: [], why: null, failures: 0, timer: null, busy: false, from: null, inflight: null, successor: false };
+  // inflight：正在做的那一趟（攥锁到松锁）
+  const state = { phase: "idle", items: [], why: null, failures: 0, timer: null, busy: false, from: null, inflight: null };
+  const duty = createDuty({ grace: t.grace });
 
   const menu = () => ({
     visible: state.phase === "waiting" || state.phase === "blocked",
@@ -77,7 +81,7 @@ export function createHandover({ cfg, ui, busy = () => null, timing = {}, overri
 
   /** 控制器每认出一次自己那份服务就告诉这里一声。 */
   function observe(instance) {
-    if (instance && state.phase !== "switching") state.successor = false;
+    duty.settle(instance);
     if (!cfg.isLocal || !instance?.codeDir || state.phase === "switching") return;
     const target = publishedRuntime(cfg);
     if (!target || samePath(instance.codeDir, target, cfg.windows) || !storeContains(cfg, instance.codeDir)) {
@@ -210,8 +214,8 @@ export function createHandover({ cfg, ui, busy = () => null, timing = {}, overri
       outcome = { kind: "changed", why: error.message };
     }
     if (outcome.kind !== "stopped" && lease) await deps.handover(instance.id, { release: lease }).catch(() => {});
-    if (outcome.kind === "stopped" || outcome.committed) state.successor = true;
-    end?.();
+    // 松锁出错也不能把这一趟（和它欠下的起新版）一起丢掉：记一笔，照常交回结局。
+    try { end?.(); } catch (error) { ui.log(`松开维护锁出错：${error.message}`); }
     return outcome;
   }
 
@@ -233,14 +237,66 @@ export function createHandover({ cfg, ui, busy = () => null, timing = {}, overri
     let backup;
     try { backup = await deps.backup(state.from ?? "old"); }
     catch (error) { return { kind: "changed", why: `切换前给库留底失败（${error.message}），旧服务没停` }; }
-    if (lease && (await deps.handover(instance.id, { commit: lease })).committed !== true) {
-      return { kind: "changed", why: "接管许可已经失效，旧服务没停" };
+    if (lease) {
+      duty.owe(instance);
+      const committed = await commit(instance, lease);
+      if (committed === false) {
+        duty.clear();
+        return { kind: "changed", why: "接管许可已经失效，旧服务没停" };
+      }
+      // 一直没收到答复：兑现了它几百毫秒就退。看它退没退，没退就是没兑现 —— 不去停它（它可能已经解封、在接新活）。
+      if (committed === null && !(await wentDown(instance))) return { kind: "changed", why: "兑现许可一直没有答复，旧服务也没下线，这次没切换" };
     }
     if (confirmed && await widened(instance, compat, confirmed)) return { kind: "widened" };
-    // 兑现了旧服务自己会退：这里等它退干净，没退就停掉（它已经不接活了，停它不会带走新活）。
+    if (!lease) duty.owe(instance);
+    // 兑现了旧服务自己会退：这里等它退干净，没退就停掉（它已经不接活了，停它不会带走新活）。强制切换就是这里停。
     const stopped = await deps.stop({ kind: "ours", pid: instance.pid });
-    if (stopped.kind !== "stopped") return { kind: "changed", why: stopped.why, committed: Boolean(lease) };
+    if (stopped.kind === "changed" && !lease) duty.clear(); // 还没动手就发现端口上不对：旧服务原样在
+    if (stopped.kind !== "stopped") return { kind: "changed", why: stopped.why };
     return { kind: "stopped", backup };
+  }
+
+  /**
+   * 兑现许可（幂等：重复兑现不另起退出）。true 兑现了 / false 服务端明说兑现不了 / null 一直没收到答复 ——
+   * 连接断了、超时、正文没收全都算 null，不当成「没兑现」。
+   */
+  async function commit(instance, lease) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const answer = await deps.handover(instance.id, { commit: lease });
+      if (answer.committed === true) return true;
+      if (answer.committed === false && !answer.error) return false;
+      const now = ours(await deps.probe(), cfg);
+      if (!now || now.id !== instance.id) return null;
+      await sleep(t.beat);
+    }
+    return null;
+  }
+
+  /** 交出去的那一份在宽限期里下线了没有（端口不答、或者换了一份）。 */
+  async function wentDown(instance) {
+    const until = Date.now() + (t.grace ?? GRACE_MS);
+    while (Date.now() < until) {
+      const now = ours(await deps.probe(), cfg);
+      if (!now || now.id !== instance.id) return true;
+      await sleep(t.beat);
+    }
+    return false;
+  }
+
+  /**
+   * 退出前把欠着的起新版做完：一直起到端口上有一份够得上结清的服务（新版，或者照常答话的旧服务），最多 t.discharge。
+   * ensure 是 launcher.ensureRunning。返回 { ok } 或 { ok: false, why }。
+   */
+  async function discharge(ensure) {
+    const until = Date.now() + t.discharge;
+    let why = null;
+    while (duty.pending && Date.now() < until) {
+      const outcome = await ensure().catch((error) => ({ kind: "failed", message: error.message }));
+      if (outcome.kind === "ready" && !duty.settle(outcome.instance)) break;
+      why = outcome.kind === "ready" ? "交出去的旧服务还在下线" : outcome.message ?? outcome.kind;
+      await sleep(t.retry);
+    }
+    return duty.pending ? { ok: false, why: why ?? "等过了时限" } : { ok: true };
   }
 
   /** 用户确认过的那张名单之外又多了要打断的（或者这会儿问不清了），就是变了。 */
@@ -295,8 +351,9 @@ export function createHandover({ cfg, ui, busy = () => null, timing = {}, overri
     stop: stopTimer,
     /** 正在做的那一趟做完（没有就是马上）；控制器退出前等它。 */
     settled: () => state.inflight ?? Promise.resolve(null),
-    /** 旧服务停了（或者兑现了许可、它自己在退），新版还没认出来：退出前得把新版起起来。 */
-    successorPending: () => state.successor,
+    /** 兑现、强停发出去了，还没亲眼看到新版（或者照常答话的那一份）：退出前得把新版起起来。 */
+    successorPending: () => duty.pending,
+    discharge,
     state,
   };
 }
