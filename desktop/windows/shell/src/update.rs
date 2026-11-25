@@ -6,17 +6,23 @@
 //   控制器 → 壳  { type: "updateCheck", id }                 查一次
 //   壳 → 控制器  { type: "updateResult", id, version?, notes?, error? }   version 为空 = 已经是最新
 //   控制器 → 壳  { type: "updateInstall", id, version }      装刚查到的那一版
-//   壳 → 控制器  { type: "updateProgress", id, percent } / { type: "updateResult", id, error }
-//   控制器 → 壳  { type: "updateCancel" }                    不下了（用户点了取消、或者控制器等过了头）
+//   壳 → 控制器  { type: "updateProgress", id, received, percent? }      收到字节就报（至多一秒一次），没有总长度就没有 percent
+//                { type: "updateProgress", id, installing: true }        下完了、验签装包，这之后取消不了
+//                { type: "updateResult", id, error }                     没装成（装成了壳直接退出，回不来）
+//   控制器 → 壳  { type: "updateCancel", id }                不下了（用户点了取消、或者控制器等过了头）
+//   壳 → 控制器  { type: "updateCancelResult", id, outcome }  cancelled 收掉了 / installing 已经在装、取消不了 / gone 没有这一趟
 //
-// 每一步都有头：查一次最多 30 秒，下载最多 15 分钟、最多 300 MB（安装包几十 MB，超了按坏了的源算），到了就断，
-// 跟取消一样回一条 updateResult error，控制器那边放开状态、页面回来。
+// 「取消」和「下完去装」由这里裁决，同一把锁、按请求号认人（Download）：先到的那一个算数，另一个照着结果走。控制器
+// 只凭 updateCancelResult 下结论，不凭「我发过取消」。控制器没了（stdin 断了）在下的那一趟也收掉，没人等它的结果。
+//
+// 每一步都有头：查一次最多 30 秒，下载最多 15 分钟、最多 300 MB（安装包几十 MB，超了按坏了的源算），到了就断、
+// 回一条 updateResult error，控制器那边放开状态、页面回来。
 //
 // 装的时候插件把安装包交给系统（/UPDATE /P /R：不再问、装完重新打开 Navi）就让壳退出。换的只是安装目录里的壳和
 // 运行时发布源：服务跑在 %LOCALAPPDATA%\Navi\runtimes 下发布出来的那份里，安装包碰不到它，agent 也不归壳管；
 // 新壳起来后由控制器按接管流程换到新运行时（launcher/handover.mjs）。
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::AppHandle;
@@ -27,6 +33,14 @@ use crate::controller::Shell;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MAX_BYTES: u64 = 300 * 1024 * 1024;
+const BEAT: Duration = Duration::from_secs(1);
+
+/// 在下（或在装）的那一趟。
+pub struct Download {
+  id: Value,
+  installing: bool,
+  handle: tauri::async_runtime::JoinHandle<()>,
+}
 
 /// 这份壳带没带更新源：没配公钥的构建（开发时的便携版）不查更新，菜单里也没有「检查更新…」。
 pub fn configured(app: &AppHandle) -> bool {
@@ -65,51 +79,92 @@ pub fn install(shell: &Arc<Shell>, id: Value, version: &str) {
   let Some(update) = pending else {
     return shell.send(json!({ "type": "updateResult", "id": id, "error": format!("没有待装的 {version}，先检查一次更新。") }));
   };
-  // 上一趟还没收场就不另起一趟：只认一个在下的。
-  let mut task = shell.update_task.lock().unwrap();
-  if task.is_some() {
+  // 锁一直攥到登记好这一趟：worker 下完来认人时，登记一定已经在了。
+  let mut slot = shell.download.lock().unwrap();
+  if slot.is_some() {
     return shell.send(json!({ "type": "updateResult", "id": id, "error": "上一次更新还在下载" }));
   }
-  let worker = shell.clone();
-  let task_id = id.clone();
+  let (worker, mine) = (shell.clone(), id.clone());
   let handle = tauri::async_runtime::spawn(async move {
-    let id = task_id;
-    let (mut received, mut reported) = (0u64, -1i64);
+    let (mut received, mut reported, mut beat) = (0u64, -1i64, Instant::now() - BEAT);
     let progress = {
-      let (shell, id) = (worker.clone(), id.clone());
+      let (shell, id) = (worker.clone(), mine.clone());
       move |chunk: usize, total: Option<u64>| {
         received += chunk as u64;
         if received > MAX_BYTES || total.is_some_and(|total| total > MAX_BYTES) {
           // 下一次等网络的时候这一趟就被收掉，不会走到装那一步。
-          return cancel(&shell, &format!("安装包超过 {} MB，不像是 Navi 的安装包，没下完就停了。", MAX_BYTES / 1024 / 1024));
+          return refuse(&shell, &id, &format!("安装包超过 {} MB，不像是 Navi 的安装包，没下完就停了。", MAX_BYTES / 1024 / 1024));
         }
-        let Some(total) = total.filter(|total| *total > 0) else { return };
-        let percent = (received * 100 / total) as i64;
-        if percent >= reported + 5 {
-          reported = percent;
-          shell.send(json!({ "type": "updateProgress", "id": id, "percent": percent }));
+        let percent = total.filter(|total| *total > 0).map(|total| (received * 100 / total) as i64);
+        // 心跳按收到的字节算，百分比只是给人看的：没有总长度、或者涨得慢，也照样一秒报一次。
+        if beat.elapsed() >= BEAT || percent.is_some_and(|percent| percent >= reported + 5) {
+          beat = Instant::now();
+          if let Some(percent) = percent { reported = percent; }
+          shell.send(json!({ "type": "updateProgress", "id": id, "received": received, "percent": percent }));
         }
       }
     };
     let downloaded = update.download(progress, || {}).await;
-    // 下完和被取消可能撞在一起（下完之后再没有等待，abort 收不掉）：这一趟已经不归自己了就不装，取消那边回过话了。
-    if worker.update_task.lock().unwrap().take().is_none() {
-      return;
-    }
-    // 装成了走不到下面：Windows 上插件把安装包交出去之后直接退出这个进程（控制器的 stdin 随之断开，它也退出）。
-    let failed = match downloaded {
-      Ok(bytes) if bytes.len() as u64 > MAX_BYTES => format!("安装包超过 {} MB，没装。", MAX_BYTES / 1024 / 1024),
-      Ok(bytes) => update.install(bytes).err().map_or_else(|| "安装包交给系统了，但这个进程没有退出".to_string(), |error| error.to_string()),
-      Err(error) => error.to_string(),
+    let failed = {
+      let mut slot = worker.download.lock().unwrap();
+      // 这一趟已经不归自己了（取消、超限在先）：那边回过话了，不装。
+      if !slot.as_ref().is_some_and(|download| download.id == mine) {
+        return;
+      }
+      match downloaded {
+        Ok(bytes) if bytes.len() as u64 > MAX_BYTES => Err(format!("安装包超过 {} MB，没装。", MAX_BYTES / 1024 / 1024)),
+        Ok(bytes) => {
+          slot.as_mut().unwrap().installing = true;
+          Ok(bytes)
+        }
+        Err(error) => Err(error.to_string()),
+      }
     };
-    worker.send(json!({ "type": "updateResult", "id": id, "error": failed }));
+    let error = match failed {
+      Ok(bytes) => {
+        worker.send(json!({ "type": "updateProgress", "id": mine, "installing": true }));
+        // 装成了走不到下面：Windows 上插件把安装包交出去之后直接退出这个进程（控制器的 stdin 随之断开，它也退出）。
+        update.install(bytes).err().map_or_else(|| "安装包交给系统了，但这个进程没有退出".to_string(), |error| error.to_string())
+      }
+      Err(error) => error,
+    };
+    worker.download.lock().unwrap().take();
+    worker.send(json!({ "type": "updateResult", "id": mine, "error": error }));
   });
-  *task = Some((id, handle));
+  *slot = Some(Download { id, installing: false, handle });
 }
 
-/// 收掉在下的那一趟，替它回一条 updateResult error。没有在下的就什么也不做。
-pub fn cancel(shell: &Arc<Shell>, why: &str) {
-  let Some((id, handle)) = shell.update_task.lock().unwrap().take() else { return };
-  handle.abort();
+/// 控制器要取消请求号是 id 的那一趟：还在下就收掉，已经在装就说取消不了。结果回给控制器。
+pub fn cancel(shell: &Arc<Shell>, id: Value) {
+  let outcome = {
+    let mut slot = shell.download.lock().unwrap();
+    match slot.as_ref() {
+      Some(download) if download.id == id && download.installing => "installing",
+      Some(download) if download.id == id => {
+        slot.take().unwrap().handle.abort();
+        "cancelled"
+      }
+      _ => "gone",
+    }
+  };
+  shell.send(json!({ "type": "updateCancelResult", "id": id, "outcome": outcome }));
+}
+
+/// 超了上限：还在下就收掉，替它回一条 updateResult error。
+fn refuse(shell: &Arc<Shell>, id: &Value, why: &str) {
+  let mut slot = shell.download.lock().unwrap();
+  if !slot.as_ref().is_some_and(|download| &download.id == id && !download.installing) {
+    return;
+  }
+  slot.take().unwrap().handle.abort();
+  drop(slot);
   shell.send(json!({ "type": "updateResult", "id": id, "error": why }));
+}
+
+/// 控制器没了：在下的那一趟没人等结果了，收掉（已经在装的随它装完、壳退出）。
+pub fn abandon(shell: &Arc<Shell>) {
+  let mut slot = shell.download.lock().unwrap();
+  if slot.as_ref().is_some_and(|download| !download.installing) {
+    slot.take().unwrap().handle.abort();
+  }
 }

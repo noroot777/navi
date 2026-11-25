@@ -8,7 +8,7 @@
 //   { type: "reload" } { type: "window", size } { type: "front" } { type: "openExternal", url } { type: "openPath", path }
 //   { type: "dialog", id, title, detail, buttons }  弹原生对话框，壳回 { type: "dialogResult", id, index }
 //   { type: "menu", remote, login, switch }    托盘菜单里两个勾此刻的样子，和「切换到新版服务…」在不在（handover.mjs）
-//   { type: "updateCheck" | "updateInstall" }   查更新、装更新（updates.mjs，壳回 updateResult / updateProgress）
+//   { type: "updateCheck" | "updateInstall" | "updateCancel" }   查、装、取消更新（updates.mjs，壳回 updateResult / updateProgress / updateCancelResult）
 // 壳发来的：started（主框架开始载一份文档）、report（页面表态：size:<setup|work> / titlebar / broken:<地址>；
 //   url:<地址> 是页面内换了地址，不换文档）、
 //   navigationBlocked（壳的导航前认人没过）、action（本地那一屏上的按钮）、menu（托盘菜单）、link（navi:// 链接）、dialogResult。
@@ -44,7 +44,7 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
   const handover = createHandover({
     cfg,
     timing: { poll: t.handover ?? 5_000 },
-    busy: () => (updates.installing ? `正在下载 Navi ${updates.installing} 的更新` : null),
+    busy: () => occupied(),
     overrides: overrides.handover,
     ui: {
       log, menu: () => pushMenu(), hold: (title, detail) => showInstalling(title, detail), release: () => loadHome(),
@@ -53,14 +53,31 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
   });
   const updates = createUpdates({
     cfg, send, enabled: updatesEnabled, timing: t.updates,
-    busy: () => (handover.state.phase === "switching" ? "正在切换到新版服务" : null),
+    busy: () => occupied(),
     ui: {
       log, ask: (...args) => ask(...args), alert: (...args) => alert(...args), done: () => loadHome(),
-      progress: (version, percent, cancel) => showInstalling(`正在下载 Navi ${version}`,
-        `${Number.isFinite(percent) ? `${percent}%，` : ""}下完自动安装，Navi 会自己重新打开。在跑的服务和任务都不停。`,
-        [{ id: "cancelUpdate", title: "取消", run: cancel }]),
+      progress: (version, progress, cancel) => showInstalling(...downloadScreen(version, progress), cancel ? [{ id: "cancelUpdate", title: "取消", run: cancel }] : []),
     },
   });
+
+  /**
+   * 谁这会儿占着窗口那一屏、要让服务换一换：下更新、换到新版服务、按新设置重启服务。三件事互斥 —— 谁都会盖上自己那一屏、
+   * 做完再载回工作区，半路被另一件盖掉，取消按钮、进度就没了，或者两边一起去停服务。开始之前问这里，有人占着就说是谁。
+   */
+  function occupied() {
+    if (updates.installing) return `正在下载 Navi ${updates.installing} 的更新`;
+    if (handover.state.phase === "switching") return "正在切换到新版服务";
+    if (state.remoteBusy) return "正在改「允许其他设备访问」";
+    return null;
+  }
+
+  /** 下载更新那一屏：下载中（有总长度报百分比，没有就报收到多少）/ 正在取消 / 已经在装。 */
+  function downloadScreen(version, { phase, percent, received }) {
+    if (phase === "installing") return [`正在安装 Navi ${version}`, "已经下完、验过签，正在交给安装程序，这一步取消不了。装完 Navi 会自己重新打开。"];
+    if (phase === "cancelling") return [`正在取消下载 Navi ${version}`, "等下载停下来就回到工作区。"];
+    const done = Number.isFinite(percent) ? `${percent}%，` : received ? `已收到 ${(received / 1024 / 1024).toFixed(1)} MB，` : "";
+    return [`正在下载 Navi ${version}`, `${done}下完自动安装，Navi 会自己重新打开。在跑的服务和任务都不停。`];
+  }
 
   const sameOrigin = (url) => {
     try { return new URL(url).origin === new URL(cfg.windowURL).origin; } catch { return false; }
@@ -438,6 +455,8 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
   // 收窄到「再评估到停下之间」那一下：服务端没有「先停止接活、再给影响快照」的关口，这一下仍然挡不住。
   async function toggleRemote() {
     if (state.remoteBusy) return;
+    const other = occupied();
+    if (other) return void alert("现在改不了", `${other}，等它完了再改。`);
     const hold = activeHold(cfg);
     if (hold) return void alert("现在改不了", `${hold}。等它完了再改。`);
     state.remoteBusy = true;
@@ -535,7 +554,7 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
       case "action": return state.actions.get(message.id)?.();
       case "menu": return menuActions[message.id]?.();
       case "link": return void openLink(String(message.url ?? ""));
-      case "updateResult": case "updateProgress": return updates.receive(message);
+      case "updateResult": case "updateProgress": case "updateCancelResult": return updates.receive(message);
       case "dialogResult": {
         const resolve = state.dialogs.get(message.id);
         state.dialogs.delete(message.id);
@@ -563,6 +582,18 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
       resetPageConnection();
       updates.stop();
       handover.stop();
+    },
+    /**
+     * 壳没了（关掉、崩了，stdin 断了）：别的都停；正在切换服务就等这一趟做完，旧服务已经交出去了就先把新版起起来。
+     * 旧服务停了以后能起新版的只有这里，壳退出不该把它带走 —— 不然服务一直不在，直到用户再打开 Navi。
+     */
+    async shutdown() {
+      this.stop();
+      await handover.settled();
+      if (!handover.successorPending()) return;
+      log("壳退出了，旧服务已经交出去：先把新版服务起起来再退");
+      const outcome = await launcher.ensureRunning();
+      log(outcome.kind === "ready" ? `新版服务起来了（进程 ${outcome.instance?.pid}）` : `新版服务没起来：${outcome.message ?? outcome.kind}`);
     },
     state,
   };

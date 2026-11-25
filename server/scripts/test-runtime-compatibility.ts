@@ -3,7 +3,7 @@
 //     %LOCALAPPDATA%\Navi\runtimes、路径不分大小写；mac 包是 format 1、仓库在数据根下，原样不变；
 //   · Windows 桌面版申请接管时带 holdResources：服务退出会收掉、又接不过去的东西（终端、项目服务……）还在，
 //     就不发许可、许可当场撤掉，旧服务原样留着（acquireRuntimeHandover 的 standing）；
-//   · 兑现许可（commitRuntimeHandover）：核验和「不再到期」是同一步，兑现后封口一直保持；接管方没来停就按期限自己退。
+//   · 兑现许可（commitRuntimeHandover）：核验和下线是同一步，兑现后不再到期、撤不回，随即自己退出。
 import "./isolated-data.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -99,26 +99,22 @@ try {
     const lease = reserveRuntimeHandover()!;
     assert.equal(commitRuntimeHandover("not-the-lease", () => assert.fail()), false, "别人的许可兑现不了");
     let exited = 0;
-    assert.equal(commitRuntimeHandover(lease, () => { exited++; }, 60_000), true);
-    assert.equal(commitRuntimeHandover(lease, () => { exited++; }, 60_000), true, "重复兑现不另起退出计时");
+    assert.equal(commitRuntimeHandover(lease, () => { exited++; }, 40), true);
+    assert.equal(commitRuntimeHandover(lease, () => { exited++; }, 40), true, "重复兑现不另起退出");
     later(10 * 60_000);
-    assert.equal(runtimeHandoverActive(), true, "兑现后不再到期：封口一直保持到接管方停服");
+    assert.equal(runtimeHandoverActive(), true, "兑现后不再到期：封口保持到退出");
     Date.now = realNow;
-    assert.equal(releaseRuntimeHandover(lease), true, "接管方停服失败时照常解封");
-    assert.equal(runtimeHandoverActive(), false);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(exited, 0, "解封了就不再自己退出");
-
-    const abandoned = reserveRuntimeHandover()!;
-    let selfExit = 0;
-    assert.equal(commitRuntimeHandover(abandoned, () => { selfExit++; }, 15), true);
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    assert.equal(selfExit, 1, "兑现后接管方一直没来停：到期限自己退出，不一直封着");
-    releaseRuntimeHandover(abandoned);
+    assert.equal(releaseRuntimeHandover(lease), false, "兑现了就撤不回：不会解封接新活、再被人照旧答复停掉");
+    assert.equal(runtimeHandoverActive(), true);
+    assert.equal(exited, 0);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(exited, 1, "兑现了就自己退出，只退一次");
+    const { COMMITTED_EXIT_MS } = await import("../src/runtime-handover-state.js");
+    assert.ok(COMMITTED_EXIT_MS <= 1_000, "只留够送出答复的那一下，不留「封着等人来停」的空当");
   } finally {
     Date.now = realNow;
   }
-  console.log("✓ 兑现许可：到期或别人的兑现不了；兑现后不再到期，停服失败照常解封，接管方没来就按期限自己退出");
+  console.log("✓ 兑现许可：到期或别人的兑现不了；兑现了不再到期、撤不回，随即自己退出");
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

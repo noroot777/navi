@@ -7,12 +7,12 @@ export class RuntimeHandoverBlockedError extends Error {
   }
 }
 
-let lease: { token: string; deadline: number } | null = null;
+let lease: { token: string; deadline: number; committed?: true } | null = null;
 let expiry: ReturnType<typeof setTimeout> | null = null;
 const waiting = new Set<() => void>();
 
-/** 许可兑现之后，接管方没来停这份服务时自己退出的期限（接管方停服只要几秒；它中途崩了也不让服务一直封着）。 */
-export const COMMITTED_EXIT_MS = 90_000;
+/** 许可兑现之后过多久退出：只留够把「兑现了」这句答复送出去。 */
+export const COMMITTED_EXIT_MS = 300;
 
 function endLease(): void {
   lease = null;
@@ -39,21 +39,24 @@ export function reserveRuntimeHandover(): string | null {
 }
 
 export function releaseRuntimeHandover(token: string): boolean {
-  if (!lease || lease.token !== token) return false;
+  if (!lease || lease.token !== token || lease.committed) return false;
   endLease();
   return true;
 }
 
 /**
- * 兑现许可：接管方马上就要停这份服务了。核验和「不再到期」在同一步里做 —— 先查有效、再去停，中间许可可能刚好到期、
- * 服务解封接了新活，接管方却照着旧答复把它连同新活一起停掉。兑现后封口一直保持到退出：不再自动到期；接管方停服失败
- * 时 release 照常解封；接管方自己没了，到 `COMMITTED_EXIT_MS` 由这份服务按 `exit` 自己退出（它本来就要被停）。
+ * 兑现许可 = 这份服务自己下线，交给接管方起新版。核验许可和退出是这份服务里同一步做的：要是先回一句「有效」、再由
+ * 接管方来停，中间许可可能刚好到期、服务解封接了新活，接管方却照着旧答复把它连同新活一起停掉；兑现后要是还留着
+ * 「封着等人来停」这个状态，接管方中途没了，它要么一直封着，要么到点没人接续地退出。所以兑现后不再到期、不能撤回
+ * （release 认不了它），`exitAfterMs` 后按 `exit` 退出。起新版是接管方的事：它在许可之前就准备好了新版、核过了影响，
+ * 窗口那边退出时也会先把这一趟做完（desktop/windows/launcher/controller-main.mjs）。
  */
 export function commitRuntimeHandover(token: string, exit: () => void, exitAfterMs = COMMITTED_EXIT_MS): boolean {
   if (!runtimeHandoverMatches(token) || !lease) return false;
-  if (lease.deadline !== Infinity) {
+  if (!lease.committed) {
     if (expiry) clearTimeout(expiry);
     lease.deadline = Infinity;
+    lease.committed = true;
     expiry = setTimeout(exit, exitAfterMs);
   }
   return true;

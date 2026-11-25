@@ -36,10 +36,10 @@ export function mountRuntimeHandoverRoutes(api: Hono) {
       return context.json({ released });
     }
     if (body.check) return context.json({ valid: runtimeHandoverMatches(body.check) });
-    // 停服前最后一步：核验并兑现（见 commitRuntimeHandover）。接管方只凭 committed=true 去停。
+    // 停服前最后一步：核验并兑现，兑现了这份服务就自己下线（见 commitRuntimeHandover）。
     if (body.commit) {
       return context.json({ committed: commitRuntimeHandover(body.commit, () => {
-        console.warn("[navi] 接管许可兑现后接管方一直没来停服务，自己退出");
+        console.warn("[navi] 接管许可已兑现，交给新版服务，退出");
         process.exit(0);
       }) });
     }

@@ -5,10 +5,12 @@
 // 手动检查照样摆出来）。点了「现在更新」窗口盖上下载进度，下完壳把安装包交给系统、自己退出，安装包装完重开 Navi。
 // 换的只是壳：服务和 agent 不停，新壳起来后再按 handover.mjs 换到新运行时。
 //
-// 每一步都有头（壳里查 30 秒、下 15 分钟、300 MB，见 update.rs）；这里再兜一层：壳那边过了头还没回话
-// （或者下载一分多钟没有一点进展）就当没成，叫壳收掉那一趟（updateCancel），放开状态、页面回来。
-// 下载那一屏有「取消」，点了就是这一条路。正在切换到新版服务时不下更新，在下更新时也不切（handover.mjs 问 busy）：
-// 两边都要占着窗口那一屏，谁也不能半路把对方的页面换掉。
+// 每一步都有头（壳里查 30 秒、下 15 分钟、300 MB，见 update.rs）；这里再兜一层：壳那边过了头还没回话、或者下载一分半
+// 没收到一个字节（壳收到字节就报，有没有总长度都报），就叫壳收掉那一趟。下载那一屏的「取消」走同一条路。
+// 取消是壳裁决的（updateCancel → updateCancelResult）：它说收掉了才放开状态、页面回来；它说已经在装，就照实
+// 摆「正在安装」，不说取消了。请求号带着这一代控制器的标识：重开的控制器认不成上一代那一趟的答复。
+// 别处占着窗口那一屏（换运行时、按新设置重启服务，controller.mjs 的 occupied）时不下。
+import { randomBytes } from "node:crypto";
 import { readSettings, writeSettings } from "./settings.mjs";
 
 export const FIRST_CHECK_MS = 60_000;
@@ -16,17 +18,18 @@ export const INTERVAL_MS = 6 * 60 * 60_000;
 export const CHECK_LIMIT_MS = 60_000;
 export const INSTALL_LIMIT_MS = 16 * 60_000;
 export const STALL_LIMIT_MS = 90_000;
+export const CANCEL_REPLY_MS = 15_000;
 
 export function createUpdates({ cfg, send, ui, enabled = process.env.NAVI_WIN_UPDATES === "1", busy = () => null, timing = {} }) {
-  const t = { first: FIRST_CHECK_MS, interval: INTERVAL_MS, check: CHECK_LIMIT_MS, install: INSTALL_LIMIT_MS, stall: STALL_LIMIT_MS, ...timing };
-  const state = { serial: 0, pending: new Map(), timer: null, busy: false, installing: null, download: null };
+  const t = { first: FIRST_CHECK_MS, interval: INTERVAL_MS, check: CHECK_LIMIT_MS, install: INSTALL_LIMIT_MS, stall: STALL_LIMIT_MS, cancelReply: CANCEL_REPLY_MS, ...timing };
+  const state = { serial: 0, generation: randomBytes(4).toString("hex"), pending: new Map(), timer: null, busy: false, installing: null, download: null };
 
-  /** 发给壳、等它回话；limitMs 到了还没回就按 { error, timedOut } 收场。返回 { id, done, settle }。 */
-  function request(message, limitMs) {
-    const id = `u${++state.serial}`;
+  /** 发给壳、等它回话；给了 limitMs，到了还没回就按 { error, timedOut } 收场。返回 { id, done, settle }。 */
+  function request(message, limitMs = null) {
+    const id = `u-${state.generation}-${++state.serial}`;
     let settle;
     const done = new Promise((resolve) => {
-      const timer = setTimeout(() => settle({ error: "等了太久没有回音", timedOut: true }), limitMs);
+      const timer = limitMs === null ? null : setTimeout(() => settle({ error: "等了太久没有回音", timedOut: true }), limitMs);
       settle = (answer) => {
         if (!state.pending.has(id)) return;
         clearTimeout(timer);
@@ -92,41 +95,76 @@ export function createUpdates({ cfg, send, ui, enabled = process.env.NAVI_WIN_UP
     const other = busy();
     if (other) return void await ui.alert("现在不能更新", `${other}，等它完了再从托盘菜单「检查更新…」更新。`);
     state.installing = version;
-    const download = request({ type: "updateInstall", version }, t.install);
-    state.download = { ...download, stall: null, cancelled: false };
-    progress(null);
+    const download = { ...request({ type: "updateInstall", version }), version, received: 0, percent: null, phase: "downloading", stall: null, reply: null, aborting: null };
+    state.download = download;
+    // 到了总时限：还在下就叫壳收掉；已经在装（取消不了）还没有结局，就不再等它了。
+    const limit = setTimeout(() => (download.phase === "installing" ? download.settle({ error: "安装一直没有结束" }) : abandon("下载超过了时限")), t.install);
+    beat();
     const result = await download.done;
-    // 装成了走不到这里：壳把安装包交出去就退出了。回来的只有失败、超时和取消。
-    clearTimeout(state.download.stall);
-    const { cancelled } = state.download;
+    // 装成了走不到这里：壳把安装包交出去就退出了。回来的只有失败、超时和取消 —— 都是壳认过的结局。
+    clearTimeout(limit);
+    clearTimeout(download.stall);
+    clearTimeout(download.reply);
     state.download = null;
     state.installing = null;
-    if (result.timedOut || cancelled) send({ type: "updateCancel" });
     ui.done();
-    if (cancelled) return ui.log(`取消了更新到 ${version}`);
+    if (result.cancelled) return ui.log(`取消了更新到 ${version}`);
     ui.log(`更新到 ${version} 没装上：${result.error}`);
     await ui.alert("更新没装上", `${result.error || "原因不明"}\n\n现在的版本照常能用，可以稍后从托盘菜单「检查更新…」再试。`);
   }
 
-  /** 盖上进度那一屏、重新计「没进展」的时。 */
-  function progress(percent) {
+  /** 照现在的阶段画那一屏；还在下的时候顺带重新计「没进展」的时。 */
+  function beat() {
     const download = state.download;
-    ui.progress(state.installing, percent, cancel);
     clearTimeout(download.stall);
-    download.stall = setTimeout(() => download.settle({ error: `下载 ${Math.round(t.stall / 1000)} 秒没有进展`, timedOut: true }), t.stall);
+    if (download.phase === "downloading" && !download.aborting) {
+      download.stall = setTimeout(() => abandon(`下载 ${Math.round(t.stall / 1000)} 秒没有收到数据`), t.stall);
+    }
+    ui.progress(download.version, {
+      phase: download.aborting ? "cancelling" : download.phase,
+      percent: download.percent,
+      received: download.received,
+    }, download.phase === "downloading" && !download.aborting ? cancel : null);
   }
 
-  function cancel() {
-    if (!state.download) return;
-    state.download.cancelled = true;
-    state.download.settle({ error: "已取消" });
+  /** 叫壳收掉这一趟，等它裁决（updateCancelResult）。user：是用户点的取消，不是过了期限。 */
+  function abandon(why, { user = false } = {}) {
+    const download = state.download;
+    if (!download || download.aborting || download.phase !== "downloading") return;
+    download.aborting = { why, user };
+    send({ type: "updateCancel", id: download.id });
+    // 壳一直不答（它多半已经没了）：不能一直挂着那一屏。
+    download.reply = setTimeout(() => download.settle({ error: `${why}；壳没有回应取消` }), t.cancelReply);
+    beat();
+  }
+
+  function cancel() { abandon("已取消", { user: true }); }
+
+  function decided(download, outcome) {
+    const { why, user } = download.aborting ?? {};
+    if (outcome === "cancelled") return download.settle({ error: why, cancelled: user });
+    clearTimeout(download.reply);
+    download.aborting = null;
+    if (outcome === "installing") {
+      download.phase = "installing";
+      ui.log(`要取消更新时已经在装了：${why}`);
+      return beat();
+    }
+    // gone：壳那边这一趟已经结束了，它的结局（updateResult）就在路上；再等一会儿，还没有就按没装上收场。
+    download.reply = setTimeout(() => download.settle({ error: why }), t.cancelReply);
   }
 
   function receive(message) {
+    const download = state.download;
+    const current = download && message.id === download.id;
     if (message.type === "updateProgress") {
-      if (state.download && message.id === state.download.id) progress(Number(message.percent));
-      return;
+      if (!current) return;
+      if (message.installing) download.phase = "installing";
+      if (Number.isFinite(message.received)) download.received = message.received;
+      if (Number.isFinite(message.percent)) download.percent = message.percent;
+      return beat();
     }
+    if (message.type === "updateCancelResult") return void (current && download.aborting && decided(download, message.outcome));
     state.pending.get(message.id)?.(message);
   }
 

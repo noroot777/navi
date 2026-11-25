@@ -6,9 +6,11 @@
 //     调度台回合、agent 进程不对等），shutdown.resources 是旧服务一停就跟着没的东西（终端、项目服务、预览）。
 //     两样有一样不空就留在旧服务上等 —— 在跑的终端命令、开着的预览都不被打断。
 //   · 都空了：攥住维护锁（别处这时不许起服务）→ 拿接管许可（POST /api/runtime-handover，holdResources：许可发下
-//     之前服务端在封口之后再看一次终端这些，有就不发）→ 给库留底 → 兑现许可（核验和「不再到期」是服务端同一步，
-//     兑现后封口一直保持到旧服务退出）→ 停掉旧服务（agent 的进程树保住，见 restart.mjs）→ 松开维护锁，
+//     之前服务端在封口之后再看一次终端这些，有就不发）→ 给库留底 → 兑现许可（核验和下线是旧服务里同一步：兑现了
+//     它就自己退出，撤不回）→ 等它退干净（没退就停掉，agent 的进程树保住，见 restart.mjs）→ 松开维护锁，
 //     窗口重连时 launcher 用新运行时起服务，新服务按 pid 认回 agent。
+// 旧服务一停，起新版就是这里的事：壳被关掉、崩了（控制器的 stdin 断了）也先把这一趟做完、把新版起起来再退
+// （settled / successorPending，controller-main.mjs）。
 // 中途哪一步不成都不停旧服务，回去接着等；连着 4 次拿不到许可就不再自动试，菜单里留「重试切换到新版服务…」。
 // 用户也可以从菜单「切换到新版服务…」现在就换：把会被打断的摆给他看，他点了才不等。他点的是那一刻那一份服务、
 // 那一张名单 —— 维护锁里再核一遍，换了一份服务、或者名单里多了他没见过的，就不停，把新名单再摆给他。
@@ -64,7 +66,8 @@ export function createHandover({ cfg, ui, busy = () => null, timing = {}, overri
   };
   const t = { poll: 5_000, ...timing };
   // phase：idle 不用换 / waiting 在等 / blocked 自动切换停了、等用户 / switching 正在换
-  const state = { phase: "idle", items: [], why: null, failures: 0, timer: null, busy: false, from: null };
+  // inflight：正在做的那一趟（攥锁到松锁）；successor：旧服务停了、还没认出新版起来
+  const state = { phase: "idle", items: [], why: null, failures: 0, timer: null, busy: false, from: null, inflight: null, successor: false };
 
   const menu = () => ({
     visible: state.phase === "waiting" || state.phase === "blocked",
@@ -74,6 +77,7 @@ export function createHandover({ cfg, ui, busy = () => null, timing = {}, overri
 
   /** 控制器每认出一次自己那份服务就告诉这里一声。 */
   function observe(instance) {
+    if (instance && state.phase !== "switching") state.successor = false;
     if (!cfg.isLocal || !instance?.codeDir || state.phase === "switching") return;
     const target = publishedRuntime(cfg);
     if (!target || samePath(instance.codeDir, target, cfg.windows) || !storeContains(cfg, instance.codeDir)) {
@@ -160,22 +164,9 @@ export function createHandover({ cfg, ui, busy = () => null, timing = {}, overri
     }
     setPhase("switching");
     ui.hold("正在切换到新版 Navi 服务", "在跑的任务不停，新版服务起来后接着接管它们。");
-    let end = null;
-    let lease = null;
-    let outcome;
-    try {
-      // 强制切换前重新发布一遍：用户对着对话框想了多久都行，停旧服务前新版必须还在、还完整。
-      const prepared = force ? await prepare() : { compat };
-      if (prepared.why) outcome = { kind: "changed", why: prepared.why };
-      else {
-        end = await deps.begin(NOTE);
-        outcome = await stopOld(instance, prepared.compat, force ? confirmed : undefined, (value) => { lease = value; });
-      }
-    } catch (error) {
-      outcome = { kind: "changed", why: error.message };
-    }
-    if (outcome.kind !== "stopped" && lease) await deps.handover(instance.id, { release: lease }).catch(() => {});
-    end?.();
+    state.inflight = run(instance, compat, force ? confirmed : undefined, force);
+    const outcome = await state.inflight;
+    state.inflight = null;
     if (outcome.kind === "stopped") {
       ui.log(`旧服务（进程 ${instance.pid}）已停，库的底：${outcome.backup ?? "还没有库"}；换新版运行时起`);
       state.failures = 0;
@@ -202,6 +193,28 @@ export function createHandover({ cfg, ui, busy = () => null, timing = {}, overri
     return outcome;
   }
 
+  /** 攥锁 → stopOld → 没停成就还回许可 → 松锁。只碰服务和锁，不碰窗口：窗口没了它也照样做完（settled）。 */
+  async function run(instance, compat, confirmed, force) {
+    let end = null;
+    let lease = null;
+    let outcome;
+    try {
+      // 强制切换前重新发布一遍：用户对着对话框想了多久都行，停旧服务前新版必须还在、还完整。
+      const prepared = force ? await prepare() : { compat };
+      if (prepared.why) outcome = { kind: "changed", why: prepared.why };
+      else {
+        end = await deps.begin(NOTE);
+        outcome = await stopOld(instance, prepared.compat, confirmed, (value) => { lease = value; });
+      }
+    } catch (error) {
+      outcome = { kind: "changed", why: error.message };
+    }
+    if (outcome.kind !== "stopped" && lease) await deps.handover(instance.id, { release: lease }).catch(() => {});
+    if (outcome.kind === "stopped" || outcome.committed) state.successor = true;
+    end?.();
+    return outcome;
+  }
+
   /**
    * 维护锁攥着时做：认人 → 许可 → 留底 → 兑现许可 → 停。confirmed 是 undefined 时走许可（自动切换）；
    * 强制切换没有许可，改成停之前最后再问一遍会打断谁，跟用户确认过的那张比。
@@ -224,8 +237,9 @@ export function createHandover({ cfg, ui, busy = () => null, timing = {}, overri
       return { kind: "changed", why: "接管许可已经失效，旧服务没停" };
     }
     if (confirmed && await widened(instance, compat, confirmed)) return { kind: "widened" };
+    // 兑现了旧服务自己会退：这里等它退干净，没退就停掉（它已经不接活了，停它不会带走新活）。
     const stopped = await deps.stop({ kind: "ours", pid: instance.pid });
-    if (stopped.kind !== "stopped") return { kind: "changed", why: stopped.why };
+    if (stopped.kind !== "stopped") return { kind: "changed", why: stopped.why, committed: Boolean(lease) };
     return { kind: "stopped", backup };
   }
 
@@ -279,6 +293,10 @@ export function createHandover({ cfg, ui, busy = () => null, timing = {}, overri
     reconsider: () => void reconsider(),
     menu,
     stop: stopTimer,
+    /** 正在做的那一趟做完（没有就是马上）；控制器退出前等它。 */
+    settled: () => state.inflight ?? Promise.resolve(null),
+    /** 旧服务停了（或者兑现了许可、它自己在退），新版还没认出来：退出前得把新版起起来。 */
+    successorPending: () => state.successor,
     state,
   };
 }

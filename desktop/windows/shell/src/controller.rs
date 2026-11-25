@@ -29,8 +29,8 @@ pub struct Shell {
   pub menu: Mutex<Option<tray::Items>>,
   /// 最近一次查到、还没装的那一版（src/update.rs）。
   pub update: Mutex<Option<tauri_plugin_updater::Update>>,
-  /// 在下的那一趟和它的请求号：取消、超限时收掉它（src/update.rs）。
-  pub update_task: Mutex<Option<(Value, tauri::async_runtime::JoinHandle<()>)>>,
+  /// 在下（或在装）的那一趟：取消和下完去装在这里裁决（src/update.rs）。
+  pub download: Mutex<Option<update::Download>>,
 }
 
 impl Shell {
@@ -101,6 +101,7 @@ impl Shell {
 
   fn exited(self: &Arc<Self>, app: &AppHandle) {
     *self.stdin.lock().unwrap() = None;
+    update::abandon(self);
     let status = self.child.lock().unwrap().take().and_then(|mut child| child.wait().ok());
     if self.quitting.load(Ordering::SeqCst) {
       return;
@@ -142,7 +143,7 @@ impl Shell {
       "menu" => tray::update(app, self, &message),
       "updateCheck" => update::check(app, self, message.get("id").cloned().unwrap_or(Value::Null)),
       "updateInstall" => update::install(self, message.get("id").cloned().unwrap_or(Value::Null), &text("version")),
-      "updateCancel" => update::cancel(self, "已取消，没有装。"),
+      "updateCancel" => update::cancel(self, message.get("id").cloned().unwrap_or(Value::Null)),
       "dialog" => {
         let (app, shell, message) = (app.clone(), self.clone(), message.clone());
         std::thread::spawn(move || {

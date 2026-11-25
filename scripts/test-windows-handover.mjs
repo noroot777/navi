@@ -1,10 +1,10 @@
-// Windows 桌面版装了新版之后的两件事（desktop/windows/launcher/handover.mjs、updates.mjs、db-backup.mjs，在 mac 上也跑）：
-//   · 换运行时：服务还在旧运行时上就等；旧服务报了接不住的回合、或者终端 / 项目服务还开着，就不停它；都空了才
-//     攥锁 → 拿许可（带 holdResources）→ 给库留底 → 兑现许可 → 只停那一份 → 窗口重连。哪一步不成都不停、归还许可；
-//     连着拿不到许可就停下等用户；用户从菜单「现在切换」要先看会打断谁，点了才不等 —— 点的是那一份服务、那一张名单，
-//     锁里再核一遍，变了就重新问；新版运行时没发布好强制也不切；在下更新时不切。
-//   · 查更新：手动查报「已是最新」/失败原因；查到新版问三个选项，跳过的那一版自动检查不再问；装的时候盖上进度，失败了说清楚、页面回来；
-//     查和下都有期限、能取消，过了头放开状态；记不下「跳过」也不崩；正在切换服务时不下。
+// Windows 桌面版装了新版之后换到新运行时（desktop/windows/launcher/handover.mjs、db-backup.mjs，在 mac 上也跑；
+// 查更新、下更新在 test-windows-updates.mjs）：
+//   · 服务还在旧运行时上就等；旧服务报了接不住的回合、或者终端 / 项目服务还开着，就不停它；都空了才
+//     攥锁 → 拿许可（带 holdResources）→ 给库留底 → 兑现许可（旧服务自己下线）→ 等它退干净 → 窗口重连。哪一步不成都不停、
+//     归还许可；连着拿不到许可就停下等用户；用户从菜单「现在切换」要先看会打断谁，点了才不等 —— 点的是那一份服务、那一张
+//     名单，锁里再核一遍，变了就重新问；新版运行时没发布好强制也不切；在下更新时不切。
+//   · 壳在切换途中退出：控制器先把这一趟做完，旧服务交出去了就把新版起起来再退。
 //   · 留底用 SQLite 在线备份，WAL 里没并进主文件的也在，只留 5 份。
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
@@ -17,8 +17,6 @@ import { createController } from "../desktop/windows/launcher/controller.mjs";
 import { backupDatabase, KEEP } from "../desktop/windows/launcher/db-backup.mjs";
 import { blockersOf, compatibilityOf, createHandover } from "../desktop/windows/launcher/handover.mjs";
 import { activeHold } from "../desktop/windows/launcher/maintenance.mjs";
-import { readSettings } from "../desktop/windows/launcher/settings.mjs";
-import { createUpdates } from "../desktop/windows/launcher/updates.mjs";
 
 reclaimScratch(tmpdir(), "navi-windows-handover-");
 const temporary = realpathSync(claimScratch(tmpdir(), "navi-windows-handover-"));
@@ -58,7 +56,29 @@ function rig(name) {
     impact: { runtimeHandover: { blocked: [], target: COMPAT }, shutdown: { resources: [] } },
     grant: () => ({ lease: "L1", protocol: 1 }),
     valid: true, stopped: { kind: "stopped" }, backup: () => join(cfg.dataDir, "backups", "x.db"), answer: 0, answers: [],
-    onAsk: () => {}, publishError: null, busy: null,
+    onAsk: () => {}, publishError: null, busy: null, stopGate: null,
+  };
+  r.overrides = {
+    probe: async () => r.health,
+    publish: async () => {
+      r.calls.push("publish");
+      if (r.publishError) throw new Error(r.publishError);
+      return runtime(join(cfg.runtimeStore, NEW), NEW, { ".handover.json": COMPAT });
+    },
+    impact: async (id, compat) => { r.calls.push(`impact:${id}:${compat.schema}`); return typeof r.impact === "function" ? r.impact() : { impact: r.impact }; },
+    handover: async (id, body) => {
+      r.calls.push(`handover:${JSON.stringify(body)}`);
+      if (body.release) return { released: true };
+      if (body.commit) return { committed: r.valid };
+      return r.grant();
+    },
+    stop: async (target) => {
+      r.calls.push(`stop:${target.pid}`);
+      assert.ok(activeHold(cfg), "停服务时攥着维护锁");
+      await r.stopGate;
+      return r.stopped;
+    },
+    backup: async (from) => { r.calls.push(`backup:${from}`); return r.backup(); },
   };
   r.handover = createHandover({
     cfg,
@@ -74,27 +94,7 @@ function rig(name) {
       },
       alert: async (title, detail) => { r.alerts.push({ title, detail }); },
     },
-    overrides: {
-      probe: async () => r.health,
-      publish: async () => {
-        r.calls.push("publish");
-        if (r.publishError) throw new Error(r.publishError);
-        return runtime(join(cfg.runtimeStore, NEW), NEW, { ".handover.json": COMPAT });
-      },
-      impact: async (id, compat) => { r.calls.push(`impact:${id}:${compat.schema}`); return typeof r.impact === "function" ? r.impact() : { impact: r.impact }; },
-      handover: async (id, body) => {
-        r.calls.push(`handover:${JSON.stringify(body)}`);
-        if (body.release) return { released: true };
-        if (body.commit) return { committed: r.valid };
-        return r.grant();
-      },
-      stop: async (target) => {
-        r.calls.push(`stop:${target.pid}`);
-        assert.ok(activeHold(cfg), "停服务时攥着维护锁");
-        return r.stopped;
-      },
-      backup: async (from) => { r.calls.push(`backup:${from}`); return r.backup(); },
-    },
+    overrides: r.overrides,
   });
   r.sequence = () => r.calls.filter((call) => !call.startsWith("publish") && !call.startsWith("impact") && call !== "ask");
   return r;
@@ -318,160 +318,63 @@ try {
     console.log("✓ 切换前留底：SQLite 在线备份（WAL 里的也在），按时间命名，只留最近 5 份");
   }
 
-  // ── 查更新 ────────────────────────────────────────────────────────────
+  // ── 壳在切换途中退出：控制器先把这一趟做完，旧服务交出去了就把新版起起来再退 ────────
   {
-    const cfg = loadConfig({ LOCALAPPDATA: join(temporary, "updates"), NAVI_WIN_VERSION: "0.0.1" }, process.platform);
-    const sent = [];
-    const ui = { asked: [], alerts: [], progress: [], done: 0, answer: 1 };
-    const updates = createUpdates({
-      cfg, enabled: true, timing: { first: 10, interval: 10_000 },
-      send: (message) => sent.push(message),
-      ui: {
-        log: () => {}, done: () => { ui.done += 1; }, progress: (version, percent) => ui.progress.push([version, percent]),
-        ask: async (title, detail, buttons) => { ui.asked.push({ title, detail, buttons }); return ui.answer; },
-        alert: async (title) => { ui.alerts.push(title); },
+    const r = rig("shutdown-mid-switch");
+    let open;
+    r.stopGate = new Promise((resolve) => { open = resolve; });
+    const fresh = r.instance(join(r.cfg.runtimeStore, NEW), { id: "new-1", pid: 77 });
+    const events = [];
+    let starts = 0;
+    const launcher = {
+      isInitialized: () => true, approveFreshStart() {},
+      ensureRunning: async () => {
+        starts += 1;
+        events.push(`ensure:${starts}`);
+        return { kind: "ready", instance: r.calls.includes("stop:41") ? fresh : r.health.instance };
       },
-    });
-    const reply = async (body) => {
-      const request = await waitFor("一条请求", () => sent.find((message) => !message.answered));
-      request.answered = true;
-      updates.receive({ type: "updateResult", id: request.id, ...body });
-      return request;
     };
-
-    updates.checkNow();
-    assert.equal((await reply({ version: null })).type, "updateCheck");
-    await waitFor("已是最新", () => ui.alerts.includes("已经是最新版"));
-
-    updates.checkNow();
-    await reply({ error: "网络不通" });
-    await waitFor("失败原因", () => ui.alerts.includes("检查更新没成功"));
-
-    ui.answer = 1;
-    updates.checkNow();
-    await reply({ version: "0.0.2", notes: "修了几处" });
-    await waitFor("问了", () => ui.asked.length === 1);
-    assert.deepEqual(ui.asked[0].buttons, ["现在更新", "跳过这一版", "以后再说"], "关掉对话框按最后一个算：以后再说");
-    assert.match(ui.asked[0].detail, /现在是 0\.0\.1。\n\n修了几处/);
-    assert.match(ui.asked[0].detail, /服务和任务都不停/);
-    await waitFor("记下跳过", () => readSettings(cfg).skippedVersion === "0.0.2");
-
-    updates.start();
-    await reply({ version: "0.0.2" });
-    await sleep(30);
-    assert.equal(ui.asked.length, 1, "自动检查不再问跳过的那一版");
-    updates.stop();
-
-    ui.answer = 0;
-    updates.checkNow();
-    await reply({ version: "0.0.2" });
-    const install = await waitFor("装", () => sent.find((message) => message.type === "updateInstall"));
-    assert.equal(install.version, "0.0.2", "手动检查照样摆出跳过的那一版，点了就装");
-    updates.receive({ type: "updateProgress", id: install.id, percent: 40 });
-    assert.deepEqual(ui.progress, [["0.0.2", null], ["0.0.2", 40]]);
-    install.answered = true;
-    updates.receive({ type: "updateResult", id: install.id, error: "签名对不上" });
-    await waitFor("装失败", () => ui.alerts.includes("更新没装上"));
-    assert.equal(ui.done, 1, "没装上：页面回来");
-
-    const off = [];
-    const plain = createUpdates({ cfg, enabled: false, send: (message) => off.push(message), ui: { log() {}, alert: async (title) => off.push(title) } });
-    plain.start();
-    plain.checkNow();
-    await waitFor("没带更新源", () => off.includes("这一版不自动更新"));
-    assert.ok(!off.some((message) => message.type), "没带更新源的构建一条请求都不发");
-    console.log("✓ 查更新：已是最新 / 失败说原因；三个选项，跳过的自动检查不再问；装时盖进度，失败了说清楚、页面回来");
-  }
-
-  // ── 查更新、下更新都有头，能取消；记不下跳过不崩；切换服务时不下 ──────────
-  {
-    const cfg = loadConfig({ LOCALAPPDATA: join(temporary, "updates-limits"), NAVI_WIN_VERSION: "0.0.1" }, process.platform);
-    const sent = [];
-    const ui = { asked: [], alerts: [], progress: [], done: 0, answer: 0, cancel: null, busy: null };
-    const updates = createUpdates({
-      cfg, enabled: true, timing: { first: 10_000, check: 40, stall: 60 },
-      busy: () => ui.busy,
-      send: (message) => sent.push(message),
-      ui: {
-        log: () => {}, done: () => { ui.done += 1; },
-        progress: (version, percent, cancel) => { ui.progress.push([version, percent]); ui.cancel = cancel; },
-        ask: async (title, detail, buttons) => { ui.asked.push({ title, detail, buttons }); return ui.answer; },
-        alert: async (title, detail) => { ui.alerts.push({ title, detail }); },
-      },
-    });
-    const next = (type) => waitFor(type, () => sent.find((message) => message.type === type && !message.taken)).then((message) => { message.taken = true; return message; });
-    const alerted = (title) => waitFor(title, () => ui.alerts.find((item) => item.title === title));
-
-    updates.checkNow();
-    const silent = await next("updateCheck");
-    assert.match((await alerted("检查更新没成功")).detail, /等了太久没有回音/, "壳一直不回话：按失败收场");
-    updates.receive({ type: "updateResult", id: silent.id, version: "9.9.9" });
-    await sleep(20);
-    assert.equal(ui.asked.length, 0, "过了期限才回的答复不算数");
-    updates.checkNow();
-    updates.receive({ type: "updateResult", id: (await next("updateCheck")).id, version: null });
-    await alerted("已经是最新版");
-
-    updates.checkNow();
-    updates.receive({ type: "updateResult", id: (await next("updateCheck")).id, version: "0.0.3" });
-    const stalled = await next("updateInstall");
-    updates.receive({ type: "updateProgress", id: stalled.id, percent: 10 });
-    assert.match((await alerted("更新没装上")).detail, /秒没有进展/, "下载一直没进展：按失败收场");
-    assert.ok(sent.some((message) => message.type === "updateCancel"), "叫壳收掉那一趟");
-    assert.equal(updates.installing, null, "状态放开了");
-    assert.equal(ui.done, 1, "页面回来");
-
-    ui.alerts.length = 0;
-    updates.checkNow();
-    updates.receive({ type: "updateResult", id: (await next("updateCheck")).id, version: "0.0.3" });
-    const cancelled = await next("updateInstall");
-    updates.checkNow();
-    await alerted("正在更新");
-    assert.equal(sent.filter((message) => message.type === "updateCheck").length, 4, "在下的时候手动查：说一声，不另查");
-    ui.cancel();
-    await waitFor("页面回来", () => ui.done === 2);
-    assert.equal(sent.filter((message) => message.type === "updateCancel").length, 2);
-    updates.receive({ type: "updateResult", id: cancelled.id, error: "已取消，没有装。" });
-    await sleep(20);
-    assert.ok(!ui.alerts.some((item) => item.title === "更新没装上"), "自己点的取消不再报失败");
-    assert.equal(updates.installing, null);
-
-    mkdirSync(cfg.settingsFile, { recursive: true });
-    ui.answer = 1;
-    updates.checkNow();
-    updates.receive({ type: "updateResult", id: (await next("updateCheck")).id, version: "0.0.3" });
-    assert.ok((await alerted("没记住跳过这一版")).detail.includes("0.0.3"), "记不下跳过：说一声，控制器不崩");
-
-    ui.answer = 0;
-    ui.busy = "正在切换到新版服务";
-    updates.checkNow();
-    updates.receive({ type: "updateResult", id: (await next("updateCheck")).id, version: "0.0.3" });
-    assert.match((await alerted("现在不能更新")).detail, /正在切换到新版服务/);
-    assert.ok(!sent.some((message) => message.type === "updateInstall" && !message.taken), "切换服务时不下更新");
-    console.log("✓ 查更新、下更新有期限，过了头或点取消都放开状态、页面回来、叫壳收掉；记不下「跳过」只说一声；切换服务时不下");
-  }
-
-  // ── 接进控制器：菜单两项、壳的答复分给 updates ─────────────────────────
-  {
-    const cfg = loadConfig({ LOCALAPPDATA: join(temporary, "wired"), NAVI_URL: "http://127.0.0.1:14997" }, process.platform);
-    const sent = [];
-    const launcher = { isInitialized: () => true, approveFreshStart() {}, ensureRunning: async () => ({ kind: "failed", message: "假的" }) };
+    const lines = [];
     const controller = createController({
-      cfg, launcher, updatesEnabled: true, send: (message) => sent.push(message),
+      cfg: r.cfg, launcher, updatesEnabled: false, send: () => {}, log: (line) => lines.push(line),
       loginItem: { isEnabled: () => false, setEnabled() {}, reconcileAtLaunch: () => "skipped" },
-      timing: { poll: 10_000, updates: { first: 10_000 } },
-      overrides: { probeWindow: async () => ({ kind: "down" }) },
+      timing: { poll: 10_000, handover: 15, updates: { first: 10_000 } },
+      overrides: { handover: r.overrides, probeWindow: async () => ({ kind: "down" }) },
     });
     controller.start();
-    controller.receive({ type: "menu", id: "checkUpdates" });
-    const check = await waitFor("updateCheck", () => sent.find((message) => message.type === "updateCheck"));
-    controller.receive({ type: "updateResult", id: check.id, version: null });
-    await waitFor("已是最新的对话框", () => sent.find((message) => message.type === "dialog" && message.title === "已经是最新版"));
-    await waitFor("菜单", () => sent.find((message) => message.type === "menu"));
-    assert.deepEqual(sent.find((message) => message.type === "menu").switch, { visible: false, title: "切换到新版服务…" });
-    controller.stop();
-    console.log("✓ 控制器：托盘「检查更新…」发 updateCheck、答复回到 updates；菜单带上「切换到新版服务…」的状态");
+    await waitFor("开始停旧服务", () => r.calls.includes("stop:41"));
+    assert.ok(r.calls.includes('handover:{"commit":"L1"}'), "许可已经兑现：旧服务正在自己下线");
+    const before = starts;
+    let finished = false;
+    const shutdown = controller.shutdown().then(() => { finished = true; events.push("shutdown"); });
+    await sleep(40);
+    assert.equal(finished, false, "这一趟没做完不退");
+    events.push("stopped");
+    open();
+    await shutdown;
+    assert.ok(starts > before, "旧服务停了：退出前把新版起起来");
+    assert.ok(lines.some((line) => line.includes("先把新版服务起起来")) && lines.some((line) => line.includes("新版服务起来了（进程 77）")),
+      "是退出这一步自己起的新版，不靠窗口那边重连");
+    assert.ok(events.indexOf("stopped") < events.lastIndexOf(`ensure:${starts}`), "起新版在旧服务停下之后");
+    assert.equal(activeHold(r.cfg), null, "松开了维护锁");
+    controller.stop(); // 真退出时 controller-main 接着就 exit；这里替它收掉窗口那边重连起的计时器
+
+    const idle = rig("shutdown-idle");
+    let idleStarts = 0;
+    const quiet = createController({
+      cfg: idle.cfg, updatesEnabled: false, send: () => {},
+      launcher: { isInitialized: () => true, approveFreshStart() {}, ensureRunning: async () => { idleStarts += 1; return { kind: "failed", message: "假的" }; } },
+      loginItem: { isEnabled: () => false, setEnabled() {}, reconcileAtLaunch: () => "skipped" },
+      timing: { poll: 10_000, updates: { first: 10_000 } },
+      overrides: { handover: idle.overrides, probeWindow: async () => ({ kind: "down" }) },
+    });
+    quiet.start();
+    await waitFor("起来时连一次", () => idleStarts === 1);
+    await quiet.shutdown();
+    assert.equal(idleStarts, 1, "没在切换：直接退，不碰服务");
+    console.log("✓ 壳在切换途中退出：等这一趟做完，旧服务交出去了就把新版起起来再退；没在切换就直接退");
   }
+
 } finally {
   reclaimScratch(tmpdir(), "navi-windows-handover-");
 }
