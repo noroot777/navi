@@ -96,6 +96,8 @@ export async function invokeChat(member: ChatMember, owner: string | null, promp
   let handle: ReturnType<typeof executor.run> | undefined;
   let guard: ChatWorkspaceObserver | undefined;
   let releaseShutdown: (() => void) | undefined;
+  let settle!: () => void;
+  const settled = new Promise<void>((resolve) => { settle = resolve; });
   const abort = () => handle?.kill();
   try {
     // 观察者只记录变更、不中止（原因见 boundary.ts 顶部）；可归因的只读约束由下面
@@ -115,8 +117,10 @@ export async function invokeChat(member: ChatMember, owner: string | null, promp
     // 编号是这一次执行的，不是成员的：同一个成员前台回复、后台摘要可以同时跑，前一份结束后一份接上也不是同一份；
     // 重启确认按编号比「多出了谁」（restart-freeze.ts）。
     const run = randomUUID();
+    // 关服排空时停掉并等下面的 finally 收完尾（kill + cleanup，shutdown-resources.ts）；exit 那一下兜底。
     releaseShutdown = registerShutdownCleanup(
       () => [{ kind: "chat", id: run, label: `聊天执行 ${member.agentType}`, projectId }], abort,
+      async () => { abort(); await settled; },
     );
     const consume = async () => {
       let text = "";
@@ -180,11 +184,13 @@ export async function invokeChat(member: ChatMember, owner: string | null, promp
     return { text, degraded, notice: guard ? changeNotice(await guard.settle()) : undefined };
   } finally {
     signal.removeEventListener("abort", abort);
-    releaseShutdown?.();
     try {
       handle?.kill();
       await handle?.cleanup?.();
     } finally {
+      // 收完尾才撤关服那份责任：撤得早，这一下和退出之间就没人管它了。
+      releaseShutdown?.();
+      settle();
       guard?.close();
       if (temporary) await rm(cwd, { recursive: true, force: true });
     }

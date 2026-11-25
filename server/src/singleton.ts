@@ -8,6 +8,8 @@ import { liveMaintenanceHolderForAny, maintenanceLockFileFor } from "./maintenan
 import { resourceKeysFor, withResourceClaim } from "./resource-claim.js";
 import { type NaviPresenceRegistration, registerNaviPresence } from "./navi-presence.js";
 import { RUNS_DIR } from "./paths.js";
+import { drainShutdownCleanups, shutdownDrainPending } from "./shutdown-resources.js";
+import { reserveServiceFreeze } from "./runtime-handover-state.js";
 import { IS_WINDOWS, killPidsCommand } from "./platform.js";
 import type { ProcessInfo } from "./proc.js";
 import {
@@ -284,12 +286,12 @@ function installPresenceCleanup(dbFile: string, registration: NaviPresenceRegist
   const startedAtMs = Date.now() - Math.round(process.uptime() * 1000);
   process.once("exit", () => registration.release());
   for (const signal of EXIT_SIGNALS) {
-    process.once(signal, () => {
+    process.once(signal, () => void drainBeforeExit().then(() => {
       registration.release();
       console.warn(`[navi] 收到 ${signal}，退出（运行 ${humanDuration(Date.now() - startedAtMs)}，`
         + `NAVI_ALLOW_MULTI 实例无单例锁，在线登记已撤销；库 ${dbFile}）`);
       process.exit(SIGNAL_EXIT_CODE[signal] ?? 143);
-    });
+    }));
   }
 }
 
@@ -562,7 +564,7 @@ function installCleanup(lock: SingletonLock, presence: NaviPresenceRegistration 
     lock.release();
   });
   for (const signal of EXIT_SIGNALS) {
-    process.once(signal, () => {
+    process.once(signal, () => void drainBeforeExit().then(() => {
       const uptimeMs = Date.now() - startedAtMs;
       note({ at: new Date().toISOString(), pid: process.pid, runId, kind: "signal", signal, uptimeMs });
       const outcome = lock.release();
@@ -571,7 +573,22 @@ function installCleanup(lock: SingletonLock, presence: NaviPresenceRegistration 
       // 分开,而且锁到底有没有删掉也如实说 —— 说错了会让下一个实例得出假结论。
       console.warn(`[navi] 收到 ${signal}，退出（运行 ${humanDuration(uptimeMs)}，${describeRelease(outcome)}）`);
       process.exit(SIGNAL_EXIT_CODE[signal] ?? 143);
-    });
+    }));
+  }
+}
+
+/**
+ * 退出之前那一段能 await 的收尾（shutdown-resources.ts）：临时智能体的停止是异步的，进了 exit 就跑不完。
+ * 有要排空的才等（最多 SHUTDOWN_DRAIN_MS），这期间先冻结接活，免得这几秒里又起新回合、新终端；锁和在线
+ * 登记照旧握着，排空完才放 —— 服务还在端口上，别让下一个实例先起来撞上。没有要排空的就和原来一样立刻退。
+ */
+async function drainBeforeExit(): Promise<void> {
+  if (!shutdownDrainPending()) return;
+  try {
+    reserveServiceFreeze("restart", 60_000);
+    await drainShutdownCleanups();
+  } catch (error) {
+    console.error("[navi] 退出前收尾失败，照常退出:", error);
   }
 }
 

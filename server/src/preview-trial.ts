@@ -12,6 +12,7 @@
 // 放到这儿就成了「navi 往人家仓库里写东西」——那条线用户划得很清楚（见 preview-deps.ts
 // 顶部）。缺依赖就如实报回去，由人决定装不装。
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -60,9 +61,10 @@ const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
  * 谁也不认识的孤儿：占着端口、吃着 CPU，界面上一点痕迹都没有。所以 navi 自己退出前把它们
  * 带走，这是唯一的兜底。
  */
-const liveTrials = new Map<number, string>();
+/** pid → 这一趟的编号与目录。编号每趟新给：pid 会被系统复用，重启确认按 `kind:id` 比「多出了谁」。 */
+const liveTrials = new Map<number, { run: string; cwd: string }>();
 registerShutdownCleanup(
-  () => [...liveTrials].map(([pid, cwd]) => ({ kind: "preview-trial", id: String(pid), label: `预览试跑 ${cwd}`, pid })),
+  () => [...liveTrials].map(([pid, { run, cwd }]) => ({ kind: "preview-trial", id: run, label: `预览试跑 ${cwd}`, pid })),
   () => { for (const pid of liveTrials.keys()) killTree(pid, "SIGKILL"); },
 );
 
@@ -108,7 +110,7 @@ export async function trialPreviewScript(options: PreviewTrialOptions): Promise<
     child.on("error", (error) => { spawnError = error.message; });
     child.on("exit", () => { exited = true; });
     pid = child.pid ?? 0;
-    if (pid) liveTrials.set(pid, cwd);
+    if (pid) liveTrials.set(pid, { run: randomUUID(), cwd });
     const deadline = Date.now() + timeoutMs;
     // navi 自己绑着的端口永远不是这条脚本本尊（它就在上面跑着）。日志里出现它只可能是脚本
     // 在说「我的 /api 打到 navi 那边」——认了它，就会把 navi 自己判成「脚本起来了」。

@@ -422,13 +422,24 @@ async function genDuetTitle(
     const env = await runEnvForOwner(runOwner, ex.type);
     await waitServiceThaw(); // 服务准备重启时先不拉起(restart-freeze.ts)
     const handle = ex.run({ prompt: P.title(said), cwd, env });
-    // 起名是尽力而为,重启时不值得摆进确认(名单里不列),但进程得跟着服务一起走:服务一退没人读它、也没人杀得到它。
-    const release = registerShutdownCleanup(() => [], () => { try { handle.kill(); } catch { /* 已经退了 */ } });
+    const stop = () => { try { handle.kill(); } catch { /* 已经退了 */ } };
     let text = "";
-    try {
-      for await (const event of handle.events) {
-        if (event.kind === "text") text += event.text;
+    // 收完流(或被停掉)之后照聊天那条收尾:kill + cleanup,CLI 甩到后台的后代也收掉,收不净的交给执行器的清理责任。
+    const consumed = (async () => {
+      try {
+        for await (const event of handle.events) {
+          if (event.kind === "text") text += event.text;
+        }
+      } finally {
+        stop();
+        await handle.cleanup?.().catch(() => {});
       }
+    })();
+    // 起名是尽力而为,重启时不值得摆进确认(名单里不列),但进程得跟着服务一起走:关服排空时停掉并等它收完尾
+    // (shutdown-resources.ts),exit 那一下兜底。收完尾才撤这份责任。
+    const release = registerShutdownCleanup(() => [], stop, async () => { stop(); await consumed.catch(() => {}); });
+    try {
+      await consumed;
     } finally {
       release();
     }
