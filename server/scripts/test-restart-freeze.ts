@@ -4,9 +4,10 @@
 //   ③ 冻结之下的快照：还占着回合锁、没跑成可接管进程的那几个照实列进 interrupted；落定了的不列
 //   ④ 持有者放掉（用户取消）：被挡住的入口照常接着走，拿到的是真的回合，不是失败
 //   ⑤ 持有者不续也不放：到期自己解冻，等着的入口照样接着走；过期的凭据续不上
-//   ⑥ 页面看得出来：/health 带 freeze，冻结开始、解冻都推 service.freeze
+//   ⑥ 页面看得出来：/health 带 freeze（含剩余毫秒），冻结开始、解冻都推 service.freeze
+//   ⑦ 续期带回此刻的名单：冻结之下冒出来的（冻不住的那种）调用方看得见；等解冻时取消了的入口不再起
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ServerEvent } from "@navi/shared";
@@ -35,6 +36,8 @@ const { restartImpact } = await import("../src/reattach.js");
 const { acquireRestartFreeze } = await import("../src/restart-freeze.js");
 const { reserveServiceFreeze, serviceFrozen, ServiceFrozenError, waitServiceThaw } = await import("../src/runtime-handover-state.js");
 const { terminalSessions } = await import("../src/terminal.js");
+const { trialPreviewScript } = await import("../src/preview-trial.js");
+const { registerShutdownCleanup } = await import("../src/shutdown-resources.js");
 const { eq } = await import("drizzle-orm");
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -58,7 +61,7 @@ const token = liveLockToken()!;
 const freeze = (body: unknown, headers: Record<string, string> = { "x-navi-host-token": token }) => api.request("/restart-freeze", {
   method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body),
 });
-const health = async () => (await (await api.request("/health")).json()) as { freeze: { kind: string; until: string } | null };
+const health = async () => (await (await api.request("/health")).json()) as { freeze: { kind: string; until: string; remainingMs: number } | null };
 
 try {
   // ── ① 协议号与凭证 ───────────────────────────────────────────────────────────
@@ -86,6 +89,7 @@ try {
     assert.deepEqual(frozen.impact.interrupted, []);
     assert.ok(Array.isArray(frozen.impact.shutdown.resources), "随服务一起死的终端、聊天执行也在快照里");
     assert.equal((await health()).freeze?.kind, "restart", "页面开着时从 /health 看得出服务冻着");
+    assert.ok(((await health()).freeze?.remainingMs ?? 0) > 25_000, "给剩余毫秒：另一台设备上的页面不拿墙钟比");
     assert.equal(events.at(-1)?.type === "service.freeze" && events.at(-1)?.freeze?.kind, "restart", "冻结一开始就推事件");
 
     const busy = await freeze({});
@@ -112,8 +116,9 @@ try {
     const now = await restartImpact();
     assert.deepEqual(now.interrupted, [], "冻结之后影响名单不再变多");
 
-    const renewed = await freeze({ renew: frozen.lease });
-    assert.equal((await renewed.json() as { valid: boolean }).valid, true, "持有者续期：冻结还在");
+    const renewed = await (await freeze({ renew: frozen.lease })).json() as { valid: boolean; impact?: { interrupted: unknown[] } };
+    assert.equal(renewed.valid, true, "持有者续期：冻结还在");
+    assert.deepEqual(renewed.impact?.interrupted, [], "续期带回此刻的名单，被挡住的那几个不在里面");
 
     // 用户取消 → 放掉：被挡住的入口拿到真的回合，照常接着走。
     const released = await freeze({ release: frozen.lease });
@@ -175,6 +180,34 @@ try {
     const expired = await freeze({ renew: held.token });
     assert.equal((await expired.json() as { valid: boolean }).valid, false, "过期的凭据续不上");
     console.log("✓ 持有者崩了（不续也不放）：冻结到期自己解，等着的入口照常接着走");
+  }
+
+  // ── ⑦ 续期带回此刻的名单；等解冻时被取消的入口不再起 ───────────────────────────────
+  {
+    const frozen = await (await freeze({})).json() as { lease: string; impact: { shutdown: { resources: { id: string }[] } } };
+    assert.deepEqual(frozen.impact.shutdown.resources, []);
+    // 冻结冻不住的那种（已经在跑的 agent 自己拉起 MCP）这里用一份冻结之后才登记的资源代替：续期要把它照实交回去。
+    const drop = registerShutdownCleanup(() => [{ kind: "late", id: "x", label: "冻结之后冒出来的" }], () => {});
+    const renewed = await (await freeze({ renew: frozen.lease })).json() as { valid: boolean; impact: { shutdown: { resources: { id: string }[] } } };
+    drop();
+    assert.equal(renewed.valid, true);
+    assert.deepEqual(renewed.impact.shutdown.resources.map((r) => r.id), ["x"], "续期带回的是此刻的名单，调用方拿它跟同意过的比");
+
+    let canceled = false;
+    const gaveUp = waitServiceThaw(() => canceled);
+    const marker = join(stage, "trial-ran");
+    const trial = trialPreviewScript({ cwd: stage, script: `echo ran > "${marker}"`, mode: "full", timeoutMs: 5_000, canceled: () => canceled });
+    await sleep(300);
+    assert.equal(await settled(trial), false, "冻着的时候试跑在等");
+    canceled = true;
+    assert.equal(await gaveUp, false, "等着的时候取消了：交回 false，不等解冻");
+    const outcome = await trial;
+    assert.equal(outcome.reason, "已取消");
+    await freeze({ release: frozen.lease });
+    await sleep(300);
+    assert.equal(existsSync(marker), false, "取消了的试跑解冻之后也不起脚本");
+    assert.equal(await waitServiceThaw(() => false), true);
+    console.log("✓ 续期带回此刻的名单（冻结之下冒出来的也在）；等解冻时取消了的试跑不再起脚本");
   }
 } finally {
   offBus();

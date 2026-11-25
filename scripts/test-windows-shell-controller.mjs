@@ -49,7 +49,7 @@ function harness(name, { initialized = true, outcome, window: windowAnswer } = {
       probeWindow: async () => h.window,
       assess: async () => (typeof h.assess === "function" ? h.assess() : h.assess),
       freeze: async () => (h.freeze ? h.freeze() : { kind: "unfrozen", verdict: typeof h.assess === "function" ? h.assess() : h.assess }),
-      renew: async (lease) => { h.renews.push(lease); return h.renewed; },
+      renew: async (lease, agreed) => { h.renews.push(lease); h.renewAgreed = agreed; return h.renewed; },
       release: async (lease) => { h.releases.push(lease); },
       stop: async (target, options) => {
         h.stops.push(target);
@@ -354,6 +354,7 @@ try {
     h.receive({ type: "dialogResult", id: dialog.id, index: 0 });
     await h.waitFor("停了", () => h.stops.length === 1 && settings() === true);
     assert.deepEqual(h.renews, [lease]);
+    assert.equal(h.renewAgreed?.target?.kind, "ours", "续期拿用户点头的那份判断去比此刻的名单");
     assert.deepEqual(h.releases, [], "停成了不用放");
     h.controller.stop();
 

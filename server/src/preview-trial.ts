@@ -80,7 +80,9 @@ export async function trialPreviewScript(options: PreviewTrialOptions): Promise<
   const banner = `$ ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(" ")} BROWSER=none NAVI_PREVIEW=1 NAVI_PREVIEW_MODE=${mode} ${script}\n`;
   // Windows 的多行脚本要落成 .cmd 才跑得起来（previewScriptLaunch），那个文件写在 navi 自己
   // 的临时目录里 —— 写进用户仓库就是往人家的 git status 里塞垃圾。
-  await waitServiceThaw(); // 冻着就先不起（restart-freeze.ts）；等完到登记试跑进程之间没有 await
+  // 冻着就先不起（restart-freeze.ts）；等完到登记试跑进程之间没有 await。等着的时候取消了就当场收手：
+  // 解冻之后再看取消已经晚了，脚本在第一次轮询之前就能写文件、发请求、拉起服务。
+  if (!(await waitServiceThaw(canceled))) return { ok: false, url: null, port: null, reason: "已取消", log: banner };
   const dir = mkdtempSync(join(tmpdir(), "navi-preview-trial-"));
   let text = banner;
   let outcome: PreviewTrialOutcome | null = null;

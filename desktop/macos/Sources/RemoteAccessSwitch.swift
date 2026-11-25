@@ -10,8 +10,9 @@ import AppKit
 ///
 /// 确认框可能开着好一阵，这期间别处又起了任务，用户点头时看到的名单就过时了。所以攥住维护锁之后、停服务
 /// 之前先让服务冻结接活、拿冻结之下的快照（RestartFreeze，server/src/restart-freeze.ts）；多出了他没同意过的
-/// 影响就放开冻结、松锁、把新名单重新摆给他，没多出来才凭这份快照停，下刀前续一次期确认冻结还在。冻着的时候
-/// 不起新回合，停下之前名单不会再变多。老版本服务不认这道关口：退回即时再评估，确认框里如实说这一下堵不上。
+/// 影响就放开冻结、松锁、把新名单重新摆给他，没多出来才凭这份快照停，下刀前续一次期确认冻结还在、此刻的名单也没
+/// 多出谁（已经在跑的 agent 中途拉起 MCP 服务端冻不住，多了就不停）。冻着的时候不起新回合。名单里也算随服务一起
+/// 关掉的终端、聊天这些。老版本服务不认这道关口：退回即时再评估，确认框里如实说这一下堵不上。
 ///
 /// 设置**在旧服务确认停下之后、松开维护锁之前**才落盘：锁攥着谁也起不了服务，所以中途在哪一步退出、
 /// 崩掉，留下的都是一对对得上的「设置 + 服务」—— 没落盘就是旧设置（旧服务要么还在、要么停了等着按旧设置
@@ -30,7 +31,7 @@ enum RemoteAccessSwitch {
     busy = true
     let enable = ServedInstance.networkPending ? NaviConfig.allowsOtherDevices : !NaviConfig.allowsOtherDevices
     DispatchQueue.global(qos: .userInitiated).async {
-      let assessment = RestartImpactProbe.assessDetailedSync()
+      let assessment = RestartImpactProbe.assessDetailedSync(includingShutdown: true)
       DispatchQueue.main.async {
         decide(enable: enable, verdict: assessment.verdict, freezable: assessment.freezable, changed: false, controller: controller)
       }
@@ -103,7 +104,7 @@ enum RemoteAccessSwitch {
           } else {
             let stopped = ServerShutdown.stop(expecting: agreed.target, beforeStop: {
               guard let lease else { return true }
-              guard let why = RestartFreeze.renew(lease) else { return true }
+              guard let why = RestartFreeze.renew(lease, agreed: agreed) else { return true }
               failure = "\(why)，这次没有重启。"
               return false
             })

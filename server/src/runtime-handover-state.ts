@@ -105,9 +105,22 @@ export function afterServiceFreeze(callback: () => void): () => void {
 /**
  * 等到没冻结为止。会产生新的重启影响的入口在登记自己之前等它；等完到登记之间要是隔着 await，
  * 那条缝里可能又冻上，快照就漏了它。
+ *
+ * 给了 `canceled` 就边等边看：等着的时候用户取消了，交回 false，调用方别再往下起（冻结可能要等好一阵，
+ * 解冻之后才发现「早就取消了」时，东西已经起起来了）。没冻着时也先看一眼。
  */
-export async function waitServiceThaw(): Promise<void> {
-  while (serviceFrozen()) await new Promise<void>((resolve) => afterServiceFreeze(resolve));
+export async function waitServiceThaw(canceled?: () => boolean): Promise<boolean> {
+  while (serviceFrozen()) {
+    if (canceled?.()) return false;
+    await new Promise<void>((resolve) => {
+      let poll: ReturnType<typeof setInterval> | undefined;
+      let off = () => {};
+      const done = () => { if (poll) clearInterval(poll); off(); resolve(); };
+      off = afterServiceFreeze(done);
+      if (canceled) poll = setInterval(() => { if (canceled()) done(); }, 200);
+    });
+  }
+  return !canceled?.();
 }
 
 /** 冻结开始、续期、结束时调（界面上那句「服务正在准备重启」靠它推送）。 */

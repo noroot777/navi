@@ -28,6 +28,7 @@ import { dispatchRejection, executorOwnerScope, noteExecutorDowngrade } from "..
 import { acknowledgeTaskStart } from "../task-start-receipt.js";
 import { runEnvForOwner } from "../auth/run-env.js";
 import { applyAutoTitle } from "../auto-title-apply.js";
+import { waitServiceThaw } from "../runtime-handover-state.js";
 
 // duet 的所有权与 single 共用 runs.ts 那把单飞锁。这里原来是个模块内的 `running`
 // Set:调用方看不见它,于是 /run、/fire、/retry、scheduler 都能声称「已启动」而第二次
@@ -417,7 +418,9 @@ async function genDuetTitle(
     const said = parseAttachmentText(topic).body || topic;
     // 起名也是一次真的 CLI 调用 —— 同样要落在本人的配置目录里(§八),别让它成为
     // 唯一一条还摸得到宿主机 ~/.claude 的缝。
-    const handle = ex.run({ prompt: P.title(said), cwd, env: await runEnvForOwner(runOwner, ex.type) });
+    const env = await runEnvForOwner(runOwner, ex.type);
+    await waitServiceThaw(); // 服务准备重启时先不拉起(restart-freeze.ts)
+    const handle = ex.run({ prompt: P.title(said), cwd, env });
     let text = "";
     for await (const event of handle.events) {
       if (event.kind === "text") text += event.text;

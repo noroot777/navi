@@ -101,7 +101,7 @@ export async function invokeChat(member: ChatMember, owner: string | null, promp
     // consume 里的工具事件闸门执行。临时目录一次一清，没有可观察的项目。
     if (!temporary && purpose !== "side") guard = await watchChatWorkspace(cwd);
     // 服务冻着（准备重启，见 restart-freeze.ts）就先不拉起：等完到登记 shutdown 资源之间没有 await。
-    await waitServiceThaw();
+    await waitServiceThaw(() => signal.aborted);
     signal.throwIfAborted();
     handle = executor.run({
       cwd,

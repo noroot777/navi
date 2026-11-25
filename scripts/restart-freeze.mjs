@@ -6,6 +6,8 @@
 //
 // 用法是三步：冻结拿快照 → 停服务之前续一次期（顺带核对冻结还在）→ 不停了就放掉。
 // 停成了不用放：服务一退冻结就跟着没了；持有者自己崩了，冻结到期自己解。
+// 续期的答复里带着**此刻**的名单：已经在跑的 agent 中途拉起 navi MCP 这种事服务端冻不住，调用方拿它跟
+// 用户同意过的那份比，多出来就不停（各自的口径不同，比法留给调用方）。
 //
 // 老版本服务没有这道关口：`/restart-impact` 的答复里不带协议号（`supportsRestartFreeze` 为假），
 // 调用方退回「即时评估」那条老路，并且如实说一句评估到停下之间的新任务不在名单里。
@@ -40,13 +42,19 @@ export async function acquireRestartFreeze(send, { ttlMs } = {}) {
   return { kind: "unknown", why: reasonOf(reply, "冻结答复看不懂") };
 }
 
-/** 停服务之前续一次期：`{ valid: true, expiresInMs }`，或者 `{ valid: false, why }`（到期了、被放掉了、问不到）。 */
+/**
+ * 停服务之前续一次期：`{ valid: true, expiresInMs, impact }`（impact 是此刻的名单，同冻结快照的形状），
+ * 或者 `{ valid: false, why }`（到期了、被放掉了、问不到、此刻的名单没给出来）。
+ */
 export async function renewRestartFreeze(send, lease, { ttlMs } = {}) {
   const reply = await send(ttlMs === undefined ? { renew: lease } : { renew: lease, ttlMs });
   if (reply.status === 200 && understood(reply.data)) {
-    return reply.data.valid === true
-      ? { valid: true, expiresInMs: reply.data.expiresInMs ?? null }
-      : { valid: false, why: "冻结已经失效（到期了，或者被放掉了）" };
+    if (reply.data.valid !== true) return { valid: false, why: "冻结已经失效（到期了，或者被放掉了）" };
+    const impact = reply.data.impact;
+    if (!Array.isArray(impact?.interrupted) || !Array.isArray(impact?.mcpDisrupted)) {
+      return { valid: false, why: "续期答复里没有此刻的影响名单，核对不了" };
+    }
+    return { valid: true, expiresInMs: reply.data.expiresInMs ?? null, impact };
   }
   return { valid: false, why: reasonOf(reply, "续期答复看不懂") };
 }

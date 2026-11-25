@@ -20,7 +20,7 @@ import { decideLink, parseLink } from "../desktop/windows/launcher/deep-link.mjs
 import { classify, mismatch, probe } from "../desktop/windows/launcher/health.mjs";
 import { createLauncher } from "../desktop/windows/launcher/launcher.mjs";
 import { createLoginItem, pointsAt } from "../desktop/windows/launcher/login-item.mjs";
-import { freezeImpact, releaseFreeze, renewFreeze, stopServer, widened } from "../desktop/windows/launcher/restart.mjs";
+import { disruptedItems, freezeImpact, releaseFreeze, renewFreeze, stopServer, widened } from "../desktop/windows/launcher/restart.mjs";
 import { activeHold, beginMaintenance } from "../desktop/windows/launcher/maintenance.mjs";
 import { mergePath, serverEnvironment } from "../desktop/windows/launcher/server-env.mjs";
 import { acquireStartLock, tryStartLock } from "../desktop/windows/launcher/start-lock.mjs";
@@ -161,6 +161,20 @@ try {
     assert.match(await renewFreeze(lease), /冻结已经失效/);
     assert.equal(await releaseFreeze(lease), true);
 
+    // 续期带回此刻的名单：跟用户点头的那份比，冻结冻不住的那种（中途拉起 MCP）、随服务关掉的多出来了就不下刀
+    const agreed = { kind: "disrupts", target, instance: "one", freezable: true, items: [{ id: "a", title: "任务 A", why: "" }] };
+    const renewing = (data) => ({ token: "L", send: async () => ({ status: 200, error: null, data: { protocol: 1, valid: true, expiresInMs: 30_000, ...data } }) });
+    const now = (extra) => ({ impact: { ...impact([{ id: "a", title: "任务 A" }]), ...extra } });
+    assert.equal(await renewFreeze(renewing(now({})), agreed), null, "名单没多：照常下刀");
+    assert.equal(await renewFreeze(renewing({ impact: impact([]) }), agreed), null, "名单变短不拦");
+    assert.equal(await renewFreeze(renewing(now({ mcpDisrupted: [{ id: "m", title: "任务 M" }] })), agreed),
+      "确认之后又多了会被打断的：任务 M", "冻结之后才握上 MCP 的：不下刀，说清是谁");
+    assert.equal(await renewFreeze(renewing(now({ shutdown: { version: 1, resources: [{ kind: "terminal", id: "t", label: "终端 zsh" }] } })), agreed),
+      "确认之后又多了会被打断的：终端 zsh", "随服务关掉的也算");
+    assert.match(await renewFreeze(renewing({}), agreed), /核对不了/, "续期没带此刻的名单：核对不了就不下刀");
+    assert.deepEqual(disruptedItems(now({ shutdown: { version: 1, resources: [{ kind: "chat", id: "c", label: "聊天 x" }] } }).impact).map((item) => item.why),
+      ["会被判失败", "会随服务一起关掉"], "随服务一起关掉的终端、聊天也摆进确认");
+
     let killed = 0;
     const stopped = await stopServer(cfg, target, {
       probe: async () => ({ kind: "navi", instance: { pid: 7, id: "one", dataDir: cfg.dataDir, codeDir: cfg.bundledRuntime, desktop: true, windowPort: cfg.windowPort, localOnly: true } }),
@@ -168,7 +182,7 @@ try {
     });
     assert.deepEqual(stopped, { kind: "changed", why: "冻结已经失效（到期了，或者被放掉了）" });
     assert.equal(killed, 0, "续不上就不下刀");
-    console.log("✓ 重启前冻结：认准刚认过的那一份才算冻住，快照换成同形判断；老版本退回即时评估，冻不了、续不上都不下刀");
+    console.log("✓ 重启前冻结：认准刚认过的那一份才算冻住，快照换成同形判断；老版本退回即时评估，冻不了、续不上、续期时名单多了都不下刀");
   }
 
   // ── navi:// 链接 ─────────────────────────────────────────────────────────

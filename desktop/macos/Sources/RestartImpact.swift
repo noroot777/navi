@@ -8,7 +8,8 @@ import Foundation
 ///  · interrupted   重启后接不回来、会被判 failed 的（排队中还没进程的、进程已经不在的……）
 ///  · mcpDisrupted  进程活得过重启，但手里握着 navi MCP：服务换代码那几十秒里它的交卷撞上就失败，
 ///                  restart.mjs 对它们的默认也是「不动」
-/// survives（会被接管）和 resumes（调度台自动接回）不算。
+/// survives（会被接管）和 resumes（调度台自动接回）不算。问的时候带了 `?shutdown=1`（「允许其他设备访问」那条）
+/// 再加一类：随服务一起关掉的终端、聊天、AI 协助、预览试跑（shutdown.resources）。
 struct RestartImpact: Decodable {
   struct Item: Decodable {
     let id: String
@@ -29,6 +30,11 @@ struct RestartImpact: Decodable {
   let runtimeHandover: Handover?
   /// 认不认「重启前冻结」那道关口（server/src/restart-freeze.ts）：老版本服务不带这个字段。
   let restartFreeze: Int?
+  struct Shutdown: Decodable {
+    struct Resource: Decodable { let kind: String; let id: String; let label: String? }
+    let resources: [Resource]
+  }
+  let shutdown: Shutdown?
 
   /// 同一个任务两类都占时只算一次（interrupted 优先：它说的后果更重）。
   var disrupted: [ImpactItem] {
@@ -39,6 +45,9 @@ struct RestartImpact: Decodable {
     }
     for item in mcpDisrupted where seen.insert(item.id).inserted {
       out.append((item.id, item.title, "手里握着 Navi MCP，服务重启那会儿交卷可能失败"))
+    }
+    for resource in shutdown?.resources ?? [] {
+      out.append(("\(resource.kind):\(resource.id)", resource.label ?? resource.kind, "会随服务一起关掉"))
     }
     return out
   }
@@ -112,14 +121,17 @@ enum RestartImpactProbe {
     let freezable: Bool
   }
 
-  static func assessDetailedSync(preservingRuntime: Bool = false) -> Assessment {
+  /// `includingShutdown`：连随服务一起关掉的资源也算进来（「允许其他设备访问」那条；装更新另有自己的资源闸）。
+  static func assessDetailedSync(preservingRuntime: Bool = false, includingShutdown: Bool = false) -> Assessment {
     var freezable = false
     var instanceID: String?
-    let verdict = assessVerdict(preservingRuntime: preservingRuntime, instanceID: &instanceID, freezable: &freezable)
+    let verdict = assessVerdict(preservingRuntime: preservingRuntime, includingShutdown: includingShutdown,
+      instanceID: &instanceID, freezable: &freezable)
     return Assessment(verdict: verdict, instance: instanceID, freezable: freezable)
   }
 
-  private static func assessVerdict(preservingRuntime: Bool, instanceID: inout String?, freezable: inout Bool) -> ImpactVerdict {
+  private static func assessVerdict(preservingRuntime: Bool, includingShutdown: Bool, instanceID: inout String?,
+                                    freezable: inout Bool) -> ImpactVerdict {
     guard NaviConfig.isLocal else { return .clear(.remote) }
     switch NaviHealth.probeSync() {
     case .down:
@@ -135,7 +147,8 @@ enum RestartImpactProbe {
     case .navi(let instance):
       guard let pid = instance.pid, pid > 1 else { return .unknown("服务没报自己的进程号") }
       instanceID = instance.id
-      return askImpact(of: .ours(pid: pid), instance: instance.id, preservingRuntime: preservingRuntime, freezable: &freezable)
+      return askImpact(of: .ours(pid: pid), instance: instance.id, preservingRuntime: preservingRuntime,
+        includingShutdown: includingShutdown, freezable: &freezable)
     }
   }
 
@@ -147,8 +160,9 @@ enum RestartImpactProbe {
   }
 
   private static func askImpact(of target: ServiceTarget, instance: String?, preservingRuntime: Bool, recovery: Bool = false,
-                                freezable: inout Bool) -> ImpactVerdict {
+                                includingShutdown: Bool = false, freezable: inout Bool) -> ImpactVerdict {
     var url = URLComponents(url: NaviConfig.baseURL.appendingPathComponent("api/restart-impact"), resolvingAgainstBaseURL: false)!
+    if includingShutdown { url.queryItems = [URLQueryItem(name: "shutdown", value: "1")] }
     var nextSchema: String?
     if preservingRuntime {
       guard let next = RuntimeHandover.compatibility(), next["protocol"] as? Int == 1,
@@ -279,7 +293,7 @@ enum RestartFreeze {
 
   /// 只在后台队列上调。
   static func acquire() -> Outcome {
-    let now = RestartImpactProbe.assessDetailedSync()
+    let now = RestartImpactProbe.assessDetailedSync(includingShutdown: true)
     guard case .ours(let pid) = now.verdict.target, now.freezable, let instance = now.instance else {
       return .unfrozen(now.verdict, freezable: now.freezable)
     }
@@ -298,15 +312,32 @@ enum RestartFreeze {
       release(lease)
       return .unfrozen(.unknown("冻结时端口上换了一份服务，或者快照看不懂"), freezable: true)
     }
-    let items = impact.disrupted
-    return .frozen(lease, items.isEmpty ? .clear(.ours(pid: pid)) : .disrupts(.ours(pid: pid), items))
+    return .frozen(lease, verdict(of: impact, pid: pid))
   }
 
-  /// 下刀前续一次期：冻结还在就是 nil，不在了交回原因。
-  static func renew(_ lease: Lease) -> String? {
+  private static func verdict(of impact: RestartImpact, pid: Int) -> ImpactVerdict {
+    let items = impact.disrupted
+    return items.isEmpty ? .clear(.ours(pid: pid)) : .disrupts(.ours(pid: pid), items)
+  }
+
+  /// 下刀前续一次期：冻结还在、此刻的名单也没比 `agreed`（用户点头的那份）多出谁，就是 nil；否则交回原因。
+  /// 名单会多是因为已经在跑的 agent 中途拉起 navi MCP 这件事服务端冻不住（见 server/src/restart-freeze.ts）。
+  static func renew(_ lease: Lease, agreed: ImpactVerdict) -> String? {
     let reply = send(instance: lease.instance, body: ["renew": lease.token])
-    if reply.status == 200, reply.json?["valid"] as? Bool == true { return nil }
-    return reply.status == 200 ? "冻结已经失效（到期了，或者被放掉了）" : "续期没有答复（服务端回 \(reply.status)）"
+    guard reply.status == 200, reply.json?["valid"] as? Bool == true else {
+      return reply.status == 200 ? "冻结已经失效（到期了，或者被放掉了）" : "续期没有答复（服务端回 \(reply.status)）"
+    }
+    guard case .ours(let pid) = agreed.target else { return nil }
+    guard let body = reply.json?["impact"], let data = try? JSONSerialization.data(withJSONObject: body),
+          let impact = try? JSONDecoder().decode(RestartImpact.self, from: data) else {
+      return "续期答复里没有此刻的影响名单，核对不了"
+    }
+    let now = verdict(of: impact, pid: pid)
+    guard agreed.widened(to: now), case .disrupts(_, let items) = now else { return nil }
+    var known = Set<String>()
+    if case .disrupts(_, let had) = agreed { for item in had { known.insert(item.id ?? item.title) } }
+    let extra = items.filter { !known.contains($0.id ?? $0.title) }.map(\.title)
+    return "确认之后又多了会被打断的：\(extra.prefix(5).joined(separator: "、"))\(extra.count > 5 ? " 等 \(extra.count) 项" : "")"
   }
 
   static func release(_ lease: Lease) {

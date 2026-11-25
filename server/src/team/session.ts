@@ -57,6 +57,7 @@ import { createPendingInbox } from "./pending-inbox.js";
 import type { Lead } from "./session-types.js";
 import { createSessionConsumer } from "./session-consumer.js";
 import { sendToLead } from "./lead-delivery.js";
+import { waitServiceThaw } from "../runtime-handover-state.js";
 import { cliConfigDirColumn, runEnvForTask, sessionCliConfigDir, sessionResumableHere } from "../auth/run-env.js";
 import { HOST_CLI_SWITCH_SESSION_NOTE } from "@navi/shared/multiuser";
 import { launchFields } from "../usage.js";
@@ -509,7 +510,8 @@ async function openLead(taskId: string, rawText: string, kind: Kind, cell: Openi
   const imageSeed = resuming ? await loadMarkdownImageSeed(taskId, prev!.id) : undefined;
   // 开台前的最后一道闸:这一句之后到 openResident 之间不再有 await。上面那几个 await
   // 期间可能来过「停止全组」,那时这台调度台还没出生、谁也杀不到它,停止只落在这一次开台
-  // 的 cell.halted 上 —— 不在这里消费掉,就会把用户已经停下的团队又拉起来。
+  // 的 cell.halted 上 —— 不在这里消费掉,就会把用户已经停下的团队又拉起来。服务准备重启时也在这里等(restart-freeze.ts)。
+  await waitServiceThaw(() => cell.halted);
   if (cell.halted) throw new TeamOpenHalted();
 
   const sessId = resuming ? prev!.id : id();

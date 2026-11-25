@@ -197,8 +197,10 @@ await sleep(200);
 // ── 重启前冻结(server/src/restart-freeze.ts):判据改用冻结之下的快照 ─────────────────
 // 认这道关口的服务在判据里报 `restartFreeze: 1`。脚本下刀之前先冻结接活,用冻结之下那份
 // 名单判拦不拦;下刀前续一次期核对冻结还在;不停了就放掉。三档各起一个会冻结的假 server:
-//   clean  冻住了、名单是空的  → 冻结 → 续期 → 换成新的,一次都没放(服务退了冻结跟着没了)
+//   clean  冻住了、名单是空的  → 冻结 → 续期 → 换成新的,一次都没放(服务退了冻结跟着没了);
+//          续期带回的随服务关掉的终端如实列出、不拦
 //   widen  即时判据是空的,冻结之下却多出一个还在起跑的 → 中止、放掉冻结、旧进程不动
+//   grow   冻结快照是空的,续期带回的此刻名单里却多了一个(冻结冻不住的那种)→ 中止、放掉冻结、旧进程不动
 //   busy   另一处正冻着(409)→ 中止、旧进程不动
 const FREEZE_LOG = join(TMP, "freeze.log");
 function freezingServer(mode) {
@@ -218,7 +220,11 @@ createServer((req, res) => {
       const what = body.release ? "release" : body.renew ? "renew" : "acquire";
       appendFileSync(${JSON.stringify(FREEZE_LOG)}, "${mode}:" + what + "\\n");
       if (what === "release") return send(200, { protocol: 1, released: true });
-      if (what === "renew") return send(200, { protocol: 1, valid: true, expiresInMs: 30000 });
+      if (what === "renew") {
+        const late = ${JSON.stringify(mode)} === "grow" ? [{ id: "mid", title: "冻结之后才冒出来的任务", reason: "进程已经不在了" }] : [];
+        const resources = ${JSON.stringify(mode)} === "clean" ? [{ kind: "terminal", id: "t1", label: "终端 zsh" }] : [];
+        return send(200, { protocol: 1, valid: true, expiresInMs: 30000, impact: { ...empty, interrupted: late, shutdown: { version: 1, resources } } });
+      }
       if (${JSON.stringify(mode)} === "busy") return send(409, { protocol: 1, error: "另一处正在准备重启服务" });
       const interrupted = ${JSON.stringify(mode)} === "widen" ? [{ id: "late", title: "冻结时才看到的任务", reason: "正在起跑,还没交给重启后接得回的进程" }] : [];
       send(200, { protocol: 1, lease: "lease-${mode}", instance: "i", pid: process.pid, revision: 1, expiresInMs: 30000,
@@ -234,7 +240,7 @@ createServer((req, res) => {
 }
 const freezeCalls = () => (existsSync(FREEZE_LOG) ? readFileSync(FREEZE_LOG, "utf8").split("\n").filter(Boolean) : []);
 
-for (const mode of ["widen", "busy"]) {
+for (const mode of ["widen", "grow", "busy"]) {
   rmSync(FREEZE_LOG, { force: true });
   const { file, pidFile } = freezingServer(mode);
   const fixture = spawnTestFixture(process.execPath, [file], { stdio: "ignore" });
@@ -256,6 +262,11 @@ for (const mode of ["widen", "busy"]) {
       fail("冻结之下多出来的任务要按它拦住、并列出来", refusedOutput);
     }
     if (freezeCalls().join(",") !== "widen:acquire,widen:release") fail(`中止时要放掉冻结:${freezeCalls().join(",")}`, refusedOutput);
+  } else if (mode === "grow") {
+    if (!refusedOutput.includes("冻结之后又多了 1 个会被打断的任务") || !refusedOutput.includes("冻结之后才冒出来的任务")) {
+      fail("续期带回的此刻名单多出来的要拦住、并列出来", refusedOutput);
+    }
+    if (freezeCalls().join(",") !== "grow:acquire,grow:renew,grow:release") fail(`续期发现变多要放掉冻结:${freezeCalls().join(",")}`, refusedOutput);
   } else {
     if (!refusedOutput.includes("冻结不了接活(另一处正在准备重启服务)")) fail("冻不了的原因要原样说出来", refusedOutput);
     if (freezeCalls().join(",") !== "busy:acquire") fail(`冻不了就只问那一次:${freezeCalls().join(",")}`, refusedOutput);
@@ -277,10 +288,11 @@ for (const mode of ["widen", "busy"]) {
   if (!frozenOutput.includes(`${PORT} 已就绪`)) fail("冻住了、名单是空的,却没换成新的", frozenOutput);
   if (frozenOutput.includes("没有重启前冻结")) fail("服务端报了协议号,不该说它没有冻结关口", frozenOutput);
   if (freezeCalls().join(",") !== "clean:acquire,clean:renew") fail(`冻结 → 下刀前续期,停成了不再放:${freezeCalls().join(",")}`, frozenOutput);
+  if (!frozenOutput.includes("会随服务一起关掉 1 个:终端 zsh")) fail("随服务关掉的终端要如实列出来", frozenOutput);
   await stopServer();
   rmSync(PID_FILE, { force: true });
   await sleep(200);
-  console.log("✓ 重启前冻结:凭冻结之下的快照判、下刀前续期;快照多出来的拦住并放掉冻结,冻不了就不动旧进程");
+  console.log("✓ 重启前冻结:凭冻结之下的快照判、下刀前续期;快照或续期时多出来的拦住并放掉冻结,冻不了就不动旧进程;随服务关掉的如实列出");
 }
 
 // ── 旧进程没下线时，绝不许报成功 ──────────────────────────────────────────────

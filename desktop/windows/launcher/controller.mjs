@@ -402,8 +402,9 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
   //
   // 确认框可能开着好一阵，这期间别处又起了任务，用户点头时看到的名单就过时了。所以攥住维护锁之后、停服务之前先让
   // 服务冻结接活、拿冻结之下的快照（freezeImpact，server/src/restart-freeze.ts），多出了他没同意过的影响（widened）
-  // 就放开冻结、松锁、把新名单重新摆给他；没多出来就凭这份快照停，下刀前续一次期确认冻结还在。冻着的时候不起新回合，
-  // 所以再评估到停下之间那一下也堵上了。老版本服务没有这道关口：退回即时再评估，确认框里如实说这一下堵不上。
+  // 就放开冻结、松锁、把新名单重新摆给他；没多出来就凭这份快照停，下刀前续一次期确认冻结还在、此刻的名单也没多出谁
+  // （已经在跑的 agent 中途拉起 MCP 服务端冻不住，多了就不停）。冻着的时候不起新回合，所以再评估到停下之间那一下也
+  // 堵上了。老版本服务没有这道关口：退回即时再评估，确认框里如实说这一下堵不上。
   async function toggleRemote() {
     if (state.remoteBusy) return;
     const hold = activeHold(cfg);
@@ -429,7 +430,7 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
             lease = frozen.lease ?? null;
             if (widened(verdict, frozen.verdict)) changed = frozen.verdict;
             else {
-              const beforeKill = lease ? () => deps.renew(lease) : undefined;
+              const beforeKill = lease ? () => deps.renew(lease, verdict) : undefined;
               const stopped = await deps.stop(verdict.target ?? null, { beforeKill });
               if (stopped.kind === "stopped") {
                 lease = null; // 服务退了，冻结跟着没了

@@ -6,9 +6,13 @@
 // 那一下只有服务端能关。
 //
 // 冻结用的是 mac 换运行时那份许可（runtime-handover-state.ts，kind=restart），不另造一套：
-// 新回合认领、团队调度台投递、新终端、聊天执行、预览试跑都在登记自己之前等它（`waitServiceThaw`
+// 新回合认领、团队开台与投递、新终端、聊天执行、AI 协助、预览试跑都在登记自己之前等它（`waitServiceThaw`
 // 与 turn-lock.ts 的认领）。所以拿到冻结的那一刻，往后还能变成「会被打断」的只剩**已经占住回合锁
 // 还没跑起来的**那几个 —— 快照先给它们一小会儿落定，落不定的照实列进 interrupted。
+//
+// 有一样东西服务端冻不住：已经在跑的 agent 自己在回合中途拉起 navi MCP（mcpDisrupted 会因此变多）。
+// 所以续期那一下把**此刻**的名单一并交回去，调用方拿它跟用户同意过的那份比，多出来就不停 —— 名单在冻结
+// 期间不会悄悄变多，变多了停服务的一方看得见。续期到真正下刀之间那几毫秒仍是缝，这一条堵不死。
 //
 // 冻结有自己的期限（持有者崩了也会自己解冻），持有者在停服务之前续一次期（同时核对凭据还在），
 // 取消就放掉；被挡住的入口照常接着走，不算失败。
@@ -61,12 +65,12 @@ function unsettledTurns(impact: RestartImpact) {
 /**
  * 冻结之下的影响快照。`assess` 只给回归换成假的；缺省是 `restartImpact`。
  *
- * 冻结之后新的回合认领一律被挡，所以占着回合锁的集合只会缩小：给它们 `SETTLE_MS` 落定（跑成可接管的
- * 进程、或者自己还了锁），到点还在路上的照实列进 interrupted —— 名单是上界，停下之前不会再多。
+ * 冻结之后新的回合认领一律被挡，所以占着回合锁的集合只会缩小：给它们 `settleMs` 落定（跑成可接管的
+ * 进程、或者自己还了锁），到点还在路上的照实列进 interrupted。续期时再算一遍用 0（不等，就要此刻的）。
  */
-export async function frozenRestartSnapshot(assess?: () => Promise<RestartImpact>): Promise<RestartFreezeSnapshot> {
+export async function frozenRestartSnapshot(assess?: () => Promise<RestartImpact>, settleMs = SETTLE_MS): Promise<RestartFreezeSnapshot> {
   const measure = assess ?? (async () => (await import("./reattach.js")).restartImpact());
-  const until = Date.now() + SETTLE_MS;
+  const until = Date.now() + settleMs;
   let impact = await measure();
   while (unsettledTurns(impact).length && Date.now() < until) {
     await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_MS));
@@ -110,10 +114,15 @@ export async function acquireRestartFreeze(ttlMs?: unknown, assess?: () => Promi
   }
 }
 
-/** 给界面（`/health` 与 `service.freeze` 事件）的那一份：只说哪一种、冻到什么时候，不带凭据。 */
-export function serviceFreezePublic(): { kind: "handover" | "restart"; until: string } | null {
+/**
+ * 给界面（`/health` 与 `service.freeze` 事件）的那一份：只说哪一种、冻到什么时候，不带凭据。
+ * 另给剩余毫秒：开着页面的可能是另一台设备（允许其他设备访问），两边墙钟对不齐，页面按收到时的本机时钟倒数。
+ */
+export function serviceFreezePublic(): { kind: "handover" | "restart"; until: string; remainingMs: number } | null {
   const freeze = currentServiceFreeze();
-  return freeze ? { kind: freeze.kind, until: new Date(freeze.deadline).toISOString() } : null;
+  return freeze
+    ? { kind: freeze.kind, until: new Date(freeze.deadline).toISOString(), remainingMs: Math.max(0, freeze.deadline - Date.now()) }
+    : null;
 }
 
 onServiceFreezeChange(() => bus.publish({ type: "service.freeze", freeze: serviceFreezePublic() }));
@@ -136,8 +145,11 @@ export function mountRestartFreezeRoutes(api: Hono) {
     if (typeof body.renew === "string") {
       const deadline = serviceFreezeMatches(body.renew) && currentServiceFreeze()?.kind === "restart"
         ? renewServiceFreeze(body.renew, ttlOf(body.ttlMs)) : null;
-      return c.json({ protocol: RESTART_FREEZE_PROTOCOL, valid: deadline !== null,
-        ...(deadline !== null ? { expiresInMs: Math.max(0, deadline - Date.now()) } : {}) });
+      if (deadline === null) return c.json({ protocol: RESTART_FREEZE_PROTOCOL, valid: false });
+      // 此刻的名单（见顶部）：调用方拿它跟同意过的那份比。算挂了就不给，调用方按「核对不了」不停。
+      const impact = await frozenRestartSnapshot(undefined, 0).catch(() => null);
+      return c.json({ protocol: RESTART_FREEZE_PROTOCOL, valid: serviceFreezeMatches(body.renew),
+        expiresInMs: Math.max(0, deadline - Date.now()), ...(impact ? { impact } : {}) });
     }
     try {
       const result = await acquireRestartFreeze(body.ttlMs);

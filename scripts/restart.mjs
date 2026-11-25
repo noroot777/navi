@@ -238,13 +238,26 @@ if (old.length) {
   }
   if (busy > 0) say(`  ⚠ FORCE:打断 ${busy} 个**接管不了**的任务(判为 failed,可重试);会被接管的不受影响。`);
   // 下刀前最后核一次冻结还在(顺带续期):判据只在冻着的时候算数,到期了、被放掉了就不是这份快照了。
+  // 续期带回此刻的名单:冻着也拦不住已经在跑的 agent 自己变出新影响(restart-freeze.ts 顶部),多出接不回的就不停。
   if (freeze) {
     const renewed = await renewRestartFreeze(freezeSend, freeze.lease);
-    if (!renewed.valid) {
-      freeze = null;
-      say(`  ✋ ${renewed.why} —— 判据不再算数,已中止,未重启服务端。重跑一次即可。`);
+    const known = new Set((data.interrupted ?? []).map((t) => t.id));
+    const extra = renewed.valid ? renewed.impact.interrupted.filter((t) => !known.has(t.id)) : [];
+    if (!renewed.valid || (extra.length && !FORCE)) {
+      await letGo();
+      say(renewed.valid
+        ? `  ✋ 冻结之后又多了 ${extra.length} 个会被打断的任务 —— 已中止,未重启服务端。重跑一次即可。`
+        : `  ✋ ${renewed.why} —— 判据不再算数,已中止,未重启服务端。重跑一次即可。`);
+      for (const t of extra.slice(0, 8)) say(`     · ${t.title} —— ${t.reason}`);
       say(`     (新代码已 build 进 dist,不会丢;只是暂不重启 :${PORT}。MCP 也未动。)`);
       process.exit(2);
+    }
+    if (extra.length) say(`  ⚠ FORCE:冻结之后又多了 ${extra.length} 个会被打断的任务,一并打断。`);
+    // 随服务一起关掉的终端、聊天、AI 协助、预览试跑:这条脚本不为它们中止 —— 它常常就是在 Navi 自己的终端里
+    // 跑的,拦下就永远重启不了;如实列出来,别让人事后才发现终端没了。
+    const closing = renewed.impact.shutdown?.resources ?? [];
+    if (closing.length) {
+      say(`  ⚠ 会随服务一起关掉 ${closing.length} 个:${closing.slice(0, 6).map((r) => r.label || r.kind).join("、")}${closing.length > 6 ? " 等" : ""}`);
     }
   }
   // 走到这儿时判据一定是问到了的(问不到 impactOrAbort 已经中止);保护名单怎么用见 killListeners。

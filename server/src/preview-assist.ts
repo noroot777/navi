@@ -35,6 +35,8 @@ import {
   type Job,
 } from "./preview-assist-jobs.js";
 import { trialPreviewScript } from "./preview-trial.js";
+import { serviceFrozen, serviceFrozenText, waitServiceThaw } from "./runtime-handover-state.js";
+import { registerShutdownCleanup } from "./shutdown-resources.js";
 import { withoutTurnIdentity } from "./turn-identity.js";
 
 // 进度查询和取消就住在登记簿里（那边不碰 DB）；这里只管「起一趟」和那三轮循环。
@@ -90,7 +92,34 @@ export async function startPreviewAssist(options: PreviewAssistStartOptions): Pr
 
 type Executor = Awaited<ReturnType<typeof resolveExecutorFor>>;
 
+/**
+ * 已经开工的作业（等过冻结的那些）。进度只在内存里，重启一下就整份丢了，所以它们算「随服务一起关掉」的
+ * 资源，摆进重启确认（restart-freeze.ts 的快照）。还在等冻结的不算：那时候它还什么都没起。
+ */
+const working = new Map<Job, string>();
+registerShutdownCleanup(
+  () => [...working].map(([job, cwd]) => ({ kind: "preview-assist", id: job.state.jobId, label: `AI 协助 ${cwd}`, projectId: job.state.projectId })),
+  () => {},
+);
+
 async function loop(
+  job: Job,
+  options: PreviewAssistStartOptions,
+  executor: Executor,
+  runEnv: Record<string, string | undefined>,
+): Promise<void> {
+  // 服务准备重启时先不开工（restart-freeze.ts）：开工就要拉起智能体，快照里却没有它。等着的时候点了停止就到此为止。
+  if (serviceFrozen()) job.state.step = `${serviceFrozenText()}，完成后再开工…`;
+  if (!(await waitServiceThaw(() => job.canceled))) return;
+  working.set(job, options.cwd); // 等完到这一句之间没有 await
+  try {
+    await rounds(job, options, executor, runEnv);
+  } finally {
+    working.delete(job);
+  }
+}
+
+async function rounds(
   job: Job,
   options: PreviewAssistStartOptions,
   executor: Executor,

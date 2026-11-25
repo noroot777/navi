@@ -31,7 +31,10 @@ export function hostToken(cfg) {
   return null;
 }
 
-/** 同一个任务两类都占时只算一次（interrupted 优先：它说的后果更重）。 */
+/**
+ * 同一个任务两类都占时只算一次（interrupted 优先：它说的后果更重）。另加随服务一起关掉的终端、聊天、AI 协助、
+ * 预览试跑（shutdown.resources，问的时候带 ?shutdown=1；老版本服务不给就没有这一类）。
+ */
 export function disruptedItems(impact) {
   const seen = new Set();
   const out = [];
@@ -40,6 +43,10 @@ export function disruptedItems(impact) {
   }
   for (const item of impact.mcpDisrupted ?? []) {
     if (!seen.has(item.id)) { seen.add(item.id); out.push({ id: item.id, title: item.title, why: "手里握着 Navi MCP，服务重启那会儿交卷可能失败" }); }
+  }
+  const resources = impact.shutdown?.resources;
+  for (const resource of Array.isArray(resources) ? resources : []) {
+    out.push({ id: `${resource.kind}:${resource.id}`, title: resource.label || resource.kind, why: "会随服务一起关掉" });
   }
   return out;
 }
@@ -95,10 +102,19 @@ export async function freezeImpact(cfg, { assess = () => assessImpact(cfg), send
   return { kind: "frozen", lease: { send: transport, token: got.lease }, verdict: verdictOf(now.target, now.instance, got.impact) };
 }
 
-/** 下刀之前续一次期：冻结还在就是 null，不在了交回原因。 */
-export async function renewFreeze(lease) {
+/**
+ * 下刀之前续一次期：冻结还在、此刻的名单也没比 `agreed`（用户点头的那份判断）多出谁，就是 null；否则交回原因。
+ * 名单会多是因为已经在跑的 agent 中途拉起 navi MCP 这件事服务端冻不住（见 scripts/restart-freeze.mjs）。
+ */
+export async function renewFreeze(lease, agreed) {
   const renewed = await renewRestartFreeze(lease.send, lease.token);
-  return renewed.valid ? null : renewed.why;
+  if (!renewed.valid) return renewed.why;
+  if (!agreed || agreed.target?.kind !== "ours") return null;
+  const now = verdictOf(agreed.target, agreed.instance, renewed.impact);
+  if (!widened(agreed, now)) return null;
+  const known = new Set((agreed.items ?? []).map((item) => item.id ?? item.title));
+  const extra = now.items.filter((item) => !known.has(item.id ?? item.title)).map((item) => item.title);
+  return `确认之后又多了会被打断的：${extra.slice(0, 5).join("、")}${extra.length > 5 ? ` 等 ${extra.length} 项` : ""}`;
 }
 
 export function releaseFreeze(lease) {
@@ -139,7 +155,7 @@ async function askImpact(cfg, instanceId) {
   const token = hostToken(cfg);
   const headers = { ...(token ? { "x-navi-host-token": token } : {}), "x-navi-instance": instanceId };
   try {
-    const response = await fetch(new URL("/api/restart-impact", cfg.baseURL), { headers, signal: AbortSignal.timeout(8_000) });
+    const response = await fetch(new URL("/api/restart-impact?shutdown=1", cfg.baseURL), { headers, signal: AbortSignal.timeout(8_000) });
     if (response.status !== 200) return { error: `服务端回 ${response.status}` };
     const impact = await response.json();
     if (!Array.isArray(impact?.interrupted) || !Array.isArray(impact?.mcpDisrupted)) return { error: "答复看不懂（服务端版本太旧？）" };
