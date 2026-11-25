@@ -62,6 +62,14 @@ export function commitRuntimeHandover(token: string, exit: () => void, exitAfter
   return true;
 }
 
+/**
+ * 这张许可（还没兑现时）最晚兑现到什么时刻（Date.now 的毫秒数）。过了它，晚到的兑现一律被拒 —— 接管方据此断定一个
+ * 没收到答复的兑现「没执行、以后也不会执行」，不用拿本机计时去猜。兑现后是 Infinity，没有许可是 null。
+ */
+export function runtimeHandoverDeadline(token: string): number | null {
+  return lease && lease.token === token ? lease.deadline : null;
+}
+
 export function runtimeHandoverMatches(token: string): boolean {
   return runtimeHandoverActive() && lease?.token === token;
 }

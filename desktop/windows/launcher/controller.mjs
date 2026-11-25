@@ -16,7 +16,7 @@ import { mkdirSync } from "node:fs";
 import { runtimeId } from "./config.mjs";
 import { decideLink, parseLink } from "./deep-link.mjs";
 import { createHandover } from "./handover.mjs";
-import { noteUnfinished, takeUnfinished } from "./handover-duty.mjs";
+import { forgetUnfinished, noteUnfinished, readUnfinished } from "./handover-duty.mjs";
 import { isServing, mismatch, ours, probe as probeHealth } from "./health.mjs";
 import { activeHold, beginMaintenance } from "./maintenance.mjs";
 import { assessImpact, stopServer, widened } from "./restart.mjs";
@@ -40,7 +40,7 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
     generation: 0, bound: null, pageURL: null, resumeURL: null, pendingRoute: null,
     document: 0, presentation: "invalid", handoff: null, screen: null, actions: new Map(),
     guard: null, guardProbing: false, unreachable: 0, poll: null, starting: null,
-    linkSerial: 0, welcoming: null, served: null, remoteBusy: false, dialogs: new Map(), dialogSerial: 0,
+    linkSerial: 0, welcoming: null, served: null, remoteBusy: false, dialogs: new Map(), dialogSerial: 0, unfinished: null,
   };
   const handover = createHandover({
     cfg,
@@ -138,6 +138,7 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
   }
 
   function present(outcome) {
+    if (state.unfinished) void tellUnfinished(outcome);
     if (outcome.kind === "ready") {
       observe(outcome.instance);
       return void loadPage();
@@ -150,6 +151,16 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
     const actions = [{ id: "logs", title: "日志", run: openLogs }, retry()];
     show({ kind: "offline", title: "Navi 服务没起来", detail: outcome.message }, actions);
     startPolling(cfg.baseURL);
+  }
+
+  /** 上次退出时新版服务没起来（纸条见 handover-duty.mjs）：这次起服务有了结局再照实说，说过了才删纸条。 */
+  async function tellUnfinished(outcome) {
+    const note = state.unfinished;
+    state.unfinished = null;
+    const now = outcome.kind === "ready" ? "这次打开时服务已经起来了。" : "这次打开时服务也还没起来，窗口里写着原因；托盘菜单「日志」里有服务日志。";
+    await alert("上次退出时新版服务没起来", `${note.why}\n\n${now}`);
+    const failed = forgetUnfinished(cfg);
+    if (failed) log(`纸条删不掉（下次打开会再说一遍）：${failed}`);
   }
 
   function showFirstRun(problem = null) {
@@ -571,6 +582,7 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
     /** 壳起来时调一次：先定窗口大小（数据根还空着就开成首启那扇小窗），再走一遍 loadHome。 */
     start() {
       window(cfg.isLocal && !launcher.isInitialized() ? "setup" : "work");
+      state.unfinished = cfg.isLocal ? readUnfinished(cfg) : null;
       loadHome();
       setTimeout(() => {
         if (cfg.shellExe) {
@@ -579,8 +591,6 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
         refreshLogin();
       }, 0);
       updates.start();
-      const note = takeUnfinished(cfg);
-      if (note) void alert("上次退出时新版服务没起来", `${note.why}\n\n这次打开时已经重新起服务；还起不来的话，托盘菜单「日志」里有服务日志。`);
     },
     stop() {
       resetPageConnection();
@@ -596,7 +606,7 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
       try { await handover.settled(); } catch (error) { log(`切换收尾出错：${error.message}`); }
       if (!handover.successorPending()) return;
       log("壳退出了，旧服务已经交出去：先把新版服务起起来再退");
-      const result = await handover.discharge(() => launcher.ensureRunning());
+      const result = await handover.discharge((left) => launcher.ensureRunning(left));
       if (result.ok) return log("新版服务起来了");
       log(`新版服务没起来：${result.why}`);
       // 这时没有窗口可说：留张纸条，下次打开 Navi 时告诉用户（那一次照常会再起服务）。

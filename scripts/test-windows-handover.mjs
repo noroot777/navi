@@ -9,13 +9,14 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { claimScratch, reclaimScratch } from "../desktop/shared/scratch.mjs";
 import { loadConfig } from "../desktop/windows/launcher/config.mjs";
 import { createController } from "../desktop/windows/launcher/controller.mjs";
 import { backupDatabase, KEEP } from "../desktop/windows/launcher/db-backup.mjs";
 import { blockersOf, compatibilityOf, createHandover } from "../desktop/windows/launcher/handover.mjs";
+import { noteUnfinished } from "../desktop/windows/launcher/handover-duty.mjs";
 import { activeHold, beginMaintenance } from "../desktop/windows/launcher/maintenance.mjs";
 
 reclaimScratch(tmpdir(), "navi-windows-handover-");
@@ -56,7 +57,7 @@ function rig(name, timing = {}) {
     impact: { runtimeHandover: { blocked: [], target: COMPAT }, shutdown: { resources: [] } },
     grant: () => ({ lease: "L1", protocol: 1 }),
     valid: true, stopped: { kind: "stopped" }, backup: () => join(cfg.dataDir, "backups", "x.db"), answer: 0, answers: [],
-    onAsk: () => {}, publishError: null, busy: null, stopGate: null,
+    onAsk: () => {}, publishError: null, busy: null, stopGate: null, alive: true, releaseAnswer: { released: true },
   };
   r.overrides = {
     probe: async () => r.health,
@@ -68,7 +69,7 @@ function rig(name, timing = {}) {
     impact: async (id, compat) => { r.calls.push(`impact:${id}:${compat.schema}`); return typeof r.impact === "function" ? r.impact() : { impact: r.impact }; },
     handover: async (id, body) => {
       r.calls.push(`handover:${JSON.stringify(body)}`);
-      if (body.release) return { released: true };
+      if (body.release) return r.releaseAnswer;
       if (body.commit) return r.commitAnswer ? r.commitAnswer() : { committed: r.valid };
       return r.grant();
     },
@@ -79,6 +80,7 @@ function rig(name, timing = {}) {
       return r.stopped;
     },
     backup: async (from) => { r.calls.push(`backup:${from}`); return r.backup(); },
+    alive: () => r.alive,
     begin: (note) => (r.begin ? r.begin(note) : beginMaintenance(cfg, note, 50_000)),
   };
   r.handover = createHandover({
@@ -324,32 +326,68 @@ try {
   {
     const fresh = (r) => r.instance(join(r.cfg.runtimeStore, NEW), { id: "new-1", pid: 77 });
 
-    // 兑现发出去了、答复丢了，旧服务其实已经下线：照样算停了，欠着起新版
-    const lost = rig("commit-lost-gone", { grace: 300, beat: 5 });
-    lost.commitAnswer = () => { lost.health = { kind: "down" }; return { error: "socket hang up" }; };
+    const commits = (r) => r.calls.filter((call) => call.startsWith('handover:{"commit"')).length;
+    const fenced = { lease: 40, answer: 20, beat: 5 }; // 许可 40 毫秒后到期，过了再给 20 毫秒答话
+
+    // 兑现发出去了、答复丢了，旧服务的进程已经没了：照样算停了，欠着起新版
+    const lost = rig("commit-lost-gone", { beat: 5 });
+    lost.commitAnswer = () => { lost.health = { kind: "down" }; lost.alive = false; return { error: "socket hang up" }; };
     lost.handover.observe(lost.health.instance);
     await waitFor("换完", () => lost.released === 1);
-    assert.ok(lost.calls.includes("stop:41"), "确认它下线了，再核一遍它退干净了");
+    assert.ok(lost.calls.includes("stop:41"), "进程没了，再核一遍它退干净了");
     assert.equal(lost.handover.state.phase, "idle");
     assert.equal(lost.handover.successorPending(), true, "答复丢了不等于没兑现：起新版的责任还在");
     lost.handover.observe(lost.instance(lost.oldDir));
-    assert.equal(lost.handover.successorPending(), true, "宽限期里看到的还是交出去的那一份：不算结清");
+    assert.equal(lost.handover.successorPending(), true, "看到的还是交出去的那一份：不算结清");
     lost.handover.observe(fresh(lost));
     assert.equal(lost.handover.successorPending(), false, "看到新版才结清");
 
-    // 答复丢了，旧服务也一直在：不去停它（它可能已经解封在接活），过了宽限期还在答话就结清
-    const alive = rig("commit-lost-alive", { grace: 60, beat: 5 });
-    alive.commitAnswer = () => ({ error: "timeout" });
-    alive.handover.observe(alive.health.instance);
-    await waitFor("没切换", () => alive.handover.state.why?.includes("一直没有答复"));
-    assert.ok(!alive.calls.some((call) => call.startsWith("stop")), "没确认兑现、它也没下线：不停");
-    assert.equal(alive.calls.filter((call) => call.startsWith('handover:{"commit"')).length, 3, "兑现是幂等的，没答复就再兑现两次");
-    assert.equal(alive.handover.successorPending(), true);
-    alive.handover.stop();
-    await sleep(80);
-    alive.handover.observe(alive.instance(alive.oldDir));
-    assert.equal(alive.handover.successorPending(), false, "过了宽限期它还在答话：它没下线，责任结清");
-    alive.handover.stop();
+    // 兑现一直没答复（503、探活也探不到）：只接着问，问不到答案绝不去停它；它回来答话、亲口说没兑现才结清
+    const mute = rig("commit-unknown", fenced);
+    mute.releaseAnswer = { error: "服务端回 503" };
+    mute.commitAnswer = () => { mute.health = { kind: "unreachable", reason: "503" }; return { error: "服务端回 503" }; };
+    mute.handover.observe(mute.health.instance);
+    await waitFor("没切换", () => mute.handover.state.why?.includes("问不到结果"));
+    assert.ok(!mute.calls.some((call) => call.startsWith("stop")), "探不到它不等于它下线了，更不等于可以停它");
+    assert.ok(commits(mute) >= 2, "兑现是幂等的：没答复就接着问");
+    assert.equal(mute.handover.successorPending(), true, "结果不明：责任留着");
+    mute.handover.stop();
+    await sleep(60);
+    assert.equal(mute.handover.successorPending(), true, "过了多久都不靠计时结清");
+    mute.health = { kind: "navi", instance: mute.instance(mute.oldDir) };
+    mute.commitAnswer = () => ({ committed: false });
+    mute.handover.observe(mute.health.instance);
+    await waitFor("问到它没兑现", () => !mute.handover.successorPending());
+    assert.ok(mute.logs.some((line) => line.includes("说许可没兑现")));
+    mute.handover.stop();
+
+    // 在途的那次兑现晚到、真执行了：它回来答话时一问是「兑现过」，接着欠着，退出前一直起到新版
+    const late = rig("commit-late", fenced);
+    late.releaseAnswer = { released: false };
+    late.commitAnswer = () => ({ error: "timeout" });
+    late.handover.observe(late.health.instance);
+    await waitFor("没切换", () => late.handover.state.why?.includes("问不到结果"));
+    late.handover.stop();
+    late.commitAnswer = () => ({ committed: true });
+    const asked = commits(late);
+    late.handover.observe(late.health.instance);
+    await waitFor("又问了一次", () => late.handover.state.asking === false && commits(late) === asked + 1);
+    await sleep(20);
+    assert.equal(late.handover.successorPending(), true, "它说兑现过（正在退）：不结清");
+    late.handover.stop();
+    let lateTries = 0;
+    const settled = await late.handover.discharge(async () => (++lateTries < 3 ? { kind: "ready", instance: late.health.instance } : { kind: "ready", instance: fresh(late) }));
+    assert.deepEqual(settled, { ok: true }, "旧的那份退了、新版起来才算完");
+    assert.equal(lateTries, 3);
+
+    // 归还许可成功 = 旧服务亲口说没兑现、也再兑现不了：结清
+    const back = rig("commit-unknown-released", fenced);
+    back.commitAnswer = () => ({ error: "timeout" });
+    back.handover.observe(back.health.instance);
+    await waitFor("没切换", () => back.handover.state.why?.includes("问不到结果"));
+    assert.ok(back.calls.includes('handover:{"release":"L1"}'));
+    assert.equal(back.handover.successorPending(), false);
+    back.handover.stop();
 
     // 停完松锁出错：这一趟照样收尾，欠的起新版不丢
     const lock = rig("end-throws");
@@ -394,7 +432,26 @@ try {
     stuck.handover.observe(stuck.health.instance);
     await waitFor("换完", () => stuck.released === 1);
     assert.deepEqual(await stuck.handover.discharge(async () => ({ kind: "failed", message: "端口被占" })), { ok: false, why: "端口被占" });
-    console.log("✓ 起新版的责任：兑现、强停之前就记下；答复丢了照样欠着，看到新版（或者旧那份过了宽限期还在答话）才结清；松锁出错不丢；退出前一直起到新版");
+    // 每一次起都只给剩下的时间：卡住不回的那一次也不会把整趟拖过时限
+    const given = [];
+    const began = Date.now();
+    assert.deepEqual(await stuck.handover.discharge((left) => { given.push(left); return new Promise(() => {}); }), { ok: false, why: "等过了时限" });
+    assert.ok(Date.now() - began < 1_000 && given.length === 1 && given[0] <= 60, "交给 ensureRunning 的期限是剩下的时间，到点不等它");
+    // 强制切换没有许可可问：旧服务还在答话就照实说停没停下不明，不空转到时限
+    const unsure = rig("discharge-forced", { discharge: 5_000, retry: 10 });
+    unsure.impact = forced.impact;
+    unsure.stopped = { kind: "failed", why: "服务进程 41 20 秒内没有退出" };
+    unsure.handover.observe(unsure.health.instance);
+    await waitFor("在等", () => unsure.handover.state.items.length === 1);
+    unsure.handover.reconsider();
+    await waitFor("说明", () => unsure.alerts.length === 1);
+    unsure.handover.stop();
+    const quick = Date.now();
+    const verdict = await unsure.handover.discharge(async () => ({ kind: "ready", instance: unsure.health.instance }));
+    assert.equal(verdict.ok, false);
+    assert.match(verdict.why, /停没停下不明/);
+    assert.ok(Date.now() - quick < 1_000);
+    console.log("✓ 起新版的责任：兑现、强停之前就记下；兑现结果不明只接着问、绝不去停，看到新版或者旧服务亲口说没兑现才结清（晚到的兑现执行了也接得住）；松锁出错不丢；退出前在时限里一直起到新版");
   }
 
   // ── 壳在切换途中退出：控制器先把这一趟做完，旧服务交出去了就把新版起起来再退 ────────
@@ -473,10 +530,28 @@ try {
       timing: { poll: 10_000, updates: { first: 10_000 } },
       overrides: { probeWindow: async () => ({ kind: "down" }) },
     });
+    const notePath = join(dirname(failing.cfg.settingsFile), "handover-unfinished.json");
+    assert.ok(existsSync(notePath), "留了纸条");
     reopened.start();
     const told = await waitFor("下次打开时说一声", () => sentNotes.find((message) => message.type === "dialog" && message.title === "上次退出时新版服务没起来"));
-    assert.match(told.detail, /新版起不来：端口被占/);
+    assert.match(told.detail, /新版起不来：端口被占[\s\S]*也还没起来/, "照这次起服务的结局说");
+    assert.ok(existsSync(notePath), "用户还没看过：纸条留着");
+    reopened.receive({ type: "dialogResult", id: told.id, index: 0 });
+    await waitFor("说过了删纸条", () => !existsSync(notePath));
     reopened.stop();
+    noteUnfinished(failing.cfg, "上次的原因");
+    const shown = [];
+    const fine = createController({
+      cfg: failing.cfg, updatesEnabled: false, send: (message) => shown.push(message),
+      launcher: { isInitialized: () => true, approveFreshStart() {}, ensureRunning: async () => ({ kind: "ready", instance: failing.instance(join(failing.cfg.runtimeStore, NEW), { id: "new-1", pid: 77 }) }) },
+      loginItem: { isEnabled: () => false, setEnabled() {}, reconcileAtLaunch: () => "skipped" },
+      timing: { poll: 10_000, updates: { first: 10_000 } },
+      overrides: { probeWindow: async () => ({ kind: "down" }) },
+    });
+    fine.start();
+    const ready = await waitFor("起来了再说", () => shown.find((message) => message.type === "dialog" && message.title === "上次退出时新版服务没起来"));
+    assert.match(ready.detail, /上次的原因[\s\S]*已经起来了/);
+    fine.stop();
     console.log("✓ 壳在切换途中退出：等这一趟做完，旧服务交出去了就把新版起起来再退；起不来留纸条、下次打开说给用户；没在切换就直接退");
   }
 

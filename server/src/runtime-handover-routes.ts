@@ -6,7 +6,7 @@ import { isLocalDirect } from "./auth/remote-access.js";
 import { secretsEqual } from "./openai-converter/common.js";
 import { NAVI_HEADERS, requestHeader } from "./request-headers.js";
 import { heldTurns } from "./turn-lock.js";
-import { commitRuntimeHandover, releaseRuntimeHandover, runtimeHandoverActive, runtimeHandoverMatches } from "./runtime-handover-state.js";
+import { commitRuntimeHandover, releaseRuntimeHandover, runtimeHandoverActive, runtimeHandoverDeadline, runtimeHandoverMatches } from "./runtime-handover-state.js";
 import { resumeRuntimeGateway } from "./runtime-channel-gateway.js";
 import { acquireRuntimeHandover } from "./runtime-handover.js";
 import { checkpointRuntimeHandover, sealRuntimeHandover } from "./runtime-handover-prepare.js";
@@ -52,7 +52,8 @@ export function mountRuntimeHandoverRoutes(api: Hono) {
           await checkpointRuntimeHandover(impact, lease);
         },
       }, body.holdResources ? standingResources : undefined);
-      return context.json({ ...result, protocol: current.protocol }, result.lease ? 200 : 409);
+      const expiresAt = result.lease ? runtimeHandoverDeadline(result.lease) : null;
+      return context.json({ ...result, protocol: current.protocol, ...(expiresAt ? { expiresAt } : {}) }, result.lease ? 200 : 409);
     } catch (error) {
       return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
     }

@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { managedRuntimeStore, runtimeCompatibilityAt } from "../src/runtime-compatibility.js";
 import { acquireRuntimeHandover } from "../src/runtime-handover.js";
-import { commitRuntimeHandover, reserveRuntimeHandover, runtimeHandoverActive } from "../src/runtime-handover-state.js";
+import { commitRuntimeHandover, reserveRuntimeHandover, runtimeHandoverActive, runtimeHandoverDeadline } from "../src/runtime-handover-state.js";
 import { heldTurns } from "../src/turn-lock.js";
 import type { RestartImpact } from "../src/reattach.js";
 
@@ -91,16 +91,21 @@ try {
   const later = (ms: number) => { const base = realNow(); Date.now = () => base + ms; };
   try {
     const expiring = reserveRuntimeHandover()!;
-    later(61_000);
+    const fence = runtimeHandoverDeadline(expiring)!;
+    later(fence - Date.now() + 1);
     assert.equal(commitRuntimeHandover(expiring, () => assert.fail("过期的许可不能兑现")), false, "到期了就兑现不了");
     assert.equal(runtimeHandoverActive(), false);
     Date.now = realNow;
 
     const lease = reserveRuntimeHandover()!;
+    const deadline = runtimeHandoverDeadline(lease)!;
+    assert.ok(deadline > Date.now() && deadline <= Date.now() + 60_000, "许可带着最晚兑现时刻（接管方据此断定晚到的兑现不会再执行）");
+    assert.equal(runtimeHandoverDeadline("not-the-lease"), null);
     assert.equal(commitRuntimeHandover("not-the-lease", () => assert.fail()), false, "别人的许可兑现不了");
     let exited = 0;
     assert.equal(commitRuntimeHandover(lease, () => { exited++; }, 40), true);
     assert.equal(commitRuntimeHandover(lease, () => { exited++; }, 40), true, "重复兑现不另起退出");
+    assert.equal(runtimeHandoverDeadline(lease), Infinity, "兑现后不再有到期时刻");
     later(10 * 60_000);
     assert.equal(runtimeHandoverActive(), true, "兑现后不再到期：封口保持到退出");
     Date.now = realNow;
