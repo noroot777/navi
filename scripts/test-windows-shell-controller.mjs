@@ -1,14 +1,16 @@
 // Windows 桌面壳里控制器和壳之间那一来一回（desktop/windows/launcher/controller.mjs，在 mac 上也跑）：
 // 假壳收消息、按剧本回 started / report / action / link / menu / dialogResult；起服务和探活换成可编排的假的。
 // 覆盖首启 → 全新开始 → 认人 → 带实例号载页 → 页面表态；navi:// 在窗口里换路由或交给浏览器；页面在时端口换了人就撤页；
-// 服务重起过换实例号重载；等不到页面表态时给持久说明；第一次发布时说要等几分钟；端口被占着；「允许其他设备访问」先问再重启。
+// 服务重起过换实例号重载；等不到页面表态时给持久说明；第一次发布时说要等几分钟；端口被占着；「允许其他设备访问」先问再重启、
+// 点头之后名单变了要重问；页面内换了地址，浏览器入口和重载都跟着它；窗口端口认不出时说清楚、不空转。
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimScratch, reclaimScratch } from "../desktop/shared/scratch.mjs";
 import { loadConfig } from "../desktop/windows/launcher/config.mjs";
 import { createController } from "../desktop/windows/launcher/controller.mjs";
+import { activeHold } from "../desktop/windows/launcher/maintenance.mjs";
 
 reclaimScratch(tmpdir(), "navi-windows-shell-controller-");
 const temporary = realpathSync(claimScratch(tmpdir(), "navi-windows-shell-controller-"));
@@ -43,7 +45,7 @@ function harness(name, { initialized = true, outcome, window: windowAnswer } = {
     cfg, launcher, loginItem, timing, send: (message) => h.sent.push(message),
     overrides: {
       probeWindow: async () => h.window,
-      assess: async () => h.assess,
+      assess: async () => (typeof h.assess === "function" ? h.assess() : h.assess),
       stop: async (target) => { h.stops.push(target); return h.stopped; },
     },
   });
@@ -108,9 +110,16 @@ try {
     assert.equal(external.url, "http://mbp:4317/?project=p1&task=t1");
     console.log("✓ navi:// 指纹对上原地换路由，对不上把原来的 http 地址交给浏览器");
 
+    // 深链换了路由，还没等页面报回：浏览器入口已经是链接那一页
+    h.receive({ type: "menu", id: "openInBrowser" });
+    assert.equal(h.last("openExternal").url, "http://127.0.0.1:14999/?project=p1&task=t1");
+
     // 菜单「在浏览器中打开」：同一路由，换成 4317 那一边
-    h.receive({ type: "started", url: `${h.cfg.windowURL}/?project=p1#x` });
+    h.receive({ type: "started", url: `${h.cfg.windowURL}/?project=before&task=old` });
     h.receive({ type: "report", kind: "titlebar" });
+    // 页面内切到别的项目（History API，不换文档）：报回的地址才是用户此刻在看的；别的来源报来的不认
+    h.receive({ type: "report", kind: `url:${h.cfg.windowURL}/?project=p1#x` });
+    h.receive({ type: "report", kind: "url:http://evil.example/?project=p1" });
     h.receive({ type: "menu", id: "openInBrowser" });
     assert.equal(h.last("openExternal").url, "http://127.0.0.1:14999/?project=p1#x");
 
@@ -231,6 +240,61 @@ try {
     await h.waitFor("说明关掉后回到页面", () => h.of("load").length > loads);
     h.controller.stop();
     console.log("✓ 允许其他设备访问：先问（列出会打断的、提醒防火墙），取消不动，放行后只停那一份、停下才落设置；改回本机不打断谁就不问，没停成不改设置");
+  }
+
+  // ── 点头之后、停服务之前名单变了：松锁重问，取消就什么都不动；同意了新名单才停 ───────────
+  {
+    const h = harness("remote-changed");
+    h.controller.start();
+    await h.present();
+    const verdicts = [
+      { kind: "clear", target: { kind: "ours", pid: 7 } },
+      { kind: "disrupts", target: { kind: "ours", pid: 7 }, items: [{ id: "n", title: "新任务", why: "会被判失败" }] },
+    ];
+    h.assess = () => verdicts.shift() ?? { kind: "disrupts", target: { kind: "ours", pid: 7 }, items: [{ id: "n", title: "新任务", why: "会被判失败" }] };
+    h.receive({ type: "menu", id: "toggleRemote" });
+    const first = await h.waitFor("确认框", () => h.last("dialog"));
+    assert.match(first.detail, /照常接着跑/);
+    h.receive({ type: "dialogResult", id: first.id, index: 0 });
+    const again = await h.waitFor("重问", () => h.of("dialog").find((m) => m.id !== first.id));
+    assert.match(again.detail, /确认之后情况变了[\s\S]*新任务 —— 会被判失败/);
+    assert.equal(h.stops.length, 0, "名单变了，没停");
+    assert.equal(activeHold(h.cfg), null, "重问时维护锁已经松开");
+    const loads = h.of("load").length;
+    h.receive({ type: "dialogResult", id: again.id, index: 1 });
+    await h.waitFor("取消后回到页面", () => h.of("load").length > loads);
+    assert.equal(h.stops.length, 0, "取消了就不停");
+    assert.equal(existsSync(h.cfg.settingsFile), false, "设置没改");
+    assert.equal(h.last("menu").remote.enabled, true);
+
+    // 再来一次：重问时同意，按同意过的那一份停
+    verdicts.push({ kind: "clear", target: { kind: "ours", pid: 7 } });
+    h.receive({ type: "menu", id: "toggleRemote" });
+    const third = await h.waitFor("第三个确认框", () => h.of("dialog").find((m) => m.id > again.id));
+    h.receive({ type: "dialogResult", id: third.id, index: 0 });
+    const fourth = await h.waitFor("又一次重问", () => h.of("dialog").find((m) => m.id > third.id));
+    h.receive({ type: "dialogResult", id: fourth.id, index: 0 });
+    await h.waitFor("停了", () => h.stops.length === 1);
+    assert.equal(JSON.parse(readFileSync(h.cfg.settingsFile, "utf8")).allowOtherDevices, true);
+    await h.waitFor("重新载页", () => h.of("load").length > loads + 1);
+    h.controller.stop();
+    console.log("✓ 点头之后名单变了：松锁重问，取消什么都不动，同意了才停、才落设置");
+  }
+
+  // ── 主端口好好的、窗口端口认不出：说清楚，隔一阵探一次，通了再载；不一圈圈地重起 ─────────
+  {
+    const h = harness("window-port", { window: { kind: "down" } });
+    h.controller.start();
+    const stuck = await h.screen("offline", /窗口连不上 Navi/);
+    assert.match(stuck.detail, new RegExp(`${h.cfg.windowPort} 端口上却认不出它：没有程序在听`));
+    assert.deepEqual(stuck.actions.map((a) => a.id), ["logs", "retry"]);
+    await sleep(150);
+    assert.equal(h.ensured, 1, "没有回头一遍遍地起服务");
+    h.window = { kind: "navi", instance: h.instance("one") };
+    await h.present();
+    assert.equal(h.controller.state.presentation, "presented");
+    h.controller.stop();
+    console.log("✓ 窗口端口认不出：持久说明、按轮询间隔再探，通了自动载页，不空转");
   }
 } finally {
   rmSync(temporary, { recursive: true, force: true });

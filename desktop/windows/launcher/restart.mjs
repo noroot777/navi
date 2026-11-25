@@ -30,10 +30,10 @@ export function disruptedItems(impact) {
   const seen = new Set();
   const out = [];
   for (const item of impact.interrupted ?? []) {
-    if (!seen.has(item.id)) { seen.add(item.id); out.push({ title: item.title, why: item.reason ? `会被判失败：${item.reason}` : "会被判失败" }); }
+    if (!seen.has(item.id)) { seen.add(item.id); out.push({ id: item.id, title: item.title, why: item.reason ? `会被判失败：${item.reason}` : "会被判失败" }); }
   }
   for (const item of impact.mcpDisrupted ?? []) {
-    if (!seen.has(item.id)) { seen.add(item.id); out.push({ title: item.title, why: "手里握着 Navi MCP，服务重启那会儿交卷可能失败" }); }
+    if (!seen.has(item.id)) { seen.add(item.id); out.push({ id: item.id, title: item.title, why: "手里握着 Navi MCP，服务重启那会儿交卷可能失败" }); }
   }
   return out;
 }
@@ -61,6 +61,20 @@ export async function assessImpact(cfg, { probe = () => probeHealth(cfg.baseURL)
   if (answer.error) return { kind: "unknown", why: answer.error };
   const items = disruptedItems(answer.impact);
   return items.length ? { kind: "disrupts", target, items } : { kind: "clear", target };
+}
+
+/**
+ * 用户点头之后再评估一次，比点头时摆给他看的那一份多出了什么：多出了会打断的任务、从确认得了变成确认不了、
+ * 端口上换了一份服务 —— 这些都是他没同意过的，要重新问。名单变短、照旧不算。
+ */
+export function widened(agreed, now) {
+  if (now.kind === "unknown") return agreed.kind !== "unknown";
+  const target = (verdict) => (verdict.target?.kind === "ours" ? `ours:${verdict.target.pid}` : verdict.target?.kind ?? null);
+  if (agreed.kind !== "unknown" && target(agreed) !== target(now)) return true;
+  if (now.kind !== "disrupts") return false;
+  if (agreed.kind === "unknown") return false;
+  const known = new Set((agreed.items ?? []).map((item) => item.id ?? item.title));
+  return now.items.some((item) => !known.has(item.id ?? item.title));
 }
 
 async function askImpact(cfg, instanceId) {

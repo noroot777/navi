@@ -33,6 +33,7 @@ let failures = 0;
 const pass = (line) => console.log(`✓ ${line}`);
 const fail = (line) => { failures++; console.log(`✕ ${line}`); };
 const note = (line) => console.log(`  ${line}`);
+const brief = (text) => String(text ?? "").trim().replace(/\s*\r?\n\s*/g, " ⏎ ").slice(0, 300);
 const check = (ok, line, why = "") => (ok ? pass(line) : fail(why ? `${line}：${why}` : line));
 const spawned = new Set();
 
@@ -117,7 +118,7 @@ async function inspectPage(devtools, windowPort) {
     const expression = `(async () => ({
       href: location.href, internals: typeof window.__TAURI_INTERNALS__, script: Boolean(window.__naviShellReport),
       chrome: document.querySelector("meta[name='navi-window-chrome']")?.content ?? null,
-      size: document.documentElement.dataset.windowSize ?? null, text: (document.body?.innerText ?? "").slice(0, 300),
+      size: document.documentElement.dataset.windowSize ?? null, shell: document.documentElement.dataset.windowShell ?? null, text: (document.body?.innerText ?? "").slice(0, 300),
       ipc: window.__TAURI_INTERNALS__ ? await window.__TAURI_INTERNALS__.invoke("page_report", { kind: "probe" }).then(() => "ok", (error) => "err:" + String(error)) : "none",
     }))()`;
     const answer = await new Promise((resolve) => {
@@ -216,7 +217,12 @@ try {
     const where = spawnSync("where.exe", ["claude", "codex"], { env: { ...process.env, Path: fresh }, encoding: "utf8" });
     const found = where.stdout.trim().split(/\r?\n/).filter(Boolean);
     note(`注册表 PATH 下 where claude codex：${found.join("；") || "（都没有）"}`);
-    check(found.length > 0, "注册表现读的 PATH 能找到 agent 命令");
+    // 两个都要找得到，而且真跑得起来：codex 在 Windows 上是 .cmd 垫片，得经 cmd 才起得来（服务拉 agent 也是这样）。
+    for (const name of ["claude", "codex"]) {
+      const run = spawnSync("cmd.exe", ["/d", "/s", "/c", `${name} --version`], { env: { ...process.env, Path: fresh }, encoding: "utf8", timeout: 60_000 });
+      const version = `${run.stdout ?? ""}`.trim().split(/\r?\n/).at(-1) ?? "";
+      check(run.status === 0 && version !== "", `注册表现读的 PATH 能找到并跑起 ${name}`, `${name} --version → 退出码 ${run.status}：${version || brief(run.stderr)}`);
+    }
   }
 
   // 3. 登录项写进 HKCU\…\Run（测试用的值名，测完删掉）
@@ -302,16 +308,26 @@ try {
   check(alive(shellPid), "关窗后壳还在（收进托盘）");
   check((await health(port))?.instance?.pid === serverPid, "关窗后服务照常应答");
 
-  // 7. 第二次打开带 navi:// 链接：交给开着的那份、自己退出，窗口回到前面
+  // 7. 第二次打开带 navi:// 链接（指纹是这一份的）：交给开着的那份、自己退出，窗口回到前面、原地换到链接那一页；
+  //    页面换了地址要报回控制器（「在浏览器中打开」、重载、接回都从它取），报回的和页面上的是同一个地址
   {
     const linkLines = logLines(shellLog).length;
-    const second = launch(env, ["navi://open?task=check123"]);
+    const link = `navi://open?project=checkp&task=check123&instance=${instance.tag}`;
+    const second = launch(env, [link]);
     await waitFor("第二份退出", 20_000, () => !alive(second));
     pass("第二次打开：单实例，自己退出");
-    await waitFor("链接转交", 10_000, () => logLines(shellLog).slice(linkLines).some((line) => line.includes("← link navi://open?task=check123")));
+    await waitFor("链接转交", 10_000, () => logLines(shellLog).slice(linkLines).some((line) => line.includes(`← link ${link}`)));
     pass("链接转交给了开着的那份");
     const shown = await waitFor("窗口回来", 10_000, () => windowOf(shellPid));
     note(`窗口：${JSON.stringify(shown)}`);
+    await waitFor("窗口里换路由", 20_000, () => logLines(shellLog).slice(linkLines).some((line) => line.includes("→ route /?project=checkp&task=check123")));
+    pass("指纹对上：在窗口里原地换到链接那一页");
+    await sleep(3000);
+    const page = await inspectPage(devtoolsPort, cfg.windowPort);
+    const reported = logLines(shellLog).slice(linkLines).filter((line) => line.includes("← report url:")).at(-1)?.split("← report url:")[1]?.trim();
+    note(`页面上：${page.href}；报回的：${reported}`);
+    check(page.href?.includes("project=checkp") && reported === page.href, "页面内换的地址报回了控制器，和页面上的一样");
+    check(page.shell === "windows", "页面知道自己在 Windows 壳里", String(page.shell));
   }
 
   // 8. 壳被强杀：服务不跟着走

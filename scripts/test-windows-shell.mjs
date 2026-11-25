@@ -1,6 +1,7 @@
 // Windows 桌面壳的控制器（desktop/windows/launcher/）里不依赖 Windows 就能验的那些（在 mac 上也跑）：
 //   · 配置：一切从 LOCALAPPDATA 派生，窗口专用端口按数据根算（Windows 上不分大小写），几个环境变量口子；
-//   · 认人：health 的四种结果，mismatch 每一条判据；
+//   · 认人：health 的四种结果，mismatch 每一条判据；探活的总期限与正文上限（一点一点吐、不结束的，超大的）；
+//   · 「允许其他设备访问」点头之后再评估，比点头时多出了什么（widened）；
 //   · navi:// 链接：规则同 mac 的 DeepLink.swift；
 //   · 登录项（假注册表）、交给服务的环境、启动锁、维护标记；
 //   · 起服务：假运行时（封成 format 2）里放一个假服务，真发布、真按 start-detached 拉起，认人、复用、并发合一、
@@ -19,6 +20,7 @@ import { decideLink, parseLink } from "../desktop/windows/launcher/deep-link.mjs
 import { classify, mismatch, probe } from "../desktop/windows/launcher/health.mjs";
 import { createLauncher } from "../desktop/windows/launcher/launcher.mjs";
 import { createLoginItem, pointsAt } from "../desktop/windows/launcher/login-item.mjs";
+import { widened } from "../desktop/windows/launcher/restart.mjs";
 import { activeHold, beginMaintenance } from "../desktop/windows/launcher/maintenance.mjs";
 import { mergePath, serverEnvironment } from "../desktop/windows/launcher/server-env.mjs";
 import { acquireStartLock, tryStartLock } from "../desktop/windows/launcher/start-lock.mjs";
@@ -75,7 +77,49 @@ try {
     assert.match(mismatch({ ...own, windowPort: 1 }, cfg), new RegExp(`专用端口 ${cfg.windowPort}`));
     const port = await freePort();
     assert.deepEqual(await probe(`http://127.0.0.1:${port}`), { kind: "down" });
+    assert.deepEqual(await probe(`https://127.0.0.1:${port}`), { kind: "down" }, "https 地址按 https 去探，不抛错");
     console.log("✓ 认人：四种探活结果，数据根 / 代码 / 桌面版标记 / 窗口端口逐条判");
+
+    // 端口上的东西每 20ms 吐一点、就是不结束答复：到总期限照样收工，不是每来一点就续期
+    const trickle = await listen(await freePort(), (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      const timer = setInterval(() => res.write(" "), 20);
+      res.on("close", () => clearInterval(timer));
+    });
+    servers.push(trickle);
+    const began = Date.now();
+    const slow = await probe(`http://127.0.0.1:${trickle.address().port}`, { timeoutMs: 150 });
+    assert.deepEqual(slow, { kind: "unreachable", reason: "超时没有答复" });
+    assert.ok(Date.now() - began < 1_000, `总期限 150ms，实际等了 ${Date.now() - began}ms`);
+    // 答复大得不像 health：读到上限就掐断，按不是 navi 算
+    const huge = await listen(await freePort(), (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      const timer = setInterval(() => res.write("x".repeat(16 * 1024)), 1);
+      res.on("close", () => clearInterval(timer));
+    });
+    servers.push(huge);
+    const big = await probe(`http://127.0.0.1:${huge.address().port}`, { timeoutMs: 5_000 });
+    assert.equal(big.kind, "notNavi");
+    assert.match(big.what, /超过 64 KB/);
+    console.log("✓ 探活有总期限（一点一点吐的到点收工）和正文上限（超大的掐断、不当 navi）");
+  }
+
+  // ── 点头之后再评估：多出了用户没同意过的影响才重新问 ─────────────────────────
+  {
+    const ours = (pid, items) => (items ? { kind: "disrupts", target: { kind: "ours", pid }, items } : { kind: "clear", target: { kind: "ours", pid } });
+    const a = { id: "a", title: "任务 A", why: "" };
+    const b = { id: "b", title: "任务 B", why: "" };
+    assert.equal(widened(ours(7), ours(7)), false, "照旧");
+    assert.equal(widened(ours(7), ours(7, [a])), true, "原来不打断谁，现在多了一个");
+    assert.equal(widened(ours(7, [a]), ours(7, [a])), false);
+    assert.equal(widened(ours(7, [a, b]), ours(7, [a])), false, "名单变短不用再问");
+    assert.equal(widened(ours(7, [a]), ours(7, [b])), true, "换了一个也是多出来的");
+    assert.equal(widened(ours(7), ours(8)), true, "端口上换了一份服务");
+    assert.equal(widened(ours(7), { kind: "unknown", why: "x" }), true, "从确认得了变成确认不了");
+    assert.equal(widened({ kind: "unknown", why: "x" }, { kind: "unknown", why: "y" }), false, "本来就按会打断同意过");
+    assert.equal(widened({ kind: "unknown", why: "x" }, ours(7, [a])), false);
+    assert.equal(widened({ kind: "clear", target: { kind: "absent" } }, ours(7)), true, "原来没人在听，现在起了一份");
+    console.log("✓ 点头之后再评估：多了任务、换了服务、变得确认不了才重新问，名单变短不问");
   }
 
   // ── navi:// 链接 ─────────────────────────────────────────────────────────

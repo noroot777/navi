@@ -8,14 +8,15 @@
 //   { type: "reload" } { type: "window", size } { type: "front" } { type: "openExternal", url } { type: "openPath", path }
 //   { type: "dialog", id, title, detail, buttons }  弹原生对话框，壳回 { type: "dialogResult", id, index }
 //   { type: "menu", remote, login }            托盘菜单里两个勾此刻的样子
-// 壳发来的：started（主框架开始载一份文档）、report（页面表态：size:<setup|work> / titlebar / broken:<地址>）、
+// 壳发来的：started（主框架开始载一份文档）、report（页面表态：size:<setup|work> / titlebar / broken:<地址>；
+//   url:<地址> 是页面内换了地址，不换文档）、
 //   navigationBlocked（壳的导航前认人没过）、action（本地那一屏上的按钮）、menu（托盘菜单）、link（navi:// 链接）、dialogResult。
 import { mkdirSync } from "node:fs";
 import { runtimeId } from "./config.mjs";
 import { decideLink, parseLink } from "./deep-link.mjs";
-import { isServing, ours, probe as probeHealth } from "./health.mjs";
+import { isServing, mismatch, ours, probe as probeHealth } from "./health.mjs";
 import { activeHold, beginMaintenance } from "./maintenance.mjs";
-import { assessImpact, stopServer } from "./restart.mjs";
+import { assessImpact, stopServer, widened } from "./restart.mjs";
 import { allowsOtherDevices, writeSettings } from "./settings.mjs";
 
 export const INSTANCE_COOKIE = "navi_instance";
@@ -129,10 +130,27 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
     const result = await deps.probeWindow();
     if (state.generation !== generation) return;
     const instance = ours(result, cfg);
-    if (!instance) return instanceLost();
+    if (!instance) return windowPortUnusable(result);
     observe(instance);
     state.bound = instance.id;
     showPage();
+  }
+
+  /**
+   * 主端口上认出了自己那份（它也报了在窗口专用端口上听着），窗口端口上却不是它：连不上、答的是别人。不能回头
+   * 再走一遍 loadHome —— 主端口照样就绪，马上又到这里，一圈接一圈地空转。说清楚，隔一阵探一次窗口端口，通了再载。
+   */
+  function windowPortUnusable(result) {
+    if (!state.resumeURL && state.pageURL && sameOrigin(state.pageURL)) state.resumeURL = state.pageURL;
+    state.bound = null;
+    const why = result.kind === "navi" ? mismatch(result.instance, cfg) ?? "答的不是这个 app 的那一份"
+      : result.kind === "down" ? "没有程序在听" : result.reason ?? result.what;
+    show({
+      kind: "offline",
+      title: "窗口连不上 Navi",
+      detail: `服务在 ${cfg.port} 端口上好好的，窗口专用的 ${cfg.windowPort} 端口上却认不出它：${why}\n通了会自动回到工作区。`,
+    }, [{ id: "logs", title: "日志", run: openLogs }, retry()]);
+    startPolling(cfg.windowURL);
   }
 
   function showPage() {
@@ -213,8 +231,9 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
   /** 后台每 2 秒探一次：自己那份通了就载回去。`takeOverWhenFree`：端口被别人占着时，对方一停就接着起自己那份。 */
   function startPolling(base, { takeOverWhenFree = false } = {}) {
     if (state.poll) return;
+    const probe = base === cfg.windowURL ? deps.probeWindow : () => probeHealth(base);
     const timer = setInterval(async () => {
-      const result = await probeHealth(base);
+      const result = await probe();
       const down = result.kind === "down" || result.kind === "unreachable";
       if (state.poll === timer && (isServing(result, cfg) || (takeOverWhenFree && down))) loadHome();
     }, t.poll);
@@ -246,6 +265,12 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
   }
 
   function pageReport(kind) {
+    // 页面在用户眼前时它此刻的地址：浏览器入口、换实例号重载、断线接回都从这里取，不是最近一次整页载入的那个地址。
+    if (kind.startsWith("url:")) {
+      const url = kind.slice(4);
+      if (state.presentation !== "invalid" && sameOrigin(url)) state.pageURL = url;
+      return;
+    }
     if (kind.startsWith("size:")) { window(kind.slice(5)); return pageDidPresent(); }
     if (kind === "titlebar") { window("work"); return pageDidPresent(); }
     if (kind.startsWith("broken:") && state.handoff?.document === state.document) {
@@ -308,7 +333,10 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
       send({ type: "openExternal", url: action.url });
     } else if (action.kind === "window") {
       // 页面在着就原地换路由，不重载；页面还没载进来（服务在起、被占着、首启）就记下，载页面时直接载到那里。
-      if (hasPresentedPage()) send({ type: "route", route: action.route });
+      if (hasPresentedPage()) {
+        state.pageURL = `${cfg.windowURL}${action.route}`;
+        send({ type: "route", route: action.route });
+      }
       else state.pendingRoute = `${cfg.windowURL}${action.route}`;
     }
   }
@@ -368,6 +396,10 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
   // NAVI_LOCAL_ONLY 定的，所以光改设置不够，得重启。先问会打断谁，会打断或者确认不了就摆给用户；放行后攥住维护锁，
   // 只停评估过的那一份，**确认停下之后、松开维护锁之前**才把新设置落盘，再按它起。中途在哪一步退出，留下的设置和
   // 服务都对得上；没停成就什么都不改。
+  //
+  // 确认框可能开着好一阵，这期间别处又起了任务，用户点头时看到的名单就过时了。所以攥住维护锁之后、停服务之前再
+  // 评估一次（widened），多出了他没同意过的影响就松锁、把新名单重新摆给他。这只把窗口从「确认框开着的那段时间」
+  // 收窄到「再评估到停下之间」那一下：服务端没有「先停止接活、再给影响快照」的关口，这一下仍然挡不住。
   async function toggleRemote() {
     if (state.remoteBusy) return;
     const hold = activeHold(cfg);
@@ -375,37 +407,46 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
     state.remoteBusy = true;
     pushMenu();
     const enable = networkPending() ? allowsOtherDevices(cfg) : !allowsOtherDevices(cfg);
-    const verdict = await deps.assess();
-    if (!(await confirmRemote(enable, verdict))) {
-      state.remoteBusy = false;
-      return pushMenu();
-    }
-    showInstalling("正在重启 Navi", "正在应用访问设置，就绪后自动回到工作区。");
+    let verdict = await deps.assess();
+    let agreed = await confirmRemote(enable, verdict);
     let failure = null;
-    try {
-      const end = await beginMaintenance(cfg, "正在按新设置重启 Navi 服务…", 50_000);
+    let restarted = false;
+    while (agreed) {
+      showInstalling("正在重启 Navi", "正在应用访问设置，就绪后自动回到工作区。");
+      restarted = true;
+      let changed = null;
       try {
-        const stopped = await deps.stop(verdict.target ?? null);
-        if (stopped.kind === "stopped") {
-          state.served = null;
-          writeSettings(cfg, { allowOtherDevices: enable });
-        } else {
-          failure = stopped.kind === "changed" ? `评估之后端口上的服务变了（${stopped.why}），这次没有重启。` : stopped.why;
-        }
-      } finally { end(); }
-    } catch (error) {
-      failure = `没能让服务下线：${error.message}`;
+        const end = await beginMaintenance(cfg, "正在按新设置重启 Navi 服务…", 50_000);
+        try {
+          const now = await deps.assess();
+          if (widened(verdict, now)) changed = now;
+          else {
+            const stopped = await deps.stop(verdict.target ?? null);
+            if (stopped.kind === "stopped") {
+              state.served = null;
+              writeSettings(cfg, { allowOtherDevices: enable });
+            } else {
+              failure = stopped.kind === "changed" ? `评估之后端口上的服务变了（${stopped.why}），这次没有重启。` : stopped.why;
+            }
+          }
+        } finally { end(); }
+      } catch (error) {
+        failure = `没能让服务下线：${error.message}`;
+      }
+      if (!changed) break;
+      verdict = changed;
+      agreed = await confirmRemote(enable, verdict, { changed: true });
     }
     state.remoteBusy = false;
     pushMenu();
     if (failure) await alert("没有切换", `${failure}\n\n设置没改，可以再试一次。`);
-    loadHome();
+    if (restarted) loadHome();
   }
 
-  async function confirmRemote(enable, verdict) {
+  async function confirmRemote(enable, verdict, { changed = false } = {}) {
     // 改回只听本机是收窄，不打断谁就直接办。
     if (!enable && verdict.kind === "clear") return true;
-    const lines = [];
+    const lines = changed ? ["刚才确认之后情况变了，按现在的样子再确认一次。"] : [];
     let title;
     let primary;
     if (enable) {

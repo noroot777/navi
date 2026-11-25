@@ -7,11 +7,16 @@
 //
 // 认人只能回答「刚才那一刻是谁」。认过之后页面发的请求还带着那一份的实例号（cookie），端口换了人，新来的
 // 那份见到别人的实例号就不执行（server/src/instance-binding.ts）。
-import { request } from "node:http";
-import { Agent } from "node:http";
+import { Agent as HttpAgent, request as httpRequest } from "node:http";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { publishedRuntime, samePath, storeContains } from "./config.mjs";
 
-const DIRECT = new Agent({ keepAlive: false });
+const CLIENTS = {
+  "http:": { request: httpRequest, agent: new HttpAgent({ keepAlive: false }) },
+  "https:": { request: httpsRequest, agent: new HttpsAgent({ keepAlive: false }) },
+};
+/** health 的答复就几百字节；再大的不是 navi，读到这么多就不读了。 */
+const MAX_BODY = 64 * 1024;
 
 /**
  * 探一次 `<base>/api/health`。结果是下面四种之一：
@@ -19,21 +24,38 @@ const DIRECT = new Agent({ keepAlive: false });
  *   { kind: "unreachable", reason }       发出去了却没等到答复：可能没人，也可能有人在、只是答不上来
  *   { kind: "notNavi", what }            有东西应答，但不是 navi
  *   { kind: "navi", instance }
+ *
+ * timeoutMs 是从发出到答完的总期限，不是 socket 的空闲超时：端口上的东西一点一点往外吐、就是不结束答复，
+ * 到点照样掐断连接、按没等到答复算。正文超过 MAX_BODY 也当场掐断，按不是 navi 算。
  */
 export function probe(base, { timeoutMs = 1500, path = "/api/health", headers } = {}) {
   const url = new URL(path, base);
+  const client = CLIENTS[url.protocol];
+  if (!client) return Promise.resolve({ kind: "unreachable", reason: `不支持的地址协议 ${url.protocol}` });
   return new Promise((resolve) => {
     let settled = false;
     let timedOut = false;
-    const done = (value) => { if (!settled) { settled = true; resolve(value); } };
-    const req = request(url, { method: "GET", agent: DIRECT, timeout: timeoutMs, headers }, (res) => {
+    let req = null;
+    const timer = setTimeout(() => { timedOut = true; req?.destroy(); done({ kind: "unreachable", reason: "超时没有答复" }); }, timeoutMs);
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    req = client.request(url, { method: "GET", agent: client.agent, headers }, (res) => {
       let body = "";
       res.setEncoding("utf8");
-      res.on("data", (chunk) => { body += chunk; });
+      res.on("data", (chunk) => {
+        body += chunk;
+        if (body.length > MAX_BODY) {
+          done({ kind: "notNavi", what: `HTTP ${res.statusCode}，答复超过 ${MAX_BODY / 1024} KB` });
+          req.destroy();
+        }
+      });
       res.on("end", () => done(classify(res.statusCode, body)));
       res.on("error", (error) => done({ kind: "unreachable", reason: error.message }));
     });
-    req.on("timeout", () => { timedOut = true; req.destroy(); });
     req.on("error", (error) => {
       if (!timedOut && ["ECONNREFUSED", "EADDRNOTAVAIL"].includes(error.code)) return done({ kind: "down" });
       done({ kind: "unreachable", reason: timedOut ? "超时没有答复" : error.message });

@@ -2,7 +2,7 @@
 // 有时是壳自己的那一屏（ui/index.html：正在启动、端口被占、首启……）。画哪一屏、载哪个地址都由控制器定。
 //
 // 和页面的约定照 mac 的 WindowChrome：页面写在 <html data-window-size="setup|work"> 上的那一屏要多大的窗、脚本没载成，
-// 由 PAGE_SCRIPT 经 `page_report` 交回来；不认这套约定的文档（没有 navi-window-chrome 那行 meta）读完 <head> 报 titlebar。
+// 由 PAGE_SCRIPT 经 `page_report` 交回来（页面内换了地址也报）；不认这套约定的文档（没有 navi-window-chrome 那行 meta）读完 <head> 报 titlebar。
 // 页面那一份能调的只有 `page_report`：它的权限在载页面时按窗口专用端口现加（ensure_page_capability），本地那一屏的按钮它碰不到。
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -34,6 +34,9 @@ const PAGE_SCRIPT: &str = r#"(() => {
   const post = (kind) => { try { window.__TAURI_INTERNALS__.invoke("page_report", { kind }); } catch {} };
   // WebView2 在文档刚建出来时就跑这段，那一刻 <html> 还没有（documentElement 是 null）：监听挂在 document 上、
   // 带 subtree，<html> 晚到也收得到；文档读完时再补报一次当前值，防它在监听生效之前就写好了。
+  // 告诉页面它装在 Windows 的壳里（同 mac 壳写 "mac"）：首启的小窗里两栏卡片铺满整扇窗（web/src/styles/window-shell.css）。
+  const mark = () => { if (document.documentElement) document.documentElement.dataset.windowShell = "windows"; return Boolean(document.documentElement); };
+  if (!mark()) new MutationObserver((_, observer) => { if (mark()) observer.disconnect(); }).observe(document, { childList: true });
   let reported = null;
   const report = () => {
     const size = document.documentElement?.dataset.windowSize;
@@ -46,6 +49,16 @@ const PAGE_SCRIPT: &str = r#"(() => {
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", declare, { once: true });
   else declare();
   new MutationObserver(report).observe(document, { attributes: true, attributeFilter: ["data-window-size"], subtree: true });
+  // 页面内换地址（切项目、切任务、进设置都走 History API，深链的 route 也是 pushState）不重载文档，壳的「开始载入」
+  // 看不到：每换一次报一次当前地址，「在浏览器中打开」、服务重起后重载、断线后接回都要从用户此刻在看的那一页接着。
+  let href = null;
+  const where = () => { if (location.href !== href) { href = location.href; post("url:" + href); } };
+  for (const name of ["pushState", "replaceState"]) {
+    const original = History.prototype[name];
+    History.prototype[name] = function (...args) { const result = original.apply(this, args); where(); return result; };
+  }
+  window.addEventListener("popstate", where);
+  window.addEventListener("hashchange", where);
   window.addEventListener("error", (event) => {
     if (event.target instanceof HTMLScriptElement) post("broken:" + (event.target.src || "inline"));
   }, true);
@@ -308,7 +321,7 @@ pub fn shell_action(app: AppHandle, id: String) {
 
 #[tauri::command]
 pub fn page_report(app: AppHandle, kind: String) {
-  if kind.len() <= 2048 {
+  if kind.len() <= 8192 {
     controller::state(&app).send(json!({ "type": "report", "kind": kind }));
   }
 }

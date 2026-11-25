@@ -83,7 +83,7 @@ node desktop/windows/scripts/make-icon.mjs   # 标改了才要：在 mac 上重�
 
 ### 托盘
 
-显示 Navi / 在浏览器中打开 / 日志 / 允许其他设备访问 / 登录时启动 Navi 服务 / 关于 / 退出。「允许其他设备访问」同 mac：先问重启会打断谁（列出来），确认后攥住维护锁、只停评估过的那一份，确认停下了才把设置落盘再按它起；在跑的服务没按设置起时菜单写「（重启服务后生效）」。打开时多提醒一句 Windows 防火墙会问。
+显示 Navi / 在浏览器中打开 / 日志 / 允许其他设备访问 / 登录时启动 Navi 服务 / 关于 / 退出。「允许其他设备访问」同 mac：先问重启会打断谁（列出来），确认后攥住维护锁、**停之前再评估一次**，比确认时多出了会打断的任务（确认框开着时别处又起了任务）、变得确认不了、换了一份服务，就松锁把新名单重新摆出来；照旧才只停评估过的那一份，确认停下了才把设置落盘再按它起；在跑的服务没按设置起时菜单写「（重启服务后生效）」。打开时多提醒一句 Windows 防火墙会问。
 
 ### 登录时启动：为什么是 Run 项不是计划任务
 
@@ -103,8 +103,9 @@ node desktop/windows/scripts/make-icon.mjs   # 标改了才要：在 mac 上重�
 
 - 导入旧数据（mac 首启那一屏的「从旧数据导入」）、ComputerPreview：第一版不做，首启只有「全新开始」；
 - MCP 的 `current` 指针与启动器、换运行时的接管（handover）、自动更新、安装包和 scheme 注册：在后面「安装包与更新」那一步，服务端 `runtime-compatibility.ts`、`mcp-registry/desktop-runtime.ts` 里写死 `.mac-runtimes` 的几处到时一起改；
-- 窗口位置记忆。
+- 窗口位置记忆；
+- 「再评估到停下」之间那一下仍有空子：服务端没有「先停止接活、再给影响快照、凭快照停」的关口，`/api/restart-impact` 只是即时查询（mac 的 RemoteAccessSwitch 和 `npm run restart` 同样如此），要堵死得在服务端做，三处一起用。
 
 ### 验证
 
-`scripts/test-windows-shell.mjs`、`test-windows-shell-controller.mjs`（mac 上跑，挂在 `test:accept-scripts`）：配置、认人、链接、登录项、服务环境、启动锁、维护标记；假运行时真发布、真拉起；控制器和壳之间的整套来回。真窗口、Job、注册表、4317 被占要在 Windows 上跑 `scripts/shell-check.mjs`（`remote-smoke.mjs --shell` 送过去）：首启按元素点「全新开始」→ 认人 → 页面经 IPC 表态 → 按元素关窗后壳和服务都在 → 第二次打开带链接时单实例转交 → 强杀壳后服务还是同一个进程 → 再打开接上、不另起 → `--start-server` → 默认端口 4317 被别的 Navi 占着时说清楚、不碰它；另外验启动锁跨进程互斥、注册表 PATH 找得到 agent、Run 项读写、`--spawn-detached` 在三种 Job 处境下的行为。
+`scripts/test-windows-shell.mjs`、`test-windows-shell-controller.mjs`（mac 上跑，挂在 `test:accept-scripts`）：配置、认人、链接、登录项、服务环境、启动锁、维护标记；假运行时真发布、真拉起；控制器和壳之间的整套来回。真窗口、Job、注册表、4317 被占要在 Windows 上跑 `scripts/shell-check.mjs`（`remote-smoke.mjs --shell` 送过去）：首启按元素点「全新开始」→ 认人 → 页面经 IPC 表态 → 按元素关窗后壳和服务都在 → 第二次打开带链接时单实例转交、指纹对上在窗口里换到那一页、页面报回的地址和页面上的一致 → 强杀壳后服务还是同一个进程 → 再打开接上、不另起 → `--start-server` → 默认端口 4317 被别的 Navi 占着时说清楚、不碰它；另外验启动锁跨进程互斥、注册表 PATH 找得到并跑得起 claude 和 codex（`.cmd` 垫片经 cmd）、Run 项读写、`--spawn-detached` 在三种 Job 处境下的行为。
