@@ -1,4 +1,4 @@
-// mac app 窗口专用的那个端口（`NAVI_WINDOW_PORT`，只对 app 起的那份服务（`NAVI_DESKTOP_APP`）生效）。
+// 桌面 app 窗口专用的那个端口（`NAVI_WINDOW_PORT`，只对 app 起的那份服务（`NAVI_DESKTOP_APP`）生效）。
 //
 // 窗口原来直接连 :4317。app 那份服务停掉、端口被另一份 navi 接手的那一秒里，页面还在发的请求
 // 会落到新来的那一份上：新版 navi 见到别人的实例号会拒收（instance-binding.ts），可旧版 ash 不认
@@ -35,11 +35,11 @@ export function listenWindowPort(fetch: Parameters<typeof serve>[0]["fetch"], at
   return new Promise((resolve) => {
     const server = serve({ fetch, port: requested, hostname: LOCAL_ONLY_HOSTNAME }, (info) => {
       listening = info.port;
-      console.log(`[navi] mac app 窗口专用端口 http://${LOCAL_ONLY_HOSTNAME}:${info.port}`);
+      console.log(`[navi] 桌面 app 窗口专用端口 http://${LOCAL_ONLY_HOSTNAME}:${info.port}`);
       resolve();
     }) as Server;
     server.once("error", (error) => {
-      console.error(`[navi] mac app 窗口专用端口 ${requested} 没监听上（${String(error)}），app 不会载页面`);
+      console.error(`[navi] 桌面 app 窗口专用端口 ${requested} 没监听上（${String(error)}），app 不会载页面`);
       resolve();
     });
     attach(server);

@@ -1,6 +1,6 @@
-// mac 版 Navi.app 起 server 时带的两个开关的单点。它们管的是两件不相干的事，所以分开：
+// 桌面版（mac 的 Navi.app、Windows 的 Navi.exe）起 server 时带的两个开关的单点。它们管的是两件不相干的事，所以分开：
 //
-// `NAVI_DESKTOP_APP=1`：「这份服务是 Navi.app 起的那一份」。
+// `NAVI_DESKTOP_APP=1`：「这份服务是桌面 app 起的那一份」。
 //   · health 里报出来（`instance.desktop`），app 据此认出端口上是不是自家那份；
 //   · 在 4317 之外再听 app 窗口专用的端口（window-port.ts）；
 //   · 实例模式固定为自用：首启直接落成 single，转多人一律拒绝（库已经是多人的就拒绝启动，
@@ -28,4 +28,4 @@ export const LOCAL_ONLY_HOSTNAME = "127.0.0.1";
 export const LOCAL_ONLY_REFUSAL = "这台 Navi 以本机自用模式启动（NAVI_LOCAL_ONLY）：只接受本机直连，不提供远程配对、多人和邀请";
 
 /** 转多人被拒时说的那句：本机模式按上面那句说，app 放开了网络的按 app 说。 */
-export const SINGLE_ONLY_REFUSAL = LOCAL_ONLY ? LOCAL_ONLY_REFUSAL : "这台 Navi 是 Navi.app 的个人自用版：没有多人和邀请";
+export const SINGLE_ONLY_REFUSAL = LOCAL_ONLY ? LOCAL_ONLY_REFUSAL : `这台 Navi 是 ${process.platform === "win32" ? "Navi 桌面版" : "Navi.app"} 的个人自用版：没有多人和邀请`;

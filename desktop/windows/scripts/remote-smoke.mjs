@@ -2,7 +2,11 @@
 // 在开发机上把 bundle-runtime.mjs 做出的 Windows 运行时送到测试机（192.168.1.187）上跑 smoke-runtime.mjs。
 //
 //   WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs [运行时目录]   # 缺省 desktop/windows/build/runtime
+//   WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs --shell [便携版目录]   # 缺省 desktop/windows/build/Navi
 //   WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs --reclaim      # 只清上次没清完的对端目录和本机暂存
+//
+// --shell 送的是 build-shell.mjs 出的便携版（Navi.exe + runtime\），在那边用它自带的 node 跑 shell-check.mjs：
+// 首启、认人、关窗、单实例转链接、壳被强杀、再打开、4317 被占（只读它的 /api/health）。
 //
 // 通道是 scripts/win-remote 的那套（对端 Navi 的终端 API，见 docs/win-remote.md）。运行时有一两百 MB、不进 git，
 // 所以不走 win-remote sync：这边打一个 tar.gz、起一个只活这一次的 HTTP 服务（随机端口 + 随机路径），对端
@@ -31,7 +35,7 @@ const REPO = resolve(HERE, "../../..");
 const TOOLS = [
   "desktop/shared/runtime-store.mjs", "desktop/shared/runtime-smoke.mjs", "desktop/shared/scratch.mjs",
   "desktop/windows/scripts/smoke-runtime.mjs", "desktop/windows/scripts/binary-check.mjs", "desktop/windows/scripts/layout.mjs",
-  "desktop/windows/scripts/process-job.mjs",
+  "desktop/windows/scripts/process-job.mjs", "desktop/windows/scripts/shell-check.mjs",
 ];
 // 测试机上光是把运行时拷进发布目录就要近十分钟（上万个小文件，实测 17:24→17:34），整趟给半小时。
 const TIMEOUT_MS = Number(process.env.NAVI_WIN_SMOKE_TIMEOUT_MS || 30 * 60_000);
@@ -43,9 +47,12 @@ const pending = await reclaimPending({ exec: rexec, closeSession });
 for (const directory of reclaimScratch(tmpdir(), "navi-win-remote-smoke-").removed) console.log(`✓ 收掉上一次留下的本机暂存 ${directory}`);
 if (process.argv[2] === "--reclaim") process.exit(pending ? 1 : 0);
 
-const runtime = resolve(process.argv[2] || join(HERE, "..", "build", "runtime"));
-if (!existsSync(join(runtime, ".runtime.json"))) {
-  console.error(`✕ ${runtime} 不是封好的运行时：先跑 node desktop/windows/scripts/bundle-runtime.mjs`);
+const shell = process.argv[2] === "--shell";
+// 送过去的那一份：冒烟是运行时目录本身，--shell 是便携版（运行时在它的 runtime\ 里）。对端都解到 <root>\runtime。
+const runtime = resolve((shell ? process.argv[3] : process.argv[2]) || join(HERE, "..", "build", shell ? "Navi" : "runtime"));
+const sealed = shell ? join(runtime, "runtime") : runtime;
+if (!existsSync(join(sealed, ".runtime.json")) || (shell && !existsSync(join(runtime, "Navi.exe")))) {
+  console.error(`✕ ${runtime} 不是${shell ? "便携版：先跑 node desktop/windows/scripts/build-shell.mjs" : "封好的运行时：先跑 node desktop/windows/scripts/bundle-runtime.mjs"}`);
   process.exit(2);
 }
 
@@ -111,7 +118,7 @@ try {
   server.listen(0, "0.0.0.0");
   await once(server, "listening");
   const url = `http://${detectLocalAddress()}:${server.address().port}/${secret}/bundle.tgz`;
-  console.log(`▶ 送 ${(size / 1024 / 1024).toFixed(1)} MB 到对端 %TEMP%\\${remoteRootName(id)}，在那边跑 smoke-runtime.mjs`);
+  console.log(`▶ 送 ${(size / 1024 / 1024).toFixed(1)} MB 到对端 %TEMP%\\${remoteRootName(id)}，在那边跑 ${shell ? "shell-check" : "smoke-runtime"}.mjs`);
 
   main = rexec(remoteCommand(id, url), {
     timeout: TIMEOUT_MS, signal: controller.signal, host: HOST, onSession: (session) => track(record, session),
@@ -125,6 +132,36 @@ try {
   process.exitCode = 1;
 } finally {
   if (!controller.signal.aborted && !(await settle())) process.exitCode = 1;
+}
+
+// 壳检查不能在这条通道里直接跑：对端终端会话里的进程都在一个「关掉连带结束、不许脱离」的 Job 里（实测
+// LimitFlags 0x2000），壳在那里照设计拒绝起服务。用户从开始菜单、桌面、资源管理器打开时是 explorer 的 Job
+// （实测 0x1800：允许脱离、不连带结束）。所以经 explorer 打开一个 .vbs，由 wscript 隐藏着跑检查，这边等它写出结束码。
+// 那一路进程的命令行里同样带着目录名，清理照样认得出来。
+function outsideTerminalJob() {
+  const vbs = [
+    `Set sh = CreateObject("WScript.Shell")`,
+    // explorer 打开文件时不带参数：目录就是脚本自己所在的那个。
+    `root = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)`,
+    `q = Chr(34)`,
+    `cmd = "cmd /d /c " & q & q & root & "\\runtime\\runtime\\node\\node.exe" & q & " " & q & root & "\\tools\\desktop\\windows\\scripts\\shell-check.mjs" & q & " " & q & root & "\\runtime" & q & " " & q & root & "\\work" & q & " > " & q & root & "\\check.log" & q & " 2>&1" & q`,
+    `code = sh.Run(cmd, 0, True)`,
+    `Set f = CreateObject("Scripting.FileSystemObject").CreateTextFile(root & "\\check.done", True)`,
+    `f.Write code`,
+    `f.Close`,
+  ].join("\r\n");
+  return [
+    `  $vbs = Join-Path $root 'check.vbs'`,
+    `  [IO.File]::WriteAllText($vbs, ${psq(vbs)}, [Text.Encoding]::ASCII)`,
+    `  $done = Join-Path $root 'check.done'`,
+    `  & explorer.exe $vbs`,
+    `  $deadline = (Get-Date).AddMinutes(28)`,
+    `  while (-not (Test-Path -LiteralPath $done) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }`,
+    `  $log = Join-Path $root 'check.log'`,
+    `  if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Encoding UTF8 | ForEach-Object { "$_" } }`,
+    `  if (-not (Test-Path -LiteralPath $done)) { Write-Output '✕ 28 分钟内检查没跑完'; exit 1 }`,
+    `  $global:LASTEXITCODE = [int](Get-Content -LiteralPath $done -Raw).Trim()`,
+  ];
 }
 
 function remoteCommand(id, url) {
@@ -141,7 +178,9 @@ function remoteCommand(id, url) {
     `  Write-Output ("harness node " + (node -v) + "  on " + [Environment]::OSVersion.VersionString)`,
     `  $work = Join-Path $root 'work'`,
     `  New-Item -ItemType Directory -Path $work | Out-Null`,
-    `  node (Join-Path $root 'tools\\desktop\\windows\\scripts\\smoke-runtime.mjs') (Join-Path $root 'runtime') $work 2>&1 | ForEach-Object { "$_" }`,
+    ...(shell ? outsideTerminalJob() : [
+      `  node (Join-Path $root 'tools\\desktop\\windows\\scripts\\smoke-runtime.mjs') (Join-Path $root 'runtime') $work 2>&1 | ForEach-Object { "$_" }`,
+    ]),
     `  exit $LASTEXITCODE`,
     `} catch { Write-Output ("✕ " + $_.Exception.Message); exit 1 }`,
   ].join("\n");

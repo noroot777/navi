@@ -1,0 +1,5 @@
+# 开发机交叉编和 GitHub windows runner 原生构建用同一个版本（rustup 认这个文件，缺了自己装）。
+[toolchain]
+channel = "1.100.0"
+targets = ["x86_64-pc-windows-msvc"]
+profile = "minimal"

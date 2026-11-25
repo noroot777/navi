@@ -153,6 +153,8 @@ try {
 
   const tail = "http://mbp.tail97f3a6.ts.net:4317";
   assert.match(deepLinkWarning(tail, { localOnly: true, desktopApp: true }) ?? "", /允许其他设备访问/);
+  assert.match(deepLinkWarning(tail, { localOnly: true, desktopApp: true }, "darwin") ?? "", /Navi\.app 菜单「Navi › 允许其他设备访问」/);
+  assert.match(deepLinkWarning(tail, { localOnly: true, desktopApp: true }, "win32") ?? "", /Navi 托盘菜单「允许其他设备访问」/, "Windows 版没有应用菜单，开关在托盘里");
   assert.match(deepLinkWarning(tail, { localOnly: true, desktopApp: false }) ?? "", /NAVI_LOCAL_ONLY/);
   assert.equal(deepLinkWarning(tail, { localOnly: false, desktopApp: true }), null, "放开之后这条地址没问题");
   assert.match(deepLinkWarning("http://127.0.0.1:4317", { localOnly: false, desktopApp: false }) ?? "", /只有这台电脑打得开/);
