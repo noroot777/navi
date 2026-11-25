@@ -119,6 +119,7 @@ node desktop/windows/scripts/make-icon.mjs   # 标改了才要：在 mac 上重�
 - **覆盖安装 / 更新不停服务**：安装目录里只有壳和运行时发布源，服务和 agent 跑在 `%LOCALAPPDATA%\Navi\runtimes\<sha256>\` 发布出来的那份里，安装包不碰它们。动目录前只等壳的控制器（安装目录里那份 node）退干净；别的程序还占着安装目录里的文件就不装、说出是谁（进程号和映像名）。旧版的 `runtime\` 先整个删掉：内容清单要和目录一字不差，旧版多出的文件留着，新版第一次发布就校验不过。
 - **卸载不停服务、不悄悄删数据**：卸载页有一个默认不勾的「同时删除 Navi 的数据（任务、设置和运行时，在 %LOCALAPPDATA%\Navi）」。勾了也只在没有进程还用着那块地时删：先整块改名（有文件开着就改不了），改成了再删；服务还在跑就不删、说清楚。静默卸载（`/S`）永远不删数据。登录项（Run 项）随卸载删掉，更新模式（`/UPDATE`）保留。
 - 没有 Authenticode 签名：SmartScreen 第一次会拦一下（「更多信息 → 仍要运行」）。更新只靠 updater 的签名（下一节）。
+- **Defender 的行为检测**：真机演练时，装在 `%TEMP%` 下的一版演练 exe 首启把自己写进 Run 项（登录项）后约一分钟，被判成 `Behavior:Win32/Persistence.A!ml`（机器学习的「持久化」行为检测）：exe、开始菜单和桌面快捷方式被删、进程被结束。之前五版同样的演练 exe 没被判，换了哈希的这一版连判三次，所以是概率性的。正式安装在 `%LOCALAPPDATA%\Programs\` 下、可疑程度低一些，但同样是「没签名的程序第一次打开就登记开机自启」，没法排除。能根治的是 Authenticode 签名；不签的话，可选的是把「第一次打开默认勾上登录项」改成用户自己勾（见「还没做」）。
 
 `smoke-installer.mjs`（云端构建在 windows runner 上跑；本机 `npm run smoke:win-installer -- <安装包>`）：机器上已经装着 Navi 就拒跑；静默装 → 核对卸载项、`navi` 协议、开始菜单 → 用装进去的那份运行时跑一遍运行时冒烟 → `uninstall.exe /S` → 核对都收掉了、数据根里的标记文件还在。
 
@@ -212,9 +213,9 @@ WIN_REMOTE_KEY=… node desktop/windows/scripts/drill-build.mjs          # → d
 WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs --install desktop/windows/build/drill/payload
 ```
 
-不碰日常那一份：演练版把 `LOCALAPPDATA`、`USERPROFILE`、`APPDATA`、`NAVI_URL`（14977 端口）编进 exe（`NAVI_WIN_REHEARSAL_ENV`），数据根、运行时仓库、安装目录都落在 `%TEMP%\navi-win-runtime-<id>\` 下；更新源是对端 127.0.0.1:14981 上的临时 HTTP。临时私钥在开发机的临时目录里，编完就删。
+演练里的登录项先设成「用户选过、不开」，不写 Run 项（上面 Defender 那条就是在演练里撞上的）；登录项第一次打开默认登记、更新后保留，在撞上之前的一轮真机演练里验过。不碰日常那一份：演练版把 `LOCALAPPDATA`、`USERPROFILE`、`APPDATA`、`NAVI_URL`（14977 端口）编进 exe（`NAVI_WIN_REHEARSAL_ENV`；只交给控制器和壳自己取值用，不写进壳的进程环境——经 ShellExecute 打开的浏览器、安装包继承的是壳的环境，写进去浏览器就在演练目录里建一份新配置、一直占着目录），数据根、运行时仓库、安装目录都落在 `%TEMP%\navi-win-runtime-<id>\` 下；更新源是对端 127.0.0.1:14981 上的临时 HTTP。临时私钥在开发机的临时目录里，编完就删。
 
-`install-check.mjs` 依次验：静默装 0.0.1 → 卸载项、`navi` 协议、开始菜单都指着安装目录 → 打开、按元素点「全新开始」、服务起来、登录项登记 → 建项目、开终端跑一条一直输出的命令 → 等到「Navi 0.0.2 可以更新了」点「现在更新」→ 旧壳退出、新壳起来，协议和登录项还在 → 服务**还是同一个进程、还在旧运行时上**，日志写着在等那个终端，终端还在出新输出 → 关掉终端 → 服务换到新运行时、留了一份库的底、项目还在 → `navi://` 链接：窗口开着时原地换路由；指纹对不上交给浏览器（fallback）；窗口没开时先起壳再载那一页 → 静默卸载，数据根还在。收尾不论成败：结束演练的进程、只删指进演练目录的注册表项、删快捷方式，最后核对对端 4317 上原来那份 Navi 还是原来的进程。
+`install-check.mjs` 依次验：静默装 0.0.1 → 卸载项、`navi` 协议、开始菜单都指着安装目录 → 打开、按元素点「全新开始」、服务起来（登录项按设置不登记） → 建项目、开终端跑一条一直输出的命令 → 等到「Navi 0.0.2 可以更新了」点「现在更新」→ 旧壳退出、新壳起来，协议还在、登录项没被替用户打开 → 服务**还是同一个进程、还在旧运行时上**，日志写着在等那个终端，终端还在出新输出 → 关掉终端 → 服务换到新运行时、留了一份库的底、项目还在 → `navi://` 链接：窗口开着时原地换路由；指纹对不上交给默认浏览器、浏览器真的请求了 fallback 地址（浏览器本来开着时，那里会多一个标签页）；窗口没开时先起壳再载那一页 → 静默卸载，数据根还在。链接一律经 ShellExecute 打开（`Start-Process`，同用户在别的程序里点链接）：`explorer.exe <链接>` 在真机上根本不调协议处理程序。对话框（TaskDialog）的按钮在 UIA 里不支持 Invoke，演练按文字找到对话框里那个 Win32 按钮窗口发 `BM_CLICK`。收尾不论成败：结束演练的进程（含演练另起的浏览器）、只删指进演练目录的注册表项、删快捷方式，最后核对对端 4317 上原来那份 Navi 还是原来的进程。
 
 ## 还没做
 
@@ -222,6 +223,6 @@ WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs --install deskt
 - 新版起不来时的自动回退（mac 的恢复点、`.mac-runtime-paused.json`）：第一版只留库的底，回退靠手动（见「更新前的库备份」）；
 - 不再用的旧运行时目录不自动回收；
 - 固定下载页（mac 的 `navi-mac-latest`）：下载先指 Releases 列表；
-- Authenticode 签名；
+- Authenticode 签名（也是上面 Defender 误判的根治办法）；登录项现在仍是装好后第一次打开默认勾上（② 定的），要不要改成用户自己勾待定；
 - 窗口位置记忆；
 - 「再评估到停下」之间那一下仍有空子（允许其他设备访问的重启，同 mac 的 RemoteAccessSwitch 和 `npm run restart`）：`/api/restart-impact` 只是即时查询，要堵死得在服务端做。换新版服务那一路已经有接管许可，不在此列。

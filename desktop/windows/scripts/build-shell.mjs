@@ -51,7 +51,7 @@ function run(command, args, opts = {}) {
   if (result.status !== 0) die(`${command} ${args.join(" ")} 失败（退出码 ${result.status ?? result.signal}）`);
 }
 
-function crossEnv() {
+export function crossEnv() {
   const toolchain = resolve(readEnv(process.env, "NAVI_WIN_TOOLCHAIN") || join(homedir(), ".cache", "navi", "win-toolchain"));
   const cargoHome = join(toolchain, "cargo");
   const llvm = readEnv(process.env, "NAVI_WIN_LLVM") || ["/opt/homebrew/opt/llvm/bin", "/usr/local/opt/llvm/bin"].find((dir) => existsSync(join(dir, "clang-cl")));
