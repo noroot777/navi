@@ -52,6 +52,7 @@ impl Shell {
     let mut command = Command::new(paths::node(&runtime));
     command
       .arg(&script)
+      .envs(paths::rehearsal_env().iter().map(|(key, value)| (key, value)))
       .env("NAVI_WIN_SHELL", std::env::current_exe().unwrap_or_default())
       .env("NAVI_WIN_VERSION", app.package_info().version.to_string())
       .env("NAVI_WIN_UPDATES", if update::configured(app) { "1" } else { "0" })
@@ -164,6 +165,7 @@ pub fn ensure_once() -> i32 {
   command
     .arg(paths::controller_script(&runtime))
     .arg("--ensure")
+    .envs(paths::rehearsal_env().iter().map(|(key, value)| (key, value)))
     .env("NAVI_WIN_SHELL", std::env::current_exe().unwrap_or_default())
     .stdin(Stdio::null())
     .stdout(Stdio::null())
