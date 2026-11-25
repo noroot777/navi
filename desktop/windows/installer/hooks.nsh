@@ -70,6 +70,9 @@ FunctionEnd
       MessageBox MB_ICONEXCLAMATION "$(naviDataBusy)"
     ${ElseIf} $0 == 4
       MessageBox MB_ICONEXCLAMATION "$(naviDataLeftover)"
+    ${ElseIf} $0 != 0
+      ; 脚本自己出错（5）、PowerShell 没起来（nsExec 给 error / timeout）：都按没删说。
+      MessageBox MB_ICONEXCLAMATION "$(naviDataNotRemoved)"
     ${EndIf}
   ${EndIf}
 !macroend

@@ -12,7 +12,7 @@
 // 已经装着 Navi 就拒绝（不覆盖用户的安装），%LOCALAPPDATA%\Navi 本来不在就在收尾时删掉它。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -69,9 +69,10 @@ export async function smokeInstaller(installer, { runtime } = {}) {
     // _?= 让卸载程序在原地跑完再返回（不然它把自己拷到临时目录、马上返回）；在原地跑时它删不掉自己，收尾补删。
     const uninstall = spawnSync(join(dir, "uninstall.exe"), ["/S", `_?=${dir}`], { windowsHide: true, timeout: 5 * 60_000 });
     assert.equal(uninstall.status, 0, `卸载退出码 ${uninstall.status ?? uninstall.error?.message}`);
-    rmSync(join(dir, "uninstall.exe"), { force: true });
+    // 先验后收：安装目录里只许剩下卸载程序自己，验完再补删。
+    const left = existsSync(dir) ? readdirSync(dir, { recursive: true }).filter((name) => name.toLowerCase() !== "uninstall.exe") : [];
+    assert.deepEqual(left, [], `卸载后安装目录里还有：${left.join("、")}`);
     rmSync(dir, { recursive: true, force: true });
-    assert.ok(!existsSync(exe), "卸载后 Navi.exe 还在");
     assert.equal(regValue(UNINSTALL_KEY, "UninstallString"), null, "卸载后卸载项还在");
     assert.equal(regValue(PROTOCOL_KEY), null, "卸载后 navi:// 还登记着");
     assert.ok(existsSync(marker), "卸载把数据根里的东西删了");
