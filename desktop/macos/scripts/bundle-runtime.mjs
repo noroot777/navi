@@ -19,18 +19,19 @@
 //   app/.in-use                  代码锁：跑这份代码的服务、MCP 以共享锁拿着它，换包时安装器拿排他锁
 //                                （shared/src/code-lock.ts、scripts/install-app.sh）
 //
-// 下载的 node 包按写死在这里的 sha256 校验，不认就不用（缓存里的也每次重验）。依赖按
-// 「lockfile + 各 workspace 的 package.json + node 版本」缓存，没变就不再装一遍。
+// 下载的 node 包按写死在 architecture.mjs 的 sha256 校验，不认就不用（缓存里的也每次重验）。依赖按
+// 「lockfile + 各 workspace 的 package.json + node 版本」缓存，没变就不再装一遍。和 Windows 包共用的
+// 那几步在 desktop/shared/runtime-bundle.mjs。
 //
 // 环境变量：NAVI_MAC_SKIP_BUILD=1 跳过 `npm run build`（产物已是最新时省时间）；
 //           NAVI_MAC_CACHE=<目录> 换缓存位置（缺省 desktop/macos/build/cache）。
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { cpSync, createReadStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readEnv } from "../../../scripts/env.mjs";
-import { sealRuntime } from "./runtime-store.mjs";
+import { sealRuntime } from "../../shared/runtime-store.mjs";
+import { buildProducts, cachedDependencies, copyProducts, dependencyKey, die, fetchNode, run, say, unpackOnce } from "../../shared/runtime-bundle.mjs";
 import { ARCHITECTURES, NODE_VERSION, buildArchitecture } from "./architecture.mjs";
 
 const architecture = buildArchitecture();
@@ -38,7 +39,6 @@ const NODE_ARCHIVE = `node-${NODE_VERSION}-darwin-${architecture}.tar.xz`;
 const NODE_SHA256 = ARCHITECTURES[architecture].checksum;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO = resolve(HERE, "../../..");
 const resources = process.argv[2];
 if (!resources) {
   console.error("usage: bundle-runtime.mjs <Ash.app/Contents/Resources>");
@@ -46,73 +46,20 @@ if (!resources) {
 }
 const CACHE = resolve(readEnv(process.env, "NAVI_MAC_CACHE") || join(HERE, "..", "build", "cache"));
 const APP = join(resolve(resources), "app");
-const WORKSPACES = ["shared", "server", "web", "mcp"];
-
-const say = (line) => process.stdout.write(`${line}\n`);
-const die = (line) => { process.stderr.write(`✕ ${line}\n`); process.exit(1); };
-
-function run(command, args, opts = {}) {
-  const result = spawnSync(command, args, { stdio: "inherit", ...opts });
-  if (result.status !== 0) die(`${command} ${args.join(" ")} 失败（退出码 ${result.status ?? result.signal}）`);
-}
-
-async function sha256Of(file) {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(file)) hash.update(chunk);
-  return hash.digest("hex");
-}
 
 // ── 1. 产物 ────────────────────────────────────────────────────────────────
-if (readEnv(process.env, "NAVI_MAC_SKIP_BUILD") !== "1") {
-  say("▶ npm run build");
-  run("npm", ["run", "build"], { cwd: REPO });
-}
-for (const built of ["server/dist/index.js", "mcp/dist/index.js", "web/dist/index.html", "shared/src/index.ts"]) {
-  if (!existsSync(join(REPO, built))) die(`${built} 不存在：先在仓库根跑一次 npm run build`);
-}
+buildProducts({ skip: readEnv(process.env, "NAVI_MAC_SKIP_BUILD") === "1" });
 
 // ── 2. node ────────────────────────────────────────────────────────────────
-mkdirSync(CACHE, { recursive: true });
-const archive = join(CACHE, NODE_ARCHIVE);
-if (!existsSync(archive) || (await sha256Of(archive)) !== NODE_SHA256) {
-  say(`▶ 下载 ${NODE_ARCHIVE}`);
-  const response = await fetch(`https://nodejs.org/dist/${NODE_VERSION}/${NODE_ARCHIVE}`);
-  if (!response.ok) die(`下载 node 失败：HTTP ${response.status}`);
-  const partial = `${archive}.part`;
-  writeFileSync(partial, Buffer.from(await response.arrayBuffer()));
-  const actual = await sha256Of(partial);
-  if (actual !== NODE_SHA256) {
-    rmSync(partial, { force: true });
-    die(`${NODE_ARCHIVE} 的 sha256 对不上：期望 ${NODE_SHA256}，实际 ${actual}`);
-  }
-  renameSync(partial, archive);
-}
-const nodeHome = join(CACHE, NODE_ARCHIVE.replace(/\.tar\.xz$/, ""));
-if (!existsSync(join(nodeHome, "bin", "node"))) {
-  const unpacking = `${nodeHome}.unpacking`;
-  rmSync(unpacking, { recursive: true, force: true });
-  mkdirSync(unpacking);
-  run("tar", ["-xJf", archive, "-C", unpacking, "--strip-components", "1"]);
-  renameSync(unpacking, nodeHome);
-}
+const archive = await fetchNode(CACHE, NODE_ARCHIVE, NODE_SHA256);
+const nodeHome = unpackOnce(CACHE, NODE_ARCHIVE.replace(/\.tar\.xz$/, ""), "bin/node",
+  (unpacking) => run("tar", ["-xJf", archive, "-C", unpacking, "--strip-components", "1"]));
 const node = join(nodeHome, "bin", "node");
 const npmCli = join(nodeHome, "lib", "node_modules", "npm", "bin", "npm-cli.js");
 
 // ── 3. 生产依赖（node-pty 按这份 node 重编）──────────────────────────────
-const manifests = ["package.json", "package-lock.json", ...WORKSPACES.map((w) => `${w}/package.json`), "server/scripts/prepare-node-pty.mjs"];
-const depsKey = createHash("sha256")
-  .update(`${NODE_VERSION}\n${architecture}\nnode-pty: node-gyp --nodedir\n`)
-  .update(manifests.map((m) => `${m}\n${readFileSync(join(REPO, m), "utf8")}`).join("\n"))
-  .digest("hex").slice(0, 16);
-const deps = join(CACHE, `deps-${depsKey}`);
-if (!existsSync(join(deps, "node_modules"))) {
+const deps = cachedDependencies(CACHE, dependencyKey(`${NODE_VERSION}\n${architecture}\nnode-pty: node-gyp --nodedir\n`), (stage) => {
   say("▶ 安装生产依赖，按自带 node 重编 node-pty");
-  const stage = `${deps}.installing`;
-  rmSync(stage, { recursive: true, force: true });
-  for (const m of manifests) {
-    mkdirSync(dirname(join(stage, m)), { recursive: true });
-    cpSync(join(REPO, m), join(stage, m));
-  }
   // npm 的生命周期脚本里写的是裸 `node`：让它们用的就是要打进包的这一份。
   const env = { ...process.env, PATH: `${join(nodeHome, "bin")}:/usr/bin:/bin:/usr/sbin:/sbin` };
   run(node, [npmCli, "ci", "--omit=dev", "--workspace=@navi/server", "--workspace=@navi/mcp", "--no-audit", "--no-fund"], { cwd: stage, env });
@@ -124,9 +71,7 @@ if (!existsSync(join(deps, "node_modules"))) {
   run(node, [gyp, "rebuild", `--nodedir=${nodeHome}`], { cwd: pty, env });
   run(node, [join(pty, "scripts", "post-install.js")], { cwd: pty, env });
   if (!existsSync(join(pty, "build", "Release", "pty.node"))) die("node-pty 没编出来（build/Release/pty.node 不存在）");
-  rmSync(deps, { recursive: true, force: true });
-  renameSync(stage, deps);
-}
+});
 
 // ── 4. 装进 app ─────────────────────────────────────────────────────────────
 say(`▶ 组装 ${APP}`);
@@ -136,17 +81,7 @@ cpSync(node, join(APP, "node", "bin", "node"));
 cpSync(join(nodeHome, "LICENSE"), join(APP, "node", "LICENSE"));
 // -c：APFS 上是克隆，不占第二份空间；-R 原样保留 workspace 软链。
 run("cp", ["-cR", join(deps, "node_modules"), join(APP, "node_modules")]);
-cpSync(join(REPO, "package.json"), join(APP, "package.json"));
-const copies = [
-  "shared/package.json", "shared/src",
-  "server/package.json", "server/dist",
-  "mcp/package.json", "mcp/dist",
-  "web/dist",
-  "scripts/start-detached.mjs",
-];
-for (const rel of copies) cpSync(join(REPO, rel), join(APP, rel), { recursive: true, verbatimSymlinks: true });
-cpSync(join(HERE, "runtime-store.mjs"), join(APP, "scripts/runtime-store.mjs"));
-writeFileSync(join(APP, ".in-use"), "");
+copyProducts(APP);
 // web 不进生产依赖，它那条 workspace 软链指向一个没有 package.json 的目录，留着只会让人误会。
 rmSync(join(APP, "node_modules", "@navi", "web"), { force: true });
 
