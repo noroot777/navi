@@ -12,6 +12,8 @@
 //   shared/{package.json,src}       shared 的导出直接指 .ts 源码，靠 node 的类型擦除跑，所以在 node_modules 外面
 //   server/{package.json,dist}  mcp/{package.json,dist}  web/dist
 //   scripts/start-detached.mjs, scripts/runtime-store.mjs
+//   desktop/windows/launcher/       桌面壳的控制器（壳用自带 node 跑它，见 desktop/windows/shell/src/controller.rs），
+//   scripts/{platform,windows-restart,legacy-names}.mjs   它停服务时借用的那几份
 //   .in-use, .handover.json, .runtime.json   代码锁文件与内容清单（清单 format 2，见 desktop/shared/runtime-store.mjs）
 //
 // 用的时候先发布到 %LOCALAPPDATA%\Navi\runtimes\<sha256>\ 再从那里跑（layout.mjs、smoke-runtime.mjs）。
@@ -34,6 +36,8 @@ const NODE_SHA256 = "e2edda75bfb089654705cf65a13b58933bfd5f57148e8ebda916f58a247
 // 运行时目录名本身是 64 位 sha256，再加上 %LOCALAPPDATA%\Navi\runtimes\ 和用户名，留给包内相对路径的
 // 余量按 MAX_PATH（260）算大约 150；超过的话安装器、资源管理器这些不走长路径的工具会出问题。
 const MAX_RELATIVE_PATH = 150;
+// 只有 Windows 运行时带的：桌面壳的控制器，和它 import 的仓库脚本（照仓库里的相对位置放，import 不用改）。
+const SHELL_COPIES = ["desktop/windows/launcher", "scripts/platform.mjs", "scripts/windows-restart.mjs", "scripts/legacy-names.mjs"];
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CACHE = resolve(readEnv(process.env, "NAVI_WIN_CACHE") || join(HERE, "..", "build", "cache"));
@@ -64,6 +68,7 @@ cpSync(join(nodeHome, "node.exe"), join(APP, "node", "node.exe"));
 cpSync(join(nodeHome, "LICENSE"), join(APP, "node", "LICENSE"));
 cpSync(join(deps, "node_modules"), join(APP, "node_modules"), { recursive: true });
 copyProducts(APP);
+for (const rel of SHELL_COPIES) cpSync(join(REPO, rel), join(APP, rel), { recursive: true });
 const forwarded = writeSharedForwarder(join(APP, "node_modules"), join(REPO, "shared/package.json"));
 
 // ── 5. 自检（在哪台机器上组装都能做的那部分；真起服务的冒烟在 smoke-runtime.mjs，得在 Windows 上跑）──

@@ -1,0 +1,3 @@
+# 微软的静态 CRT 库里引用着不随 SDK 发的 pdb，链接器每个对象报一条 LNK4099；只是调试信息，release 也 strip 掉。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/ignore:4099"]

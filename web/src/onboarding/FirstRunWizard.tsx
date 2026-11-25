@@ -53,8 +53,8 @@ function headlineOf(step: FirstRunStep, isolated: boolean): { title: string; hin
   };
 }
 
-/** 在 mac app 里(壳在 UA 里留了 `NaviMac/`,改名前的壳留的是 `AshMac/`):数据那一站已经在原生那一屏走过了,导轨上补一格打勾的。 */
-const IN_MAC_APP = typeof navigator !== "undefined" && /\b(?:Navi|Ash)Mac\//.test(navigator.userAgent);
+/** 在桌面 app 里(mac 壳在 UA 里留了 `NaviMac/`,改名前的壳留的是 `AshMac/`;Windows 壳留 `NaviWin/`):数据那一站已经在壳自己那一屏走过了,导轨上补一格打勾的。 */
+const IN_DESKTOP_APP = typeof navigator !== "undefined" && /\b(?:(?:Navi|Ash)Mac|NaviWin)\//.test(navigator.userAgent);
 
 export function FirstRunWizard({ onDone }: { onDone: () => Promise<boolean> }) {
   const { toasts, notify, dismiss } = useToast();
@@ -155,7 +155,7 @@ export function FirstRunWizard({ onDone }: { onDone: () => Promise<boolean> }) {
           </div>
           {/* 导轨同时是「回上一步」的入口,所以每一格都是按钮;app 里多出来的「数据」那格已经走完、回不去。 */}
           <nav className="onboarding-rail" aria-label="首次配置">
-            {IN_MAC_APP && (
+            {IN_DESKTOP_APP && (
               <span className="onboarding-rail-step is-done">
                 <i aria-hidden="true"><Check size={9} weight="bold" /></i>
                 数据

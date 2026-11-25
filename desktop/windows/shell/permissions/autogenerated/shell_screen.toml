@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-shell-screen"
+description = "Enables the shell_screen command without any pre-configured scope."
+commands.allow = ["shell_screen"]
+
+[[permission]]
+identifier = "deny-shell-screen"
+description = "Denies the shell_screen command without any pre-configured scope."
+commands.deny = ["shell_screen"]
