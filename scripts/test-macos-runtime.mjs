@@ -213,14 +213,19 @@ setInterval(() => fs.writeFileSync(${JSON.stringify(activity)}, fs.readFileSync(
     process.kill(service.pid, 0);
     setOptions({ rejectLease: true });
     rmSync(requests, { force: true });
-    assert.match(await drive("rejected", url()), /FAILED[\s\S]*RETRY explicit blocked/);
+    const rejected = await drive("rejected", url());
+    assert.doesNotMatch(rejected, /FAILED/);
+    assert.match(rejected, /PAUSED 重试切换新版服务…[\s\S]*ASK 就绪后自动切换\/强制切换服务…\/稍后[\s\S]*RETRY explicit blocked/);
     const attempts = readFileSync(requests, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.equal(attempts.filter((entry) => !entry.check && !entry.release).length, 2, "only an explicit retry may acquire again after execution refusal");
+    assert.equal(attempts.filter((entry) => !entry.check && !entry.release).length, 8,
+      "four silent automatic attempts, then only the explicit menu retry starts another bounded round");
     process.kill(service.pid, 0);
     setOptions({ expired: true });
-    assert.match(await drive("stale", url()), /FAILED[\s\S]*重试/);
+    const expired = await drive("stale", url());
+    assert.doesNotMatch(expired, /FAILED/);
+    assert.match(expired, /WAITING 重试切换新版服务…/);
     process.kill(service.pid, 0);
-    console.log("✓ 接管被拒或许可过期时旧服务继续运行");
+    console.log("✓ 接管被拒或许可过期时旧服务继续运行，静默重试有界后停在菜单重试，重试才再要许可");
 
     const backups = join(data, "backups");
     const savedBackups = join(data, "saved-backups");

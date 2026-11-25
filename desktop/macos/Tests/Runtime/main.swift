@@ -7,8 +7,10 @@ let gate = UpdateGate.shared
 gate.pollInterval = 0.1
 gate.shutdownTimeout = 3
 gate.lockTimeout = 3
-gate.ask = { _ in
+var retrying = false
+gate.ask = { prompt in
   if mode == "legacy-wait" { emit("ASK LEGACY"); return .wait }
+  if retrying { emit("ASK \(prompt.buttons.joined(separator: "/"))"); return .wait }
   emit("UNEXPECTED ASK"); exit(3)
 }
 var finished = false
@@ -27,16 +29,19 @@ if mode == "prepare" {
     emit("PROCEED")
     finished = true
   }
-  let deadline = Date().addingTimeInterval(8)
-  while !finished && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+  var deadline = Date().addingTimeInterval(8)
+  while !finished && gate.phase != .blocked && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
   if mode == "rejected" {
+    // 被拒后静默退避重试，连续几次后停在 blocked，期间不弹窗、不报错、不盖窗口，也不再自己去要许可。
     let quiet = Date().addingTimeInterval(0.5)
     while Date() < quiet { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
-    guard reports == 1, holds == 1, gate.phase == .blocked, gate.hasPending else { emit("ERROR automatic retry"); exit(1) }
-    finished = false
+    guard reports == 0, holds == 0, gate.phase == .blocked, gate.hasPending else { emit("ERROR automatic retry"); exit(1) }
+    emit("PAUSED \(gate.pendingMenuTitle)")
+    retrying = true
     gate.reconsider()
-    while !finished && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
-    guard reports == 2, holds == 2, gate.phase == .blocked else { emit("ERROR explicit retry"); exit(1) }
+    deadline = Date().addingTimeInterval(8)
+    while gate.phase != .blocked && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+    guard reports == 0, holds == 0, gate.phase == .blocked else { emit("ERROR explicit retry"); exit(1) }
     emit("RETRY explicit blocked")
   }
   if !finished { emit("WAITING \(gate.pendingMenuTitle)") }
