@@ -6,7 +6,7 @@ import { isLocalDirect } from "./auth/remote-access.js";
 import { secretsEqual } from "./openai-converter/common.js";
 import { NAVI_HEADERS, requestHeader } from "./request-headers.js";
 import { heldTurns } from "./turn-lock.js";
-import { releaseRuntimeHandover, runtimeHandoverActive, runtimeHandoverMatches } from "./runtime-handover-state.js";
+import { commitRuntimeHandover, releaseRuntimeHandover, runtimeHandoverActive, runtimeHandoverMatches } from "./runtime-handover-state.js";
 import { resumeRuntimeGateway } from "./runtime-channel-gateway.js";
 import { acquireRuntimeHandover } from "./runtime-handover.js";
 import { checkpointRuntimeHandover, sealRuntimeHandover } from "./runtime-handover-prepare.js";
@@ -25,7 +25,7 @@ export function mountRuntimeHandoverRoutes(api: Hono) {
       || requestHeader(context, NAVI_HEADERS.instance) !== INSTANCE_ID) {
       return context.json({ error: "没有接管这份服务的权限" }, 403);
     }
-    type Body = Partial<RuntimeCompatibility> & { release?: string; check?: string; holdResources?: boolean };
+    type Body = Partial<RuntimeCompatibility> & { release?: string; check?: string; commit?: string; holdResources?: boolean };
     const body = await context.req.json<Body>().catch(() => ({} as Body));
     if (body.release) {
       const released = releaseRuntimeHandover(body.release);
@@ -36,6 +36,13 @@ export function mountRuntimeHandoverRoutes(api: Hono) {
       return context.json({ released });
     }
     if (body.check) return context.json({ valid: runtimeHandoverMatches(body.check) });
+    // 停服前最后一步：核验并兑现（见 commitRuntimeHandover）。接管方只凭 committed=true 去停。
+    if (body.commit) {
+      return context.json({ committed: commitRuntimeHandover(body.commit, () => {
+        console.warn("[navi] 接管许可兑现后接管方一直没来停服务，自己退出");
+        process.exit(0);
+      }) });
+    }
     const { restartImpact } = await import("./reattach.js");
     try {
       const current = runtimeCompatibility();

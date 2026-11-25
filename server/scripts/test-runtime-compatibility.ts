@@ -2,7 +2,8 @@
 //   · 跑着的代码是不是仓库里一份完整的受管运行时（runtimeCompatibilityAt）—— Windows 包是 format 2、仓库在
 //     %LOCALAPPDATA%\Navi\runtimes、路径不分大小写；mac 包是 format 1、仓库在数据根下，原样不变；
 //   · Windows 桌面版申请接管时带 holdResources：服务退出会收掉、又接不过去的东西（终端、项目服务……）还在，
-//     就不发许可、许可当场撤掉，旧服务原样留着（acquireRuntimeHandover 的 standing）。
+//     就不发许可、许可当场撤掉，旧服务原样留着（acquireRuntimeHandover 的 standing）；
+//   · 兑现许可（commitRuntimeHandover）：核验和「不再到期」是同一步，兑现后封口一直保持；接管方没来停就按期限自己退。
 import "./isolated-data.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -11,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { managedRuntimeStore, runtimeCompatibilityAt } from "../src/runtime-compatibility.js";
 import { acquireRuntimeHandover } from "../src/runtime-handover.js";
-import { runtimeHandoverActive } from "../src/runtime-handover-state.js";
+import { commitRuntimeHandover, reserveRuntimeHandover, runtimeHandoverActive } from "../src/runtime-handover-state.js";
 import { heldTurns } from "../src/turn-lock.js";
 import type { RestartImpact } from "../src/reattach.js";
 
@@ -85,6 +86,39 @@ try {
   assert.ok(mac2.lease, "不传 standing（mac）时不问这一项");
   releaseRuntimeHandover(mac2.lease!);
   console.log("✓ holdResources：终端、项目服务还在就不切，问的是封口之后的最后一份，许可随即撤掉；mac 不传就不问");
+
+  const realNow = Date.now;
+  const later = (ms: number) => { const base = realNow(); Date.now = () => base + ms; };
+  try {
+    const expiring = reserveRuntimeHandover()!;
+    later(61_000);
+    assert.equal(commitRuntimeHandover(expiring, () => assert.fail("过期的许可不能兑现")), false, "到期了就兑现不了");
+    assert.equal(runtimeHandoverActive(), false);
+    Date.now = realNow;
+
+    const lease = reserveRuntimeHandover()!;
+    assert.equal(commitRuntimeHandover("not-the-lease", () => assert.fail()), false, "别人的许可兑现不了");
+    let exited = 0;
+    assert.equal(commitRuntimeHandover(lease, () => { exited++; }, 60_000), true);
+    assert.equal(commitRuntimeHandover(lease, () => { exited++; }, 60_000), true, "重复兑现不另起退出计时");
+    later(10 * 60_000);
+    assert.equal(runtimeHandoverActive(), true, "兑现后不再到期：封口一直保持到接管方停服");
+    Date.now = realNow;
+    assert.equal(releaseRuntimeHandover(lease), true, "接管方停服失败时照常解封");
+    assert.equal(runtimeHandoverActive(), false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(exited, 0, "解封了就不再自己退出");
+
+    const abandoned = reserveRuntimeHandover()!;
+    let selfExit = 0;
+    assert.equal(commitRuntimeHandover(abandoned, () => { selfExit++; }, 15), true);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(selfExit, 1, "兑现后接管方一直没来停：到期限自己退出，不一直封着");
+    releaseRuntimeHandover(abandoned);
+  } finally {
+    Date.now = realNow;
+  }
+  console.log("✓ 兑现许可：到期或别人的兑现不了；兑现后不再到期，停服失败照常解封，接管方没来就按期限自己退出");
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
