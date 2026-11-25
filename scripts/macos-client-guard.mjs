@@ -16,6 +16,7 @@ export async function testInstanceGuard({ binary, env, port, windowPort, data, r
   let occupant = "ours";
   let generation = 1;
   let stallsLeft = 0;
+  let repliesBeforeStall = 0;
   let completedStalls = 0;
   let healthReplies = 0;
   const idOf = () => occupant === "ours" ? `ours-${generation}` : "foreign-1";
@@ -33,11 +34,12 @@ export async function testInstanceGuard({ binary, env, port, windowPort, data, r
   };
   const onWindow = (request, response) => {
     if (request.url === "/api/health") {
-      if (stallsLeft > 0) {
+      if (stallsLeft > 0 && repliesBeforeStall === 0) {
         stallsLeft -= 1;
         response.once("close", () => { completedStalls += 1; });
         return;
       }
+      if (repliesBeforeStall > 0) repliesBeforeStall -= 1;
       healthReplies += 1;
       response.setHeader("Content-Type", "application/json");
       response.end(health());
@@ -49,6 +51,7 @@ export async function testInstanceGuard({ binary, env, port, windowPort, data, r
     requests.push({ on: "window", occupant, id: idOf(), url: request.url, cookie, accepted });
     if (!accepted) { response.statusCode = 409; response.end("{}"); return; }
     if (request.url === "/api/write") { response.end("{}"); return; }
+    if (request.url === "/api/ash-mcp/host-setup") { response.end('{"hosts":[]}'); return; }
     response.setHeader("Content-Type", "text/html");
     response.end("<title>OURS</title><script>if(location.pathname==='/')history.replaceState(null,'','/route/abc');"
       + "setInterval(()=>fetch('/api/write',{method:'POST'}).catch(()=>{}),30)</script>");
@@ -69,7 +72,7 @@ export async function testInstanceGuard({ binary, env, port, windowPort, data, r
   let window = await listen(windowPort, onWindow);
   try {
     const writes = (id) => requests.filter((r) => r.url === "/api/write" && r.id === id);
-    for (const mode of ["reload", "watch", "unresponsive"]) {
+    for (const mode of ["reload", "watch", "unresponsive", "recover"]) {
       occupant = "ours";
       generation += 1;
       completedStalls = 0;
@@ -85,6 +88,26 @@ export async function testInstanceGuard({ binary, env, port, windowPort, data, r
       const bound = idOf();
       await until(() => writes(bound).length > 2, `${mode}: the page never wrote`);
       assert.deepEqual([...new Set(requests.map((r) => r.cookie))], [bound], `${mode}: every request carries the confirmed instance`);
+      if (mode === "recover") {
+        // 放行载页前的探活，然后让主导航的探活超时。
+        repliesBeforeStall = 1;
+        stallsLeft = 1;
+        guard.stdin.write("MAINTENANCE_ENDED\n");
+        await until(() => out.includes("MAINTENANCE_RECOVERED"), `maintenance recovery stalled: ${out}`);
+        assert.match(out, /MAINTENANCE_RECOVERED \/route\/abc\n/);
+        assert.equal(completedStalls, 1, "one navigation probe timed out before maintenance recovery");
+
+        repliesBeforeStall = 1;
+        stallsLeft = 2;
+        guard.stdin.write("CONTENT_EXITED\n");
+        await until(() => out.includes("CONTENT_RECOVERED"), `content-process recovery stalled: ${out}`);
+        assert.match(out, /RECOVERY_FAILED\nCONTENT_RECOVERED \/route\/abc\n/);
+        assert.equal(completedStalls, 3, "both navigation probes timed out before the failure screen");
+        const [status] = await exited;
+        children.delete(guard);
+        assert.equal(status, 0, out);
+        continue;
+      }
       if (mode !== "unresponsive") {
         const misses = mode === "reload" ? 1 : 2;
         stallsLeft = misses;

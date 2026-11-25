@@ -7,8 +7,7 @@ extension BrowserWindowController {
   ///
   /// `quietly`：不盖「正在启动」那一屏，眼下这一屏自己在说（首启那张卡上选中的那一项在转圈）。
   func loadHome(quietly: Bool = false) {
-    stopHealthPolling()
-    stopInstanceGuard()
+    resetPageConnection()
     guard NaviConfig.isLocal else { loadPage(); return }
     connect(quietly: quietly)
   }
@@ -16,8 +15,8 @@ extension BrowserWindowController {
   /// 页面载不进来（导航失败）。本机地址重走一遍 connect —— 服务可能挂了，也可能端口换了人。
   func showOffline(_ error: Error) {
     computerPreview?.stop()
-    stopInstanceGuard()
-    if NaviConfig.isLocal { connect(); return }
+    if NaviConfig.isLocal { loadHome(); return }
+    resetPageConnection()
     offlineView.show(title: "连不上 Navi",
                      detail: "\(error.localizedDescription)\n\(NaviConfig.baseURL.absoluteString)\n服务恢复后自动回到工作区。",
                      actions: [OfflineView.Action(title: "重试") { [weak self] in self?.loadHome() }])
@@ -29,7 +28,11 @@ extension BrowserWindowController {
       showInstalling(note)
       // 维护在别的进程里（另开的一份 app 在装更新）：它完了不会通知这里，过一会儿再看一次。
       if !UpdateGate.shared.isHolding {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.loadHome() }
+        let generation = connectionGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+          guard let self, self.connectionGeneration == generation else { return }
+          self.loadHome()
+        }
       }
       return
     }
@@ -39,9 +42,11 @@ extension BrowserWindowController {
     }
     pendingStartingScreen = starting
     if !quietly { DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: starting) }
+    let generation = connectionGeneration
     ServerLauncher.shared.ensureRunning { [weak self] outcome in
       starting.cancel()
-      self?.present(outcome)
+      guard let self, self.connectionGeneration == generation else { return }
+      self.present(outcome)
     }
   }
 

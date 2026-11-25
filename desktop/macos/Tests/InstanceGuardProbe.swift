@@ -15,7 +15,7 @@ func runInstanceGuardProbe(mode: String) -> Never {
   let app = NSApplication.shared
   app.setActivationPolicy(.accessory)
   app.finishLaunching()
-  BrowserWindowController.instanceGuardInterval = mode == "reload" ? 3600 : 0.5
+  BrowserWindowController.instanceGuardInterval = ["reload", "recover"].contains(mode) ? 3600 : 0.5
 
   var lines: [String] = []
   let input = NSLock()
@@ -59,7 +59,31 @@ func runInstanceGuardProbe(mode: String) -> Never {
     return content!
   }
   _ = readPage("window.guardProbeMarker = 'original document'")
+  if mode == "recover" {
+    // 让首轮 MCP 自检的探活先完成，后面的故障只注入窗口导航。
+    spin(until: { UserDefaults.standard.stringArray(forKey: "HostMcpSetupDone")?.contains(NaviConfig.dataURL.path) == true },
+         "host MCP check to finish")
+  }
   say("LOADED \(webView.url!.absoluteString)")
+  if mode == "recover" {
+    spin(until: { received("MAINTENANCE_ENDED") }, "maintenance to end")
+    controller.showInstalling("正在重新连接 Navi")
+    controller.loadHome()
+    spin(until: { controller.offlineView.isHidden && !webView.isLoading }, "the new page to replace the maintenance screen")
+    require(readPage("typeof window.guardProbeMarker") == "undefined", "the old document cannot satisfy the recovery handoff")
+    say("MAINTENANCE_RECOVERED \(webView.url!.path)")
+
+    spin(until: { received("CONTENT_EXITED") }, "the content process recovery scenario")
+    _ = readPage("window.guardProbeMarker = 'old content document'")
+    controller.webViewWebContentProcessDidTerminate(webView)
+    spin(until: { !controller.offlineView.isHidden && texts(in: controller.offlineView).contains("连不上 Navi") },
+         "the recovery failure screen")
+    say("RECOVERY_FAILED")
+    spin(until: { controller.offlineView.isHidden && !webView.isLoading }, "the page to return after health recovers")
+    require(readPage("typeof window.guardProbeMarker") == "undefined", "the new page must finish the handoff after recovery fails")
+    say("CONTENT_RECOVERED \(webView.url!.path)")
+    exit(0)
+  }
   if mode != "unresponsive" {
     if mode == "reload" {
       spin(until: { received("STALL") }, "the stalled navigation probe")

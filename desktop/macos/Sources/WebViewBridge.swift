@@ -25,23 +25,33 @@ extension BrowserWindowController: WKNavigationDelegate, WKUIDelegate, WKDownloa
       return
     }
     if NaviConfig.isSameOrigin(url) {
-      // 本机地址：端口上可能已经换了人，放行之前认一次。
-      NaviHealth.probe(NaviConfig.windowHealthURL) { probe in
-        DispatchQueue.main.async { [weak self] in
-          guard let self, let instance = NaviHealth.ours(probe) else {
-            decisionHandler(.cancel)
-            self?.navigationProbeFailed(probe)
-            return
-          }
-          // 自己那份重起过就先换上新的实例号，否则这一下载回来的是一张 409。
-          self.bind(instance) { decisionHandler(.allow) }
-        }
-      }
+      verifyLocalNavigation(to: url, decisionHandler: decisionHandler)
       return
     }
     // 外站、预览地址、mailto: 之类一律交给系统默认程序，壳里只留 navi 自己。
     NSWorkspace.shared.open(url)
     decisionHandler(.cancel)
+  }
+
+  private func verifyLocalNavigation(to url: URL, canRetry: Bool = true,
+                                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+    let generation = connectionGeneration
+    NaviHealth.probe(NaviConfig.windowHealthURL) { probe in
+      DispatchQueue.main.async { [weak self] in
+        guard let self, self.connectionGeneration == generation else { return decisionHandler(.cancel) }
+        if let instance = NaviHealth.ours(probe) {
+          self.bind(instance) { current in decisionHandler(current ? .allow : .cancel) }
+          return
+        }
+        // 恢复中的页面还没呈现。短时没答复时再确认一次，让这次导航有机会完成交接。
+        if case .unreachable = probe, canRetry, !self.hasPresentedPage {
+          self.verifyLocalNavigation(to: url, canRetry: false, decisionHandler: decisionHandler)
+          return
+        }
+        decisionHandler(.cancel)
+        self.navigationProbeFailed(probe, target: url)
+      }
+    }
   }
 
   func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
