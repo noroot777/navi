@@ -58,8 +58,7 @@ export async function smokeDistribution(app, architecture = process.env.NAVI_MAC
     server = await startServer({ node, runtime, dataDir: directory });
     console.log(`DISTRIBUTION_SMOKE_OK ${architecture}: native binaries, sqlite, pty, server health`);
   } finally {
-    await server?.stop();
-    rmSync(directory, { recursive: true, force: true });
+    try { await server?.stop(); } finally { rmSync(directory, { recursive: true, force: true }); }
   }
 }
 

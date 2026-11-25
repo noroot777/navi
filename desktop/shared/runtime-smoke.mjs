@@ -28,9 +28,10 @@ export function isolatedEnv(base = process.env) {
 export async function startServer({ node, runtime, dataDir, port, env = {}, timeoutMs = 60_000 }) {
   port ??= await freePort();
   let output = "";
+  // POSIX 上让 server 自成一个进程组：停的时候按组停、按组确认，父进程先死了也找得到它的后代。
   const child = spawn(node, [join(runtime, "server/dist/index.js")], { cwd: runtime, env: {
     ...isolatedEnv(), NAVI_DATA_DIR: dataDir, PORT: String(port), NAVI_LOCAL_ONLY: "1", ...env,
-  }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, detached: process.platform !== "win32" });
   child.stdout.on("data", (bytes) => { output += bytes; });
   child.stderr.on("data", (bytes) => { output += bytes; });
   let failure;
@@ -45,15 +46,24 @@ export async function startServer({ node, runtime, dataDir, port, env = {}, time
     } catch {}
     await delay(200);
   }
-  await server.stop();
-  throw new Error(`独立服务未就绪：${failure ?? ""}\n${output}`);
+  const notReady = new Error(`独立服务未就绪：${failure ?? ""}\n${output}`);
+  try { await server.stop(); } catch (error) { notReady.message += `\n（停服务也失败了：${error.message}）`; }
+  throw notReady;
 }
 
-/** 停掉 server 和它的整棵进程树。Windows 上没有 SIGTERM，跟 scripts/stop.mjs 一样走 taskkill /T。 */
+/**
+ * 停掉 server 和它起的进程，确认停干净了才返回，停不干净就抛。
+ *
+ * 判据不是「父进程退出了」：父进程先死了的时候它的后代可能还活着。POSIX 上按 startServer 建的进程组
+ * 停、按组确认一个不剩。Windows 上没有能按「属于谁」认人的进程组，taskkill /T 只能沿还连着的父链走，
+ * 父进程已经死了就无从追起 —— 那边的完整保证由调用方的 Job Object 给（desktop/windows/scripts/process-job.mjs），
+ * 这里只负责把还活着的那棵树停掉。
+ */
 export async function stopServer(child) {
-  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
-  const exited = once(child, "exit");
+  if (!child?.pid) return;
   if (process.platform === "win32") {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    const exited = once(child, "exit");
     const kill = spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { encoding: "utf8", windowsHide: true });
     let timer;
     const late = new Promise((_, reject) => {
@@ -62,7 +72,18 @@ export async function stopServer(child) {
     try { await Promise.race([exited, late]); } finally { clearTimeout(timer); }
     return;
   }
-  child.kill("SIGTERM");
-  const timer = setTimeout(() => child.kill("SIGKILL"), 5000);
-  try { await exited; } finally { clearTimeout(timer); }
+  const group = -child.pid;
+  const alive = () => {
+    try { process.kill(group, 0); return true; } catch (error) { return error.code === "EPERM"; }
+  };
+  const gone = async (ms) => {
+    const deadline = Date.now() + ms;
+    while (alive() && Date.now() < deadline) await delay(100);
+    return !alive();
+  };
+  if (!alive()) return;
+  try { process.kill(group, "SIGTERM"); } catch {}
+  if (await gone(5000)) return;
+  try { process.kill(group, "SIGKILL"); } catch {}
+  if (!(await gone(5000))) throw new Error(`进程组 ${child.pid} 里仍有进程没退出`);
 }

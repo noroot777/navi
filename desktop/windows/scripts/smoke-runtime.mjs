@@ -3,11 +3,14 @@
 // 用临时数据目录、非 4317 端口起 server → health、经 API 读写库、经终端 API 用 ConPTY 跑一条命令读到输出、
 // 取 web 页面 → 停干净（进程、文件都不留）。
 //
-//   node desktop/windows/scripts/smoke-runtime.mjs <运行时目录>
+//   node desktop/windows/scripts/smoke-runtime.mjs <运行时目录> [工作目录]
 //
-// 跑这个脚本的 node 随意（系统里装的就行），被测的一律是运行时自带的 node.exe。一切都落在 %TEMP% 下的一个
-// 临时目录里：它充当 LOCALAPPDATA（发布到 <临时>\Navi\runtimes\<sha256>、数据根 <临时>\Navi\data），server 的
-// USERPROFILE/APPDATA 也指过去，不碰这台机器上已有的 Navi、它的端口和数据。
+// 跑这个脚本的 node 随意（系统里装的就行），被测的一律是运行时自带的 node.exe。一切都落在工作目录（缺省 %TEMP%）
+// 下新建的一个临时目录里：它充当 LOCALAPPDATA（发布到 <临时>\Navi\runtimes\<sha256>、数据根 <临时>\Navi\data），
+// server 的 USERPROFILE/APPDATA 也指过去，不碰这台机器上已有的 Navi、它的端口和数据。
+//
+// 停干净靠 Job Object（process-job.mjs）：起任何进程之前先把自己收进容器，收尾时容器里除自己外一个不剩才算数，
+// 不靠父进程号追树。冒烟成功、失败都走同一段收尾，每一步各自兜底，前一步失败不跳过后一步。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
@@ -19,6 +22,7 @@ import { installRuntime } from "../../shared/runtime-store.mjs";
 import { startServer } from "../../shared/runtime-smoke.mjs";
 import { scanWindowsBinaries } from "./binary-check.mjs";
 import { dataRoot, runtimeStore } from "./layout.mjs";
+import { claimProcessJob } from "./process-job.mjs";
 
 const step = (line) => console.log(`✓ ${line}`);
 // %TEMP% 常是 8.3 短名（C:\Users\ADMINI~1\...），server 报的、进程表里记的是长名：比较前都换成真实长路径。
@@ -26,9 +30,10 @@ const longPath = (path) => realpathSync.native(path);
 const samePath = (a, b) => longPath(a).toLowerCase() === longPath(b).toLowerCase();
 const stripAnsi = (text) => text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "");
 
-export async function smokeRuntime(source) {
+export async function smokeRuntime(source, { work = tmpdir() } = {}) {
   assert.equal(process.platform, "win32", "这份冒烟要在 Windows 上跑");
-  const temporary = mkdtempSync(join(tmpdir(), "navi-win-smoke-"));
+  const job = await claimProcessJob();
+  const temporary = mkdtempSync(join(work, "navi-win-smoke-"));
   const env = { LOCALAPPDATA: join(temporary, "LocalAppData") };
   let server;
   let failure;
@@ -127,15 +132,14 @@ export async function smokeRuntime(source) {
     failure = error;
     if (server) console.error(`--- server 输出 ---\n${server.output().slice(-4000)}`);
   }
-  // 失败了也照样停服务、清目录；两边都失败时先报冒烟本身的错。
-  try {
-    await server?.stop();
-    await cleanUp(temporary);
-  } catch (error) {
-    if (!failure) throw error;
-    console.error(`清理也失败了：${error.message}`);
+  const problems = await cleanUp({ server, job, temporary });
+  job.release();
+  if (failure) {
+    if (problems.length) console.error(`收尾也有问题：\n  ${problems.join("\n  ")}`);
+    throw failure;
   }
-  if (failure) throw failure;
+  if (problems.length) throw new Error(`收尾没停干净：\n  ${problems.join("\n  ")}`);
+  step("Job 里除冒烟自己外一个进程不剩，没有进程跑在临时目录里，临时目录已整个删掉");
   console.log("WINDOWS_RUNTIME_SMOKE_OK");
 }
 
@@ -178,32 +182,49 @@ async function readTerminal(url, afterOpen) {
   }
 }
 
-// 停干净的判据是事实，不是「调过 taskkill」：没有任何进程还跑在临时目录里，整个目录删得掉（Windows 上
-// 有进程开着里面的文件就删不掉）。
-async function cleanUp(temporary) {
-  const roots = [...new Set([temporary, longPath(temporary)])].join("|");
-  const deadline = Date.now() + 20_000;
-  let leftovers = [];
-  for (;;) {
-    const query = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
-      "$roots = $env:NAVI_SMOKE_ROOTS -split '\\|'; Get-CimInstance Win32_Process | Where-Object { $p = $_; $roots | Where-Object { ($p.ExecutablePath -and $p.ExecutablePath.StartsWith($_, 'OrdinalIgnoreCase')) -or ($p.CommandLine -and $p.CommandLine.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0) } } | ForEach-Object { \"$($_.ProcessId) $($_.Name) $($_.CommandLine)\" }"],
-    { encoding: "utf8", env: { ...process.env, NAVI_SMOKE_ROOTS: roots }, windowsHide: true });
-    assert.equal(query.status, 0, query.stderr);
-    leftovers = query.stdout.split(/\r?\n/).filter(Boolean);
-    if (!leftovers.length || Date.now() > deadline) break;
-    await delay(500);
-  }
-  assert.deepEqual(leftovers, [], `停服务后仍有进程跑在 ${temporary} 里`);
-  rmSync(temporary, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  assert.equal(existsSync(temporary), false, `${temporary} 没删掉`);
-  step("没有进程留在临时目录里，临时目录已整个删掉");
+// 停干净的判据是事实，不是「调过 taskkill」：
+//   ① 停 server（还活着的那棵树）；
+//   ② 回收 Job：容器里除自己以外的成员（脱链的后代、被超时杀掉的探针留下的孙子）全部结束，内核报只剩自己；
+//   ③ 按路径再核一遍：可执行文件或命令行落在这个临时目录里的进程一个都不该有。这个目录名是随机的，命中的
+//      只可能是本次冒烟起的 —— 命中了说明有进程跑出了容器，照样结束它，但这一轮算失败；
+//   ④ 整个目录删得掉（Windows 上有进程开着里面的文件就删不掉）。
+// 每一步各自兜底，返回所有没过的那几条。
+async function cleanUp({ server, job, temporary }) {
+  const problems = [];
+  const attempt = async (label, work) => {
+    try { await work(); } catch (error) { problems.push(`${label}：${error.message}`); }
+  };
+  await attempt("停 server", () => server?.stop());
+  await attempt("回收 Job", () => job.reap());
+  await attempt("核对残留", async () => {
+    const escaped = processesUnder(temporary);
+    if (!escaped.length) return;
+    for (const line of escaped) spawnSync("taskkill", ["/PID", line.split(" ")[0], "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    await delay(1000);
+    throw new Error(`有进程跑出了 Job（已结束）：\n    ${escaped.join("\n    ")}${processesUnder(temporary).length ? "\n    结束之后仍在" : ""}`);
+  });
+  await attempt("删临时目录", () => {
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    if (existsSync(temporary)) throw new Error(`${temporary} 没删掉`);
+  });
+  return problems;
+}
+
+function processesUnder(temporary) {
+  let roots = temporary;
+  try { roots = [...new Set([temporary, longPath(temporary)])].join("|"); } catch {}
+  const query = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+    "$roots = $env:NAVI_SMOKE_ROOTS -split '\\|'; Get-CimInstance Win32_Process | Where-Object { $p = $_; $roots | Where-Object { ($p.ExecutablePath -and $p.ExecutablePath.StartsWith($_, 'OrdinalIgnoreCase')) -or ($p.CommandLine -and $p.CommandLine.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0) } } | ForEach-Object { \"$($_.ProcessId) $($_.Name) $($_.CommandLine)\" }"],
+  { encoding: "utf8", env: { ...process.env, NAVI_SMOKE_ROOTS: roots }, windowsHide: true });
+  if (query.status !== 0) throw new Error(`查不到进程表：${query.stderr}`);
+  return query.stdout.split(/\r?\n/).filter(Boolean);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const source = process.argv[2];
+  const [source, work] = process.argv.slice(2);
   if (!source) {
-    console.error("usage: smoke-runtime.mjs <运行时目录>");
+    console.error("usage: smoke-runtime.mjs <运行时目录> [工作目录]");
     process.exit(2);
   }
-  smokeRuntime(resolve(source)).catch((error) => { console.error(error); process.exitCode = 1; });
+  smokeRuntime(resolve(source), work ? { work: resolve(work) } : undefined).catch((error) => { console.error(error); process.exitCode = 1; });
 }

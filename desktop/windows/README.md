@@ -38,6 +38,8 @@ WIN_REMOTE_KEY=… npm run smoke:win-runtime:remote   # 送到测试机 192.168.
 
 ### 冒烟
 
-`scripts/smoke-runtime.mjs <运行时>` 在 Windows 上跑，被测的一律是包里的 `node.exe`：发布到临时 `LOCALAPPDATA` → 自带 node 的 sqlite 写入重开读回、ConPTY 起 `cmd` 读到输出 → 临时数据根、非 4317 端口起 server，health 报的代码根是发布目录 → 经 API 写入并读回一个项目 → 终端 API（server 自己的 ConPTY 路径）敲一条命令读到输出、结束会话 → 取 web 页面和一份脚本资源 → `taskkill /T` 停掉，确认没有进程还跑在临时目录里、整个目录删得掉。server 的 `USERPROFILE`/`APPDATA` 也指进临时目录，不碰这台机器上已有的 Navi。
+`scripts/smoke-runtime.mjs <运行时>` 在 Windows 上跑，被测的一律是包里的 `node.exe`：发布到临时 `LOCALAPPDATA` → 自带 node 的 sqlite 写入重开读回、ConPTY 起 `cmd` 读到输出 → 临时数据根、非 4317 端口起 server，health 报的代码根是发布目录 → 经 API 写入并读回一个项目 → 终端 API（server 自己的 ConPTY 路径）敲一条命令读到输出、结束会话 → 取 web 页面和一份脚本资源 → 停干净。server 的 `USERPROFILE`/`APPDATA` 也指进临时目录，不碰这台机器上已有的 Navi。
 
-`scripts/remote-smoke.mjs` 从开发机把运行时打成 tar.gz、起一个只活这一次的 HTTP 服务，经 `scripts/win-remote` 的通道让测试机拉下来跑上面那个冒烟，结束删掉对端的临时目录。不进对端仓库、不用它的 worktree。
+停干净不靠父进程号追树（父进程先死了它的后代就追不到）：冒烟在起任何进程之前先把自己收进一个 Job Object（`scripts/process-job.mjs`，KILL_ON_JOB_CLOSE），之后起的探针、server、ConPTY、shell 生来就在容器里。收尾不论成败都走同一段，每步各自兜底：停 server → 结束容器里除冒烟自己外的全部成员，直到内核报只剩自己 → 按随机临时目录的路径再核一遍进程表（命中说明有进程跑出了容器，结束它并判失败）→ 整个目录删得掉。冒烟自己崩了，句柄随助手一起关掉，容器里剩下的由内核结束。
+
+`scripts/remote-smoke.mjs` 从开发机把运行时打成 tar.gz、起一个只活这一次的 HTTP 服务，经 `scripts/win-remote` 的通道让测试机拉下来跑上面那个冒烟，冒烟的工作目录也放在下载目录里，结束一起删掉。不进对端仓库、不用它的 worktree。

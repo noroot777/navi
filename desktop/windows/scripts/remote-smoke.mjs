@@ -5,8 +5,9 @@
 //
 // 通道是 scripts/win-remote 的那套（对端 Navi 的终端 API，见 docs/win-remote.md）。运行时有一两百 MB、不进 git，
 // 所以不走 win-remote sync：这边打一个 tar.gz、起一个只活这一次的 HTTP 服务（随机端口 + 随机路径），对端
-// curl.exe 拉下来、用自带的 tar 解开。对端的一切都落在 %TEMP%\navi-win-runtime-<随机>\ 里，跑完连同冒烟自己
-// 的临时目录一起删掉 —— 不进对端仓库、不碰它的 worktree，也不碰它 :4317 上正在用的那份 Navi。
+// curl.exe 拉下来、用自带的 tar 解开。对端的一切都落在 %TEMP%\navi-win-runtime-<随机>\ 里：冒烟的工作目录也指进
+// 这里（work\），冒烟中途被杀、自己的收尾没走到时，外面这一删也把它带走 —— 不进对端仓库、不碰它的 worktree，
+// 也不碰它 :4317 上正在用的那份 Navi。
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
@@ -24,6 +25,7 @@ const REPO = resolve(HERE, "../../..");
 const TOOLS = [
   "desktop/shared/runtime-store.mjs", "desktop/shared/runtime-smoke.mjs",
   "desktop/windows/scripts/smoke-runtime.mjs", "desktop/windows/scripts/binary-check.mjs", "desktop/windows/scripts/layout.mjs",
+  "desktop/windows/scripts/process-job.mjs",
 ];
 
 const runtime = resolve(process.argv[2] || join(HERE, "..", "build", "runtime"));
@@ -70,7 +72,9 @@ try {
     `  if ($LASTEXITCODE -ne 0) { throw "解包失败（tar 退出码 $LASTEXITCODE）" }`,
     `  Remove-Item -LiteralPath $bundle -Force`,
     `  Write-Output ("harness node " + (node -v) + "  on " + [Environment]::OSVersion.VersionString)`,
-    `  node (Join-Path $root 'tools\\desktop\\windows\\scripts\\smoke-runtime.mjs') (Join-Path $root 'runtime') 2>&1 | ForEach-Object { "$_" }`,
+    `  $work = Join-Path $root 'work'`,
+    `  New-Item -ItemType Directory -Path $work | Out-Null`,
+    `  node (Join-Path $root 'tools\\desktop\\windows\\scripts\\smoke-runtime.mjs') (Join-Path $root 'runtime') $work 2>&1 | ForEach-Object { "$_" }`,
     `  $code = $LASTEXITCODE`,
     `} catch { Write-Output ("✕ " + $_.Exception.Message) }`,
     `finally {`,
