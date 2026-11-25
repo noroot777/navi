@@ -19,7 +19,7 @@ import { jobPreludeLines, jobAssignLine, jobCloseLine, killTreeLines } from "./k
 import { psq, psReadText } from "./ps.mjs";
 import { LEGACY_REPO_DIR_NAMES } from "../legacy-names.mjs";
 
-const DEFAULT_HOST = process.env.WIN_REMOTE_HOST ?? "http://192.168.1.187:4317";
+export const DEFAULT_HOST = process.env.WIN_REMOTE_HOST ?? "http://192.168.1.187:4317";
 
 // 对端 navi 的访问密钥。自用模式的 navi 只认本机直连和这把密钥(server/src/auth/remote-access.ts),
 // 而这套脚本正是从另一台机器去调它的终端 API —— 不带就是 401。每一跳都要带,所以收在这一处。

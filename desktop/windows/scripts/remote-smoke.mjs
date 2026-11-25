@@ -20,10 +20,10 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { closeSession, detectLocalAddress, rexec } from "../../../scripts/win-remote/transport.mjs";
+import { DEFAULT_HOST, closeSession, detectLocalAddress, rexec } from "../../../scripts/win-remote/transport.mjs";
 import { psq } from "../../../scripts/win-remote/ps.mjs";
 import { claimScratch, reclaimScratch } from "../../shared/scratch.mjs";
-import { PS_DROP_TREE, cleanRemote, forget, journalFile, reclaimPending, remember, remoteRootName } from "./remote-scratch.mjs";
+import { PS_DROP_TREE, journalFile, reclaimPending, remember, remoteRootName, settle as settleRecord, track } from "./remote-scratch.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "../../..");
@@ -35,7 +35,8 @@ const TOOLS = [
 ];
 // 测试机上光是把运行时拷进发布目录就要近十分钟（上万个小文件，实测 17:24→17:34），整趟给半小时。
 const TIMEOUT_MS = Number(process.env.NAVI_WIN_SMOKE_TIMEOUT_MS || 30 * 60_000);
-const HOST = process.env.WIN_REMOTE_HOST;
+// 记账时就把目标机器定下来：回收时按账上的地址去，不看那时的环境变量。
+const HOST = DEFAULT_HOST;
 
 if (process.argv[2] === "--reclaim") {
   process.exit((await reclaimPending({ exec: rexec, closeSession })) ? 1 : 0);
@@ -53,7 +54,7 @@ for (const directory of reclaimScratch(tmpdir(), "navi-win-remote-smoke-").remov
 
 const id = randomBytes(6).toString("hex");
 const staging = claimScratch(tmpdir(), "navi-win-remote-smoke-");
-remember({ id, host: HOST });
+const record = remember({ id, host: HOST });
 const controller = new AbortController();
 let server;
 let main;
@@ -63,14 +64,13 @@ function settle() {
   settling ??= (async () => {
     server?.close();
     rmSync(staging, { recursive: true, force: true });
-    const remote = await cleanRemote(id, { exec: rexec, host: HOST });
-    if (remote.ok) {
-      forget(id);
-      console.log(`✓ 对端临时目录已删，收尾后另发请求核实过：${remote.detail}`);
+    const result = await settleRecord(record, { exec: rexec, closeSession });
+    if (result.ok) {
+      console.log(`✓ 对端终端会话已关、临时目录已删，收尾后另发请求核实过：${result.detail}`);
     } else {
-      console.log(`✕ 对端临时目录没能确认删掉（${remote.detail}）；账留在 ${journalFile(id)}，下次跑 remote-smoke 或 --reclaim 会先清`);
+      console.log(`✕ 对端没结清（${result.problems.join("；")}）；账留在 ${journalFile(id)}，下次跑 remote-smoke 或 --reclaim 会先清`);
     }
-    return remote.ok;
+    return result.ok;
   })();
   return settling;
 }
@@ -112,7 +112,7 @@ try {
   console.log(`▶ 送 ${(size / 1024 / 1024).toFixed(1)} MB 到对端 %TEMP%\\${remoteRootName(id)}，在那边跑 smoke-runtime.mjs`);
 
   main = rexec(remoteCommand(id, url), {
-    timeout: TIMEOUT_MS, signal: controller.signal, onSession: (session) => remember({ id, host: HOST, session }), ...(HOST ? { host: HOST } : {}),
+    timeout: TIMEOUT_MS, signal: controller.signal, host: HOST, onSession: (session) => track(record, session),
   });
   const result = await main;
   console.log(result.out.trim());
