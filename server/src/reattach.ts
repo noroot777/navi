@@ -32,6 +32,7 @@ import { sessionLaunchCompact } from "./usage.js";
 import { runtimeEligibility, type RuntimeEligibility } from "./runtime-eligibility.js";
 import { preflightRuntimeHandover } from "./runtime-handover-preflight.js";
 import type { RuntimeCompatibility } from "./runtime-compatibility.js";
+import { DESKTOP_APP } from "./local-only.js";
 
 // 「现在重启会打断谁」——给 scripts/restart.mjs 的安全闸用。
 //
@@ -88,7 +89,8 @@ export async function restartImpact(next?: Partial<RuntimeCompatibility>): Promi
   }
   const holders = await findMcpChannelHolders(out.survives.map((s) => s.pid));
   out.mcpDisrupted = out.survives.filter((s) => holders.has(s.pid));
-  if (process.platform === "darwin") {
+  // 桌面版换运行时（mac 一直有，Windows 只在桌面 app 起的那一份上）才需要这一段；仓库实例的 restart 闸不看它。
+  if (process.platform === "darwin" || (process.platform === "win32" && DESKTOP_APP)) {
     out.runtimeHandover = await runtimeEligibility(out);
     await preflightRuntimeHandover(out, next);
   }
