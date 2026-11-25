@@ -8,6 +8,11 @@ import AppKit
 /// 都不许起服务，见 Maintenance），只停评估过的那一份（ServerShutdown），松锁后窗口照常 loadHome，
 /// ServerLauncher 按新设置起一份。服务本来没在跑、端口上是别的 navi：只记下设置，下次起服务时生效。
 ///
+/// 确认框可能开着好一阵，这期间别处又起了任务，用户点头时看到的名单就过时了。所以攥住维护锁之后、停服务
+/// 之前先让服务冻结接活、拿冻结之下的快照（RestartFreeze，server/src/restart-freeze.ts）；多出了他没同意过的
+/// 影响就放开冻结、松锁、把新名单重新摆给他，没多出来才凭这份快照停，下刀前续一次期确认冻结还在。冻着的时候
+/// 不起新回合，停下之前名单不会再变多。老版本服务不认这道关口：退回即时再评估，确认框里如实说这一下堵不上。
+///
 /// 设置**在旧服务确认停下之后、松开维护锁之前**才落盘：锁攥着谁也起不了服务，所以中途在哪一步退出、
 /// 崩掉，留下的都是一对对得上的「设置 + 服务」—— 没落盘就是旧设置（旧服务要么还在、要么停了等着按旧设置
 /// 重起），落了盘服务一定已经停了、下一次按新设置起。没停成就什么都不落。
@@ -25,22 +30,27 @@ enum RemoteAccessSwitch {
     busy = true
     let enable = ServedInstance.networkPending ? NaviConfig.allowsOtherDevices : !NaviConfig.allowsOtherDevices
     DispatchQueue.global(qos: .userInitiated).async {
-      let verdict = RestartImpactProbe.assessSync()
+      let assessment = RestartImpactProbe.assessDetailedSync()
       DispatchQueue.main.async {
-        guard confirm(enable: enable, verdict: verdict, window: controller?.window) else {
-          busy = false
-          return
-        }
-        apply(enable: enable, verdict: verdict, controller: controller)
+        decide(enable: enable, verdict: assessment.verdict, freezable: assessment.freezable, changed: false, controller: controller)
       }
     }
   }
 
-  private static func confirm(enable: Bool, verdict: ImpactVerdict, window: NSWindow?) -> Bool {
+  private static func decide(enable: Bool, verdict: ImpactVerdict, freezable: Bool, changed: Bool, controller: BrowserWindowController?) {
+    guard confirm(enable: enable, verdict: verdict, freezable: freezable, changed: changed, window: controller?.window) else {
+      busy = false
+      if changed { controller?.loadHome() }
+      return
+    }
+    apply(enable: enable, verdict: verdict, controller: controller)
+  }
+
+  private static func confirm(enable: Bool, verdict: ImpactVerdict, freezable: Bool, changed: Bool, window: NSWindow?) -> Bool {
     // 改回只听本机是收窄，不打断谁就直接办。
     guard enable || verdict.needsConsent else { return true }
     let alert = NSAlert()
-    var lines: [String] = []
+    var lines: [String] = changed ? ["刚才确认之后情况变了，按现在的样子再确认一次。"] : []
     if enable {
       alert.messageText = "允许其他设备访问这台 Navi？"
       lines.append("服务不再只听 127.0.0.1：同一 Tailscale 或局域网里的设备连得上 \(NaviConfig.port) 端口，"
@@ -62,29 +72,62 @@ enum RemoteAccessSwitch {
     case .unknown(let why):
       lines.append("要重启 Navi 服务才生效。确认不了重启会不会打断任务（\(why)），按会打断对待。")
     }
+    if case .ours = verdict.target, !freezable {
+      lines.append("这一版服务不支持重启前冻结：确认之后到停下之间新起的任务不在上面，也会被打断。")
+    }
     alert.informativeText = lines.joined(separator: "\n\n")
     return alert.runModal() == .alertFirstButtonReturn
   }
 
-  private static func apply(enable: Bool, verdict: ImpactVerdict, controller: BrowserWindowController?) {
+  /// `agreed`：用户刚点头同意的那一份。
+  private static func apply(enable: Bool, verdict agreed: ImpactVerdict, controller: BrowserWindowController?) {
     let note = "正在按新设置重启 Navi 服务…"
     controller?.showInstalling("正在重启 Navi", detail: "正在应用访问设置，就绪后自动回到工作区。")
     DispatchQueue.global(qos: .userInitiated).async {
       var failure: String?
+      var retry: (verdict: ImpactVerdict, freezable: Bool)?
       do {
         let maintenance = try Maintenance.begin(note: note, timeout: 50)
-        switch ServerShutdown.stop(expecting: verdict.target) {
-        case .stopped:
-          ServedInstance.forget()
-          NaviConfig.allowsOtherDevices = enable
-        case .changed(let why): failure = "评估之后端口上的服务变了（\(why)），这次没有重启。"
-        case .failed(let why): failure = why
+        var lease: RestartFreeze.Lease?
+        var now: (verdict: ImpactVerdict, freezable: Bool)?
+        switch RestartFreeze.acquire() {
+        case .refused(let why): failure = "服务这会儿冻结不了接活（\(why)），这次没有重启。"
+        case .unfrozen(let fresh, let freezable): now = (fresh, freezable)
+        case .frozen(let held, let fresh):
+          lease = held
+          now = (fresh, true)
         }
+        if let now {
+          if agreed.widened(to: now.verdict) {
+            retry = now
+          } else {
+            let stopped = ServerShutdown.stop(expecting: agreed.target, beforeStop: {
+              guard let lease else { return true }
+              guard let why = RestartFreeze.renew(lease) else { return true }
+              failure = "\(why)，这次没有重启。"
+              return false
+            })
+            switch stopped {
+            case .stopped:
+              lease = nil // 服务退了，冻结跟着没了
+              ServedInstance.forget()
+              NaviConfig.allowsOtherDevices = enable
+            case .changed(let why): if failure == nil { failure = "评估之后服务变了（\(why)），这次没有重启。" }
+            case .failed(let why): failure = why
+            }
+          }
+        }
+        // 没停成（名单变了要重问、停不下来）：服务还在，冻结当场放开，被挡住的任务接着起。
+        if let lease { RestartFreeze.release(lease) }
         maintenance.end()
       } catch {
         failure = "没能让服务下线：\(error.localizedDescription)"
       }
       DispatchQueue.main.async {
+        if let retry, failure == nil {
+          decide(enable: enable, verdict: retry.verdict, freezable: retry.freezable, changed: true, controller: controller)
+          return
+        }
         busy = false
         if let failure { alert("没有切换", "\(failure)\n\n设置没改，可以再试一次。") }
         controller?.loadHome()

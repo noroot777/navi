@@ -1,7 +1,7 @@
 // Windows 桌面壳的控制器（desktop/windows/launcher/）里不依赖 Windows 就能验的那些（在 mac 上也跑）：
 //   · 配置：一切从 LOCALAPPDATA 派生，窗口专用端口按数据根算（Windows 上不分大小写），几个环境变量口子；
 //   · 认人：health 的四种结果，mismatch 每一条判据；探活的总期限与正文上限（一点一点吐、不结束的，超大的）；
-//   · 「允许其他设备访问」点头之后再评估，比点头时多出了什么（widened）；
+//   · 「允许其他设备访问」点头之后再评估，比点头时多出了什么（widened）；冻结那一步认人、换形、续期（freezeImpact）；
 //   · navi:// 链接：规则同 mac 的 DeepLink.swift；
 //   · 登录项（假注册表）、交给服务的环境、启动锁、维护标记；
 //   · 起服务：假运行时（封成 format 2）里放一个假服务，真发布、真按 start-detached 拉起，认人、复用、并发合一、
@@ -20,7 +20,7 @@ import { decideLink, parseLink } from "../desktop/windows/launcher/deep-link.mjs
 import { classify, mismatch, probe } from "../desktop/windows/launcher/health.mjs";
 import { createLauncher } from "../desktop/windows/launcher/launcher.mjs";
 import { createLoginItem, pointsAt } from "../desktop/windows/launcher/login-item.mjs";
-import { widened } from "../desktop/windows/launcher/restart.mjs";
+import { freezeImpact, releaseFreeze, renewFreeze, stopServer, widened } from "../desktop/windows/launcher/restart.mjs";
 import { activeHold, beginMaintenance } from "../desktop/windows/launcher/maintenance.mjs";
 import { mergePath, serverEnvironment } from "../desktop/windows/launcher/server-env.mjs";
 import { acquireStartLock, tryStartLock } from "../desktop/windows/launcher/start-lock.mjs";
@@ -120,6 +120,55 @@ try {
     assert.equal(widened({ kind: "unknown", why: "x" }, ours(7, [a])), false);
     assert.equal(widened({ kind: "clear", target: { kind: "absent" } }, ours(7)), true, "原来没人在听，现在起了一份");
     console.log("✓ 点头之后再评估：多了任务、换了服务、变得确认不了才重新问，名单变短不问");
+  }
+
+  // ── 重启前冻结：冻住的必须是刚认过的那一份，快照换成同形的判断；老版本退回即时评估；续不上就不下刀 ─────
+  {
+    const cfg = loadConfig({ LOCALAPPDATA: join(temporary, "freeze"), NAVI_URL: "http://127.0.0.1:14978" }, process.platform);
+    const target = { kind: "ours", pid: 7 };
+    const assessed = (freezable) => async () => ({ kind: "clear", target, instance: "one", freezable });
+    const sent = [];
+    const transport = (replies) => () => async (body) => { sent.push(body); return replies.shift(); };
+    const impact = (interrupted) => ({ survives: [], resumes: [], interrupted, mcpDisrupted: [], shutdown: { version: 1, resources: [] } });
+
+    const old = await freezeImpact(cfg, { assess: assessed(false), send: () => { throw new Error("老版本服务不该去冻"); } });
+    assert.equal(old.kind, "unfrozen", "判据里没有协议号：退回即时评估");
+
+    const frozen = await freezeImpact(cfg, { assess: assessed(true), send: transport([{ status: 200, error: null, data: {
+      protocol: 1, lease: "L", instance: "one", pid: 7, revision: 3, expiresInMs: 30_000,
+      impact: impact([{ id: "late", title: "冻结时才看到的任务", reason: "正在起跑" }]),
+    } }]) });
+    assert.equal(frozen.kind, "frozen");
+    assert.equal(frozen.lease.token, "L");
+    assert.deepEqual(frozen.verdict.items, [{ id: "late", title: "冻结时才看到的任务", why: "会被判失败：正在起跑" }], "快照换成跟评估同形的判断");
+    assert.equal(widened({ kind: "clear", target }, frozen.verdict), true, "冻结之下多出来的要重问");
+
+    sent.length = 0;
+    const swapped = await freezeImpact(cfg, { assess: assessed(true), send: transport([
+      { status: 200, error: null, data: { protocol: 1, lease: "M", instance: "two", pid: 8, impact: impact([]) } },
+      { status: 200, error: null, data: { protocol: 1, released: true } },
+    ]) });
+    assert.equal(swapped.kind, "unfrozen");
+    assert.equal(swapped.verdict.kind, "unknown", "冻住的不是刚认过的那一份：按确认不了对待");
+    assert.deepEqual(sent, [{}, { release: "M" }], "认错了人就当场放掉那份冻结");
+
+    const busy = await freezeImpact(cfg, { assess: assessed(true), send: transport([{ status: 409, error: null, data: { protocol: 1, error: "另一处正在准备重启服务" } }]) });
+    assert.deepEqual(busy, { kind: "refused", why: "另一处正在准备重启服务" });
+    const mute = await freezeImpact(cfg, { assess: assessed(true), send: transport([{ status: null, error: "timeout", data: null }]) });
+    assert.equal(mute.kind, "refused", "认这道关口却没答上来：不停");
+
+    const lease = { token: "L", send: async (body) => (body.renew ? { status: 200, error: null, data: { protocol: 1, valid: false } } : { status: 200, error: null, data: { protocol: 1, released: true } }) };
+    assert.match(await renewFreeze(lease), /冻结已经失效/);
+    assert.equal(await releaseFreeze(lease), true);
+
+    let killed = 0;
+    const stopped = await stopServer(cfg, target, {
+      probe: async () => ({ kind: "navi", instance: { pid: 7, id: "one", dataDir: cfg.dataDir, codeDir: cfg.bundledRuntime, desktop: true, windowPort: cfg.windowPort, localOnly: true } }),
+      kill: () => { killed += 1; }, beforeKill: async () => "冻结已经失效（到期了，或者被放掉了）",
+    });
+    assert.deepEqual(stopped, { kind: "changed", why: "冻结已经失效（到期了，或者被放掉了）" });
+    assert.equal(killed, 0, "续不上就不下刀");
+    console.log("✓ 重启前冻结：认准刚认过的那一份才算冻住，快照换成同形判断；老版本退回即时评估，冻不了、续不上都不下刀");
   }
 
   // ── navi:// 链接 ─────────────────────────────────────────────────────────

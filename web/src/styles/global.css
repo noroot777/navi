@@ -465,6 +465,34 @@ code,
   color: var(--ink);
 }
 
+/* 服务冻着（准备重启 / 换新版服务）时顶部居中那一句。不挡点击：底下的东西照常能点，只是新回合在等。 */
+.service-freeze-notice {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  z-index: 95;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 11px;
+  transform: translateX(-50%);
+  border: 1px solid var(--line);
+  border-radius: 9999px;
+  background: var(--panel);
+  box-shadow: 0 2px 8px color-mix(in oklab, var(--ink) 8%, transparent);
+  color: var(--muted);
+  font-size: var(--t-xs);
+  pointer-events: none;
+  user-select: none;
+}
+.service-freeze-notice i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--amber);
+  animation: run-activity-pulse 1.2s ease-in-out infinite;
+}
+
 /* 预览实例角标（`VITE_NAVI_PREVIEW`，只在预览起的前端上出现）。
    `pointer-events: none` 是必须的：它盖在右下角，谁也不该因为它点不到底下的按钮。 */
 .preview-badge {

@@ -16,6 +16,7 @@ import { taskFileRoot } from "../file-browser.js";
 import { withoutTurnIdentity } from "../turn-identity.js";
 import { ChatBoundaryError, readOnlyChatTool, watchChatWorkspace, type ChatWorkspaceObserver } from "./boundary.js";
 import { registerShutdownCleanup } from "../shutdown-resources.js";
+import { waitServiceThaw } from "../runtime-handover-state.js";
 
 export interface ChatInvocation {
   text: string;
@@ -99,6 +100,8 @@ export async function invokeChat(member: ChatMember, owner: string | null, promp
     // 观察者只记录变更、不中止（原因见 boundary.ts 顶部）；可归因的只读约束由下面
     // consume 里的工具事件闸门执行。临时目录一次一清，没有可观察的项目。
     if (!temporary && purpose !== "side") guard = await watchChatWorkspace(cwd);
+    // 服务冻着（准备重启，见 restart-freeze.ts）就先不拉起：等完到登记 shutdown 资源之间没有 await。
+    await waitServiceThaw();
     signal.throwIfAborted();
     handle = executor.run({
       cwd,

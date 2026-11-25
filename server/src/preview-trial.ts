@@ -24,6 +24,7 @@ import { nodeDepsAdvice } from "./preview-deps.js";
 import { canConnect, ready } from "./preview-probe.js";
 import { freePorts, PORT_POOL, portEnv } from "./preview-ports.js";
 import { registerShutdownCleanup } from "./shutdown-resources.js";
+import { waitServiceThaw } from "./runtime-handover-state.js";
 
 export interface PreviewTrialOutcome {
   ok: boolean;
@@ -79,6 +80,7 @@ export async function trialPreviewScript(options: PreviewTrialOptions): Promise<
   const banner = `$ ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(" ")} BROWSER=none NAVI_PREVIEW=1 NAVI_PREVIEW_MODE=${mode} ${script}\n`;
   // Windows 的多行脚本要落成 .cmd 才跑得起来（previewScriptLaunch），那个文件写在 navi 自己
   // 的临时目录里 —— 写进用户仓库就是往人家的 git status 里塞垃圾。
+  await waitServiceThaw(); // 冻着就先不起（restart-freeze.ts）；等完到登记试跑进程之间没有 await
   const dir = mkdtempSync(join(tmpdir(), "navi-preview-trial-"));
   let text = banner;
   let outcome: PreviewTrialOutcome | null = null;

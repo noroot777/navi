@@ -11,7 +11,7 @@ import { handoffBlockReason } from "./handoff-guard.js";
 import { isTurnClaimed } from "./runs.js";
 import { hasOwnedGateProcess, hasStoppingGateProcess, reconcileGateProcesses } from "./accept-gate-ownership.js";
 import { holdDrift, holdMembers, holdScope, topUpHold } from "./team-acceptance-hold.js";
-import { RuntimeHandoverBlockedError } from "./runtime-handover-state.js";
+import { ServiceFrozenError } from "./runtime-handover-state.js";
 
 export type AcceptWarning = {
   reason: "temporary_cleanup_failed";
@@ -114,7 +114,7 @@ export async function acceptanceGuard(
   try {
     topUpHold(taskId);
   } catch (error) {
-    if (!(error instanceof RuntimeHandoverBlockedError)) throw error;
+    if (!(error instanceof ServiceFrozenError)) throw error;
     return { task: null, failure: { accepted: false, httpStatus: 409, taskId, phase, reason: "runtime_handover", error: error.message } };
   }
   const state = await acceptanceState(taskId);

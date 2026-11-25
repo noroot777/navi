@@ -26,6 +26,7 @@
 //
 // 权限与终端同一道门(实例管理员/自用):这些命令是任意 shell,门禁理由见
 // terminal.ts mountTerminalRoutes 顶部。
+import { waitServiceThaw } from "./runtime-handover-state.js";
 import type { Hono } from "hono";
 import { eq } from "drizzle-orm";
 import {
@@ -485,6 +486,7 @@ export function restartCommand(
     const resolved = resolveScript(command, command.restartCommand ?? command.command, values);
     if (!resolved.ok) return resolved.result;
     try {
+      await waitServiceThaw(); // 冻着就先不起（restart-freeze.ts）；等完到占位之间没有 await
       const reservation = terminalSessions.reserveCommand(projectId, command.id);
       try {
         // 配了停止命令:重启的前半程也走它 —— 否则同一个服务,点停止是优雅下线、点重启却被

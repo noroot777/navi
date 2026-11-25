@@ -24,6 +24,7 @@ import { commandLaunch, ptyEnvironment, shellCommand, terminalSize } from "./ter
 import { spawnWindowsPty, type TerminalProcess } from "./terminal-pty.js";
 import { TerminalCapacity } from "./terminal-capacity.js";
 import { registerShutdownCleanup } from "./shutdown-resources.js";
+import { waitServiceThaw } from "./runtime-handover-state.js";
 import { terminalShutdownResources } from "./terminal-shutdown-resources.js";
 import {
   recordPorts, retainHistory, sessionAlive, sessionInfo, sessionRunning,
@@ -94,6 +95,7 @@ export class TerminalSessionManager {
   }
 
   async createAsync(projectId: string, cwd: string, options: CreateOptions = {}): Promise<TerminalSessionInfo> {
+    await waitServiceThaw(); // 冻着就先不起（restart-freeze.ts）；等完到占位之间没有 await
     if (!IS_WINDOWS) return this.create(projectId, cwd, options);
     return this.createReserved(projectId, cwd, options, this.reserve(projectId, options.command?.id ?? null));
   }

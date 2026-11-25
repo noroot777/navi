@@ -16,7 +16,7 @@ export async function waitRuntimeRequests(timeout = 8_000): Promise<boolean> {
 
 export function runtimeHandoverGate(): MiddlewareHandler {
   return async (context, next) => {
-    if (!context.req.path.startsWith("/api/") || ["/api/health", "/api/restart-impact", "/api/runtime-handover"].includes(context.req.path)) return next();
+    if (!context.req.path.startsWith("/api/") || ["/api/health", "/api/restart-impact", "/api/restart-freeze", "/api/runtime-handover"].includes(context.req.path)) return next();
     const channel = runtimeAgentChannel(context.req.path);
     if (runtimeHandoverActive()) {
       if (channel === "monitor") return context.json({ hookSpecificOutput: { hookEventName: "PreToolUse",

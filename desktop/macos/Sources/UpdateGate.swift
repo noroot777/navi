@@ -197,7 +197,7 @@ final class UpdateGate {
       guard mine == epoch else { return }
       let verdict: ImpactVerdict
       if !assessed.needsConsent, preservingRuntime, let handoverBlock, let target = assessed.target {
-        verdict = .disrupts(target, [(title: "旧服务", why: handoverBlock)])
+        verdict = .disrupts(target, [(id: nil, title: "旧服务", why: handoverBlock)])
       } else { verdict = assessed }
       guard verdict.needsConsent else { prepare(verdict.target); return }
       if preservingRuntime && !allowPrompt && !quitting {

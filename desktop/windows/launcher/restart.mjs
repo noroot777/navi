@@ -6,9 +6,15 @@
 //
 // 停服务走 scripts/platform.mjs 的 killServerProcess —— 与 restart.mjs 同一条：Windows 上没有信号，整树结束、
 // 但保住活得过重启的 agent 壳；POSIX 发 SIGTERM。停之前再认一遍端口上的还是不是评估过的那一个进程，换了人就不停。
+//
+// 用户点头之后先让服务冻结接活（freezeImpact，协议在 scripts/restart-freeze.mjs），拿冻结之下的快照跟他同意过的
+// 那份比；冻着的时候影响不会再变多，停之前续一次期、确认冻结还在才下刀。老版本服务没有这道关口时退回即时评估。
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { killServerProcess } from "../../../scripts/platform.mjs";
+import {
+  RESTART_FREEZE_PATH, acquireRestartFreeze, releaseRestartFreeze, renewRestartFreeze, supportsRestartFreeze,
+} from "../../../scripts/restart-freeze.mjs";
 import { isOurs, probe as probeHealth } from "./health.mjs";
 import { isPidAlive } from "./maintenance.mjs";
 
@@ -59,8 +65,60 @@ export async function assessImpact(cfg, { probe = () => probeHealth(cfg.baseURL)
   // 带着认过的那一份的实例号问：问到之前端口换了人，新来的那份不答（instance-binding.ts），闸拿不到别人的名单。
   const answer = await ask(cfg, id);
   if (answer.error) return { kind: "unknown", why: answer.error };
-  const items = disruptedItems(answer.impact);
-  return items.length ? { kind: "disrupts", target, items } : { kind: "clear", target };
+  return verdictOf(target, id, answer.impact);
+}
+
+/** 一份影响名单 → 判断。`instance` 与 `freezable` 是给冻结那一步用的：认的是哪一份、它认不认冻结。 */
+function verdictOf(target, instance, impact) {
+  const items = disruptedItems(impact);
+  const extra = { instance, freezable: supportsRestartFreeze(impact) };
+  return items.length ? { kind: "disrupts", target, items, ...extra } : { kind: "clear", target, ...extra };
+}
+
+/**
+ * 点头之后、停服务之前：先冻结接活，再拿冻结之下的那份判断。
+ *  · `{ kind: "frozen", lease, verdict }`  冻住了；verdict 与 assessImpact 同形，停下之前它不会再变多
+ *  · `{ kind: "unfrozen", verdict }`       服务不认这道关口（老版本）、或者端口上不是自己那份：verdict 是即时再评估的
+ *  · `{ kind: "refused", why }`            认这道关口却冻不了：另一处正在准备重启、没有权限、没答上来 —— 不停
+ */
+export async function freezeImpact(cfg, { assess = () => assessImpact(cfg), send = freezeSender } = {}) {
+  const now = await assess();
+  if (now.target?.kind !== "ours" || !now.freezable) return { kind: "unfrozen", verdict: now };
+  const transport = send(cfg, now.instance);
+  const got = await acquireRestartFreeze(transport);
+  if (got.kind !== "frozen") return { kind: "refused", why: got.why };
+  // 冻住的必须是刚认过的那一份：问到之前端口换了人的话，新来的那份不答（instance-binding.ts），这里是兜底。
+  if (got.instance !== now.instance || got.pid !== now.target.pid) {
+    await releaseRestartFreeze(transport, got.lease);
+    return { kind: "unfrozen", verdict: { kind: "unknown", why: "冻结时端口上换了一份服务" } };
+  }
+  return { kind: "frozen", lease: { send: transport, token: got.lease }, verdict: verdictOf(now.target, now.instance, got.impact) };
+}
+
+/** 下刀之前续一次期：冻结还在就是 null，不在了交回原因。 */
+export async function renewFreeze(lease) {
+  const renewed = await renewRestartFreeze(lease.send, lease.token);
+  return renewed.valid ? null : renewed.why;
+}
+
+export function releaseFreeze(lease) {
+  return releaseRestartFreeze(lease.send, lease.token);
+}
+
+function freezeSender(cfg, instanceId) {
+  const token = hostToken(cfg);
+  const headers = { "content-type": "application/json", ...(token ? { "x-navi-host-token": token } : {}), "x-navi-instance": instanceId };
+  return async (body) => {
+    try {
+      const response = await fetch(new URL(RESTART_FREEZE_PATH, cfg.baseURL), {
+        method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
+      });
+      const data = await response.json().catch(() => null);
+      return { status: response.status, data, error: null };
+    } catch (error) {
+      return { status: null, data: null, error: error.message };
+    }
+  };
 }
 
 /**
@@ -94,8 +152,9 @@ async function askImpact(cfg, instanceId) {
 /**
  * 让自己那份服务下线：{ kind: "stopped" } / { kind: "changed", why }（端口上已经不是评估过的那一份了，没停任何东西）
  * / { kind: "failed", why }。target 为 null：用户在「确认不了」时仍然放行 —— 停那时候端口上自己那份，认不出是谁就不停。
+ * beforeKill：认完人、下刀之前最后问一句，交回原因就不停（冻结续期没续上，见 renewFreeze）。
  */
-export async function stopServer(cfg, target, { probe = () => probeHealth(cfg.baseURL), kill = killServerProcess, alive = isPidAlive, timeoutMs = 20_000 } = {}) {
+export async function stopServer(cfg, target, { probe = () => probeHealth(cfg.baseURL), kill = killServerProcess, alive = isPidAlive, timeoutMs = 20_000, beforeKill = async () => null } = {}) {
   if (target?.kind === "remote") return { kind: "stopped" };
   const result = await probe();
   if (result.kind === "down") return target?.kind === "ours" ? waitGone(cfg, target.pid, { probe, alive, timeoutMs }) : { kind: "stopped" };
@@ -108,6 +167,8 @@ export async function stopServer(cfg, target, { probe = () => probeHealth(cfg.ba
   const { pid } = result.instance;
   if (!Number.isInteger(pid) || pid <= 1) return { kind: "failed", why: "服务没报自己的进程号，没法让它下线。" };
   if (target && !(target.kind === "ours" && target.pid === pid)) return { kind: "changed", why: `服务换了一份（进程 ${pid}）` };
+  const refused = await beforeKill();
+  if (refused) return { kind: "changed", why: refused };
   try { kill(pid); }
   catch (error) { return { kind: "failed", why: `停不了服务进程 ${pid}：${error.message}` }; }
   return waitGone(cfg, pid, { probe, alive, timeoutMs });

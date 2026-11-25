@@ -161,6 +161,8 @@ export type TurnImageRef = { path?: string; source: string; ref?: number; pos?: 
 
 // SSE envelope pushed to the web client.
 export type ServerEvent =
+  // 服务冻着（准备重启 / 换运行时）的时候不起新回合、新终端；null = 解冻了。
+  | { type: "service.freeze"; freeze: { kind: "handover" | "restart"; until: string } | null }
   | { type: "task.created"; task: Task }
   | { type: "task.updated"; task: Task }
   | { type: "task.status"; taskId: string; status: TaskStatus; updatedAt: string; startedAt?: string | null; endedAt?: string | null; activeMs?: number | null; liveSince?: string | null }
