@@ -304,7 +304,19 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
     if (state.handoff && state.handoff.document !== state.document) return;
     clearTimeout(state.handoff?.timer);
     state.handoff = null;
-    if (!state.screen) state.presentation = "presented";
+    if (state.screen) return;
+    state.presentation = "presented";
+    if (state.pendingRoute && sameOrigin(state.pendingRoute)) {
+      const url = state.pendingRoute;
+      state.pendingRoute = null;
+      routeTo(url);
+    }
+  }
+
+  function routeTo(url) {
+    const target = new URL(url);
+    state.pageURL = url;
+    send({ type: "route", route: `${target.pathname}${target.search}${target.hash}` });
   }
 
   // 「仍然显示页面」给不报尺寸的旧版服务留一条明确的路：再载一次、不再等它表态。
@@ -353,12 +365,11 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
       state.pendingRoute = null;
       send({ type: "openExternal", url: action.url });
     } else if (action.kind === "window") {
-      // 页面在着就原地换路由，不重载；页面还没载进来（服务在起、被占着、首启）就记下，载页面时直接载到那里。
-      if (hasPresentedPage()) {
-        state.pageURL = `${cfg.windowURL}${action.route}`;
-        send({ type: "route", route: action.route });
-      }
-      else state.pendingRoute = `${cfg.windowURL}${action.route}`;
+      // 页面在着就原地换路由，不重载；页面还没载进来（服务在起、被占着、首启）就记下：载页面时直接载到那里，
+      // 已经在载的那一页（窗口没开时点的链接：壳带着它起来，启动流程先把首页载上了）表态时再换过去。
+      const url = `${cfg.windowURL}${action.route}`;
+      if (hasPresentedPage()) routeTo(url);
+      else state.pendingRoute = url;
     }
   }
 

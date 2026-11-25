@@ -76,6 +76,27 @@ function harness(name, { initialized = true, outcome, window: windowAnswer } = {
 }
 
 try {
+  // ── 窗口没开时点的 navi:// 链接：壳带着它起来，链接认完时首页已经在载了 ─────────────────
+  {
+    const h = harness("cold-link");
+    h.controller.start();
+    const load = await h.waitFor("load", () => h.last("load"));
+    assert.equal(load.url, `${h.cfg.windowURL}/`);
+    h.receive({ type: "started", url: load.url });
+    h.receive({ type: "link", url: "navi://open/?project=p2&task=t2&instance=ABCD-1234" });
+    await sleep(30);
+    assert.equal(h.of("route").length, 0, "页面还没表态：先不换路由");
+    h.receive({ type: "report", kind: "size:work" });
+    const route = await h.waitFor("route", () => h.last("route"));
+    assert.equal(route.route, "/?project=p2&task=t2", "这一页表态时换到链接那一页");
+    assert.equal(h.controller.state.pendingRoute, null);
+    h.receive({ type: "started", url: `${h.cfg.windowURL}/?project=p2&task=t2` });
+    h.receive({ type: "report", kind: "size:work" });
+    assert.equal(h.of("route").length, 1, "只换一次");
+    h.controller.stop();
+    console.log("✓ 冷启动带着 navi:// 链接：首页已经在载，等它表态再原地换到链接那一页");
+  }
+
   // ── 首启：小窗、问数据从哪来，「全新开始」后起服务、认人、带实例号载页 ─────────────
   {
     const h = harness("first", { initialized: false, outcome: { kind: "needsSetup" } });
