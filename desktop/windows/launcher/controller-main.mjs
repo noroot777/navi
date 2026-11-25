@@ -43,6 +43,7 @@ if (ensure) {
 const brief = (text) => String(text ?? "").replace(/\s*\n\s*/g, " ⏎ ").slice(0, 600);
 function describe(message) {
   if (message.type === "screen") return [message.screen.kind, message.screen.title, brief(message.screen.detail ?? message.screen.problem)].filter(Boolean).join(" ");
+  if (message.type === "dialog") return [message.id, message.title, brief(message.detail), `[${message.buttons.join("|")}]`].join(" ");
   return brief(message.url ?? message.route ?? message.size ?? message.id ?? message.kind ?? "");
 }
 const send = (message) => {

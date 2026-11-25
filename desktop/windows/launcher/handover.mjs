@@ -30,6 +30,9 @@ export function compatibilityOf(runtime) {
   } catch { return null; }
 }
 
+// 终端的 label 只是会话名（「PowerShell」这种），单看认不出是什么；别的几类（预览试跑、聊天执行）自己就带着说明。
+const resourceTitle = (item) => (item.kind === "terminal" ? `终端「${item.label || item.id}」` : item.label || `${item.kind} ${item.id}`);
+
 /** restart-impact 的答复 → 还要等的那些（{ title, why }）；答复不足以下结论时是 { unknown }。 */
 export function blockersOf(impact, compat) {
   const handover = impact?.runtimeHandover;
@@ -39,7 +42,7 @@ export function blockersOf(impact, compat) {
   return {
     items: [
       ...handover.blocked.map((item) => ({ id: item.id, title: item.title ?? item.id, why: item.reason || "新版接不住" })),
-      ...impact.shutdown.resources.map((item) => ({ id: `${item.kind}:${item.id}`, title: item.label || `${item.kind} ${item.id}`, why: "旧服务一停它就没了" })),
+      ...impact.shutdown.resources.map((item) => ({ id: `${item.kind}:${item.id}`, title: resourceTitle(item), why: "旧服务一停它就没了" })),
     ],
   };
 }

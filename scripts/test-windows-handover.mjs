@@ -101,9 +101,9 @@ try {
     assert.match(blockersOf({ runtimeHandover: { blocked: [], target: COMPAT } }, COMPAT).unknown, /终端/, "旧服务没报随它停的东西：不当成没有");
     const found = blockersOf({
       runtimeHandover: { blocked: [{ id: "t1", title: "排队的任务", reason: "排队中" }], target: COMPAT },
-      shutdown: { resources: [{ kind: "terminal", id: "s1", label: "终端 · npm run dev" }] },
+      shutdown: { resources: [{ kind: "terminal", id: "s1", label: "PowerShell" }, { kind: "preview-trial", id: "9", label: "预览试跑 C:\\p" }] },
     }, COMPAT);
-    assert.deepEqual(found.items.map((item) => item.title), ["排队的任务", "终端 · npm run dev"]);
+    assert.deepEqual(found.items.map((item) => item.title), ["排队的任务", "终端「PowerShell」", "预览试跑 C:\\p"], "终端的会话名单看认不出，带上是终端");
     assert.match(found.items[1].why, /一停它就没了/);
     console.log("✓ 新版的接管协议从 .handover.json 读；接不住的回合和终端 / 项目服务都算要等的，答复不全按确认不了");
   }
@@ -123,13 +123,13 @@ try {
   // ── 终端开着就等；关了才按顺序换 ─────────────────────────────────────────
   {
     const r = rig("wait-then-switch");
-    r.impact = { runtimeHandover: { blocked: [], target: COMPAT }, shutdown: { resources: [{ kind: "terminal", id: "s1", label: "终端 · ping -t" }] } };
+    r.impact = { runtimeHandover: { blocked: [], target: COMPAT }, shutdown: { resources: [{ kind: "terminal", id: "s1", label: "ping -t" }] } };
     r.handover.observe(r.health.instance);
     await waitFor("问过两次", () => r.calls.filter((call) => call.startsWith("impact")).length >= 2);
     assert.equal(r.handover.state.phase, "waiting");
     assert.equal(r.handover.menu().visible, true, "等的时候菜单里有「切换到新版服务…」");
     assert.deepEqual(r.sequence(), [], "终端开着：不拿许可、不停服务");
-    assert.equal(r.handover.state.items[0].title, "终端 · ping -t");
+    assert.equal(r.handover.state.items[0].title, "终端「ping -t」");
     r.impact = { runtimeHandover: { blocked: [], target: COMPAT }, shutdown: { resources: [] } };
     await waitFor("换完", () => r.released === 1);
     assert.equal(r.handover.state.phase, "idle");
