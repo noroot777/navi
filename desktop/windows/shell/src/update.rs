@@ -7,17 +7,26 @@
 //   壳 → 控制器  { type: "updateResult", id, version?, notes?, error? }   version 为空 = 已经是最新
 //   控制器 → 壳  { type: "updateInstall", id, version }      装刚查到的那一版
 //   壳 → 控制器  { type: "updateProgress", id, percent } / { type: "updateResult", id, error }
+//   控制器 → 壳  { type: "updateCancel" }                    不下了（用户点了取消、或者控制器等过了头）
+//
+// 每一步都有头：查一次最多 30 秒，下载最多 15 分钟、最多 300 MB（安装包几十 MB，超了按坏了的源算），到了就断，
+// 跟取消一样回一条 updateResult error，控制器那边放开状态、页面回来。
 //
 // 装的时候插件把安装包交给系统（/UPDATE /P /R：不再问、装完重新打开 Navi）就让壳退出。换的只是安装目录里的壳和
 // 运行时发布源：服务跑在 %LOCALAPPDATA%\Navi\runtimes 下发布出来的那份里，安装包碰不到它，agent 也不归壳管；
 // 新壳起来后由控制器按接管流程换到新运行时（launcher/handover.mjs）。
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::AppHandle;
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::controller::Shell;
+
+const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const MAX_BYTES: u64 = 300 * 1024 * 1024;
 
 /// 这份壳带没带更新源：没配公钥的构建（开发时的便携版）不查更新，菜单里也没有「检查更新…」。
 pub fn configured(app: &AppHandle) -> bool {
@@ -33,13 +42,14 @@ pub fn configured(app: &AppHandle) -> bool {
 pub fn check(app: &AppHandle, shell: &Arc<Shell>, id: Value) {
   let (app, shell) = (app.clone(), shell.clone());
   tauri::async_runtime::spawn(async move {
-    let found = match app.updater() {
+    let found = match app.updater_builder().timeout(CHECK_TIMEOUT).build() {
       Ok(updater) => updater.check().await.map_err(|error| error.to_string()),
       Err(error) => Err(error.to_string()),
     };
     let reply = match found {
-      Ok(Some(update)) => {
+      Ok(Some(mut update)) => {
         let reply = json!({ "type": "updateResult", "id": id, "version": update.version, "notes": update.body, "current": update.current_version });
+        update.timeout = Some(DOWNLOAD_TIMEOUT);
         *shell.update.lock().unwrap() = Some(update);
         reply
       }
@@ -55,13 +65,24 @@ pub fn install(shell: &Arc<Shell>, id: Value, version: &str) {
   let Some(update) = pending else {
     return shell.send(json!({ "type": "updateResult", "id": id, "error": format!("没有待装的 {version}，先检查一次更新。") }));
   };
-  let shell = shell.clone();
-  tauri::async_runtime::spawn(async move {
+  // 上一趟还没收场就不另起一趟：只认一个在下的。
+  let mut task = shell.update_task.lock().unwrap();
+  if task.is_some() {
+    return shell.send(json!({ "type": "updateResult", "id": id, "error": "上一次更新还在下载" }));
+  }
+  let worker = shell.clone();
+  let task_id = id.clone();
+  let handle = tauri::async_runtime::spawn(async move {
+    let id = task_id;
     let (mut received, mut reported) = (0u64, -1i64);
     let progress = {
-      let (shell, id) = (shell.clone(), id.clone());
+      let (shell, id) = (worker.clone(), id.clone());
       move |chunk: usize, total: Option<u64>| {
         received += chunk as u64;
+        if received > MAX_BYTES || total.is_some_and(|total| total > MAX_BYTES) {
+          // 下一次等网络的时候这一趟就被收掉，不会走到装那一步。
+          return cancel(&shell, &format!("安装包超过 {} MB，不像是 Navi 的安装包，没下完就停了。", MAX_BYTES / 1024 / 1024));
+        }
         let Some(total) = total.filter(|total| *total > 0) else { return };
         let percent = (received * 100 / total) as i64;
         if percent >= reported + 5 {
@@ -70,9 +91,25 @@ pub fn install(shell: &Arc<Shell>, id: Value, version: &str) {
         }
       }
     };
-    // 成功时走不到下面：Windows 上插件把安装包交出去之后直接退出这个进程（控制器的 stdin 随之断开，它也退出）。
-    if let Err(error) = update.download_and_install(progress, || {}).await {
-      shell.send(json!({ "type": "updateResult", "id": id, "error": error.to_string() }));
+    let downloaded = update.download(progress, || {}).await;
+    // 下完和被取消可能撞在一起（下完之后再没有等待，abort 收不掉）：这一趟已经不归自己了就不装，取消那边回过话了。
+    if worker.update_task.lock().unwrap().take().is_none() {
+      return;
     }
+    // 装成了走不到下面：Windows 上插件把安装包交出去之后直接退出这个进程（控制器的 stdin 随之断开，它也退出）。
+    let failed = match downloaded {
+      Ok(bytes) if bytes.len() as u64 > MAX_BYTES => format!("安装包超过 {} MB，没装。", MAX_BYTES / 1024 / 1024),
+      Ok(bytes) => update.install(bytes).err().map_or_else(|| "安装包交给系统了，但这个进程没有退出".to_string(), |error| error.to_string()),
+      Err(error) => error.to_string(),
+    };
+    worker.send(json!({ "type": "updateResult", "id": id, "error": failed }));
   });
+  *task = Some((id, handle));
+}
+
+/// 收掉在下的那一趟，替它回一条 updateResult error。没有在下的就什么也不做。
+pub fn cancel(shell: &Arc<Shell>, why: &str) {
+  let Some((id, handle)) = shell.update_task.lock().unwrap().take() else { return };
+  handle.abort();
+  shell.send(json!({ "type": "updateResult", "id": id, "error": why }));
 }

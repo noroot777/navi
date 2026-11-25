@@ -29,6 +29,8 @@ pub struct Shell {
   pub menu: Mutex<Option<tray::Items>>,
   /// 最近一次查到、还没装的那一版（src/update.rs）。
   pub update: Mutex<Option<tauri_plugin_updater::Update>>,
+  /// 在下的那一趟和它的请求号：取消、超限时收掉它（src/update.rs）。
+  pub update_task: Mutex<Option<(Value, tauri::async_runtime::JoinHandle<()>)>>,
 }
 
 impl Shell {
@@ -140,6 +142,7 @@ impl Shell {
       "menu" => tray::update(app, self, &message),
       "updateCheck" => update::check(app, self, message.get("id").cloned().unwrap_or(Value::Null)),
       "updateInstall" => update::install(self, message.get("id").cloned().unwrap_or(Value::Null), &text("version")),
+      "updateCancel" => update::cancel(self, "已取消，没有装。"),
       "dialog" => {
         let (app, shell, message) = (app.clone(), self.clone(), message.clone());
         std::thread::spawn(move || {

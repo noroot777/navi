@@ -44,6 +44,7 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
   const handover = createHandover({
     cfg,
     timing: { poll: t.handover ?? 5_000 },
+    busy: () => (updates.installing ? `正在下载 Navi ${updates.installing} 的更新` : null),
     overrides: overrides.handover,
     ui: {
       log, menu: () => pushMenu(), hold: (title, detail) => showInstalling(title, detail), release: () => loadHome(),
@@ -52,10 +53,12 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
   });
   const updates = createUpdates({
     cfg, send, enabled: updatesEnabled, timing: t.updates,
+    busy: () => (handover.state.phase === "switching" ? "正在切换到新版服务" : null),
     ui: {
       log, ask: (...args) => ask(...args), alert: (...args) => alert(...args), done: () => loadHome(),
-      progress: (version, percent) => showInstalling(`正在下载 Navi ${version}`,
-        `${Number.isFinite(percent) ? `${percent}%，` : ""}下完自动安装，Navi 会自己重新打开。在跑的服务和任务都不停。`),
+      progress: (version, percent, cancel) => showInstalling(`正在下载 Navi ${version}`,
+        `${Number.isFinite(percent) ? `${percent}%，` : ""}下完自动安装，Navi 会自己重新打开。在跑的服务和任务都不停。`,
+        [{ id: "cancelUpdate", title: "取消", run: cancel }]),
     },
   });
 
@@ -74,9 +77,9 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
 
   const retry = () => ({ id: "retry", title: "重试", run: () => loadHome() });
 
-  function showInstalling(title, detail = "完成后自动回到工作区。") {
+  function showInstalling(title, detail = "完成后自动回到工作区。", actions = []) {
     resetPageConnection();
-    show({ kind: "offline", title, detail, busy: true });
+    show({ kind: "offline", title, detail, busy: true }, actions);
   }
 
   // ── 认人、起服务、载页面 ───────────────────────────────────────────────

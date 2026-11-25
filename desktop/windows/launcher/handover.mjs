@@ -6,10 +6,13 @@
 //     调度台回合、agent 进程不对等），shutdown.resources 是旧服务一停就跟着没的东西（终端、项目服务、预览）。
 //     两样有一样不空就留在旧服务上等 —— 在跑的终端命令、开着的预览都不被打断。
 //   · 都空了：攥住维护锁（别处这时不许起服务）→ 拿接管许可（POST /api/runtime-handover，holdResources：许可发下
-//     之前服务端在封口之后再看一次终端这些，有就不发）→ 给库留底 → 核对许可还有效 → 停掉旧服务（agent 的进程树
-//     保住，见 restart.mjs）→ 松开维护锁，窗口重连时 launcher 用新运行时起服务，新服务按 pid 认回 agent。
+//     之前服务端在封口之后再看一次终端这些，有就不发）→ 给库留底 → 兑现许可（核验和「不再到期」是服务端同一步，
+//     兑现后封口一直保持到旧服务退出）→ 停掉旧服务（agent 的进程树保住，见 restart.mjs）→ 松开维护锁，
+//     窗口重连时 launcher 用新运行时起服务，新服务按 pid 认回 agent。
 // 中途哪一步不成都不停旧服务，回去接着等；连着 4 次拿不到许可就不再自动试，菜单里留「重试切换到新版服务…」。
-// 用户也可以从菜单「切换到新版服务…」现在就换：把会被打断的摆给他看，他点了才不等。
+// 用户也可以从菜单「切换到新版服务…」现在就换：把会被打断的摆给他看，他点了才不等。他点的是那一刻那一份服务、
+// 那一张名单 —— 维护锁里再核一遍，换了一份服务、或者名单里多了他没见过的，就不停，把新名单再摆给他。
+// 新版运行时没发布好（发布、校验失败，或包里没有接管协议）不是「会打断谁」的问题，强制也不切：旧服务一停新版起不来。
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { publishedRuntime, samePath, storeContains } from "./config.mjs";
@@ -47,7 +50,8 @@ export function blockersOf(impact, compat) {
   };
 }
 
-export function createHandover({ cfg, ui, timing = {}, overrides = {} }) {
+/** busy：别处这会儿占着窗口那一屏（在下更新，见 updates.mjs）时说一声为什么，有就不切。 */
+export function createHandover({ cfg, ui, busy = () => null, timing = {}, overrides = {} }) {
   const deps = {
     probe: () => probeHealth(cfg.baseURL),
     publish: () => publishRuntime(cfg),
@@ -112,9 +116,12 @@ export function createHandover({ cfg, ui, timing = {}, overrides = {} }) {
     }
   }
 
-  /** { kind: "clear", instance, compat } / { kind: "wait", items } / { kind: "unknown", why } / { kind: "done" }（已经在新版上、或者服务不在了）。 */
+  /**
+   * { kind: "clear", instance, compat } / { kind: "wait", items, instance, compat } / { kind: "unknown", why, instance?, compat? }
+   * / { kind: "unprepared", why }（新版运行时没准备好，强制也不切）/ { kind: "done" }（已经在新版上、或者服务不在了）。
+   */
   async function assess() {
-    const hold = activeHold(cfg);
+    const hold = activeHold(cfg) ?? busy();
     if (hold) return { kind: "unknown", why: hold };
     const result = await deps.probe();
     if (result.kind === "down") return { kind: "done" };
@@ -122,27 +129,48 @@ export function createHandover({ cfg, ui, timing = {}, overrides = {} }) {
     if (!instance) return { kind: "unknown", why: "端口上这会儿认不出自己那份服务" };
     const target = publishedRuntime(cfg);
     if (samePath(instance.codeDir, target, cfg.windows)) return { kind: "done" };
-    let runtime;
-    try { runtime = await deps.publish(); }
-    catch (error) { return { kind: "unknown", why: `新版运行时没准备好：${error.message}` }; }
-    const compat = compatibilityOf(runtime);
-    if (!compat) return { kind: "unknown", why: "新版运行时没带接管协议，核实不了能不能无损交接" };
+    const prepared = await prepare();
+    if (prepared.why) return { kind: "unprepared", why: prepared.why };
+    const { compat } = prepared;
     const answer = await deps.impact(instance.id, compat);
-    if (answer.error) return { kind: "unknown", why: `问不到旧服务：${answer.error}` };
+    if (answer.error) return { kind: "unknown", why: `问不到旧服务：${answer.error}`, instance, compat };
     const found = blockersOf(answer.impact, compat);
-    if (found.unknown) return { kind: "unknown", why: found.unknown };
-    return found.items.length ? { kind: "wait", items: found.items } : { kind: "clear", instance, compat };
+    if (found.unknown) return { kind: "unknown", why: found.unknown, instance, compat };
+    return found.items.length ? { kind: "wait", items: found.items, instance, compat } : { kind: "clear", instance, compat };
   }
 
-  async function switchOver({ instance, compat }, { force }) {
+  /** 发布并校验新版运行时：{ compat } 或 { why }。 */
+  async function prepare() {
+    let runtime;
+    try { runtime = await deps.publish(); }
+    catch (error) { return { why: `新版运行时没准备好：${error.message}` }; }
+    const compat = compatibilityOf(runtime);
+    return compat ? { compat } : { why: "新版运行时没带接管协议，核实不了能不能无损交接" };
+  }
+
+  /**
+   * 返回这一趟的结局：{ kind: "stopped" } / { kind: "changed", why } / { kind: "widened" }（强制切换时名单或那份服务变了，
+   * 没停，交回 reconsider 重新问）。confirmed：用户确认过的那张名单的 id；null 是他对着「确认不了」点的，按全都会打断算。
+   */
+  async function switchOver({ instance, compat, confirmed = null }, { force }) {
+    const other = busy();
+    if (other) {
+      if (force) await ui.alert("没有切换", `${other}，等它完了再切换。旧服务照常在跑。`);
+      return { kind: "changed", why: other };
+    }
     setPhase("switching");
     ui.hold("正在切换到新版 Navi 服务", "在跑的任务不停，新版服务起来后接着接管它们。");
     let end = null;
     let lease = null;
     let outcome;
     try {
-      end = await deps.begin(NOTE);
-      outcome = await stopOld(instance, compat, force, (value) => { lease = value; });
+      // 强制切换前重新发布一遍：用户对着对话框想了多久都行，停旧服务前新版必须还在、还完整。
+      const prepared = force ? await prepare() : { compat };
+      if (prepared.why) outcome = { kind: "changed", why: prepared.why };
+      else {
+        end = await deps.begin(NOTE);
+        outcome = await stopOld(instance, prepared.compat, force ? confirmed : undefined, (value) => { lease = value; });
+      }
     } catch (error) {
       outcome = { kind: "changed", why: error.message };
     }
@@ -154,7 +182,14 @@ export function createHandover({ cfg, ui, timing = {}, overrides = {} }) {
       state.items = [];
       state.why = null;
       setPhase("idle");
-      return ui.release();
+      ui.release();
+      return outcome;
+    }
+    if (outcome.kind === "widened") {
+      ui.log("确认之后情况变了，没切换，重新问一遍");
+      setPhase("waiting");
+      ui.release();
+      return outcome;
     }
     ui.log(`没切换：${outcome.why}`);
     state.why = outcome.why;
@@ -164,14 +199,18 @@ export function createHandover({ cfg, ui, timing = {}, overrides = {} }) {
     ui.release();
     if (force) await ui.alert("没有切换", `${outcome.why}\n\n旧服务照常在跑，可以再试一次。`);
     if (state.phase === "waiting") schedule();
+    return outcome;
   }
 
-  /** 维护锁攥着时做：认人 → 许可 → 留底 → 核对许可 → 停。返回 { kind: "stopped", backup } 或 { kind: "changed", why }。 */
-  async function stopOld(instance, compat, force, keep) {
+  /**
+   * 维护锁攥着时做：认人 → 许可 → 留底 → 兑现许可 → 停。confirmed 是 undefined 时走许可（自动切换）；
+   * 强制切换没有许可，改成停之前最后再问一遍会打断谁，跟用户确认过的那张比。
+   */
+  async function stopOld(instance, compat, confirmed, keep) {
     const now = ours(await deps.probe(), cfg);
-    if (!now || now.id !== instance.id) return { kind: "changed", why: "端口上的服务换了一份" };
+    if (!now || now.id !== instance.id) return confirmed === undefined ? { kind: "changed", why: "端口上的服务换了一份" } : { kind: "widened" };
     let lease = null;
-    if (!force) {
+    if (confirmed === undefined) {
       const granted = await deps.handover(instance.id, { ...compat, holdResources: true });
       if (!granted.lease) return { kind: "changed", why: granted.error ?? "旧服务这会儿不能安全交接" };
       lease = granted.lease;
@@ -181,12 +220,20 @@ export function createHandover({ cfg, ui, timing = {}, overrides = {} }) {
     let backup;
     try { backup = await deps.backup(state.from ?? "old"); }
     catch (error) { return { kind: "changed", why: `切换前给库留底失败（${error.message}），旧服务没停` }; }
-    if (lease && (await deps.handover(instance.id, { check: lease })).valid !== true) {
+    if (lease && (await deps.handover(instance.id, { commit: lease })).committed !== true) {
       return { kind: "changed", why: "接管许可已经失效，旧服务没停" };
     }
+    if (confirmed && await widened(instance, compat, confirmed)) return { kind: "widened" };
     const stopped = await deps.stop({ kind: "ours", pid: instance.pid });
     if (stopped.kind !== "stopped") return { kind: "changed", why: stopped.why };
     return { kind: "stopped", backup };
+  }
+
+  /** 用户确认过的那张名单之外又多了要打断的（或者这会儿问不清了），就是变了。 */
+  async function widened(instance, compat, confirmed) {
+    const answer = await deps.impact(instance.id, compat);
+    const found = answer.error ? { unknown: answer.error } : blockersOf(answer.impact, compat);
+    return Boolean(found.unknown) || found.items.some((item) => !confirmed.has(item.id));
   }
 
   /** 菜单里那一项：现在就问一遍；能无损换就换，不能就把会被打断的摆给用户，他点了才不等。 */
@@ -197,23 +244,30 @@ export function createHandover({ cfg, ui, timing = {}, overrides = {} }) {
     try {
       state.failures = 0;
       if (state.phase === "blocked") setPhase("waiting");
-      const verdict = await assess();
-      if (verdict.kind === "clear") return void await switchOver(verdict, { force: false });
-      record(verdict);
-      if (verdict.kind === "done") return ui.release();
-      const lines = verdict.kind === "wait"
-        ? ["现在切换会打断：", ...verdict.items.slice(0, 8).map((item) => `· ${item.title} —— ${item.why}`),
-          ...(verdict.items.length > 8 ? [`…另有 ${verdict.items.length - 8} 个`] : [])]
-        : [`确认不了现在切换会不会打断谁（${verdict.why}），按会打断对待。`];
-      lines.push("", "选「继续等」的话，这些都结束后自动切换；旧服务和在跑的任务照常。");
-      // 关掉对话框按最后一个算：最后一个是不动的那个。
-      const choice = await ui.ask("现在就切换到新版服务？", lines.join("\n"), ["现在切换", "继续等"]);
-      if (choice !== 0) return;
-      const result = await deps.probe();
-      const instance = ours(result, cfg);
-      if (!instance) return void await ui.alert("没有切换", "端口上这会儿认不出自己那份服务。");
-      const runtime = await deps.publish().catch(() => null);
-      await switchOver({ instance, compat: runtime && compatibilityOf(runtime) }, { force: true });
+      for (let round = 0; round < 3; round++) {
+        const verdict = await assess();
+        if (verdict.kind === "clear") return void await switchOver(verdict, { force: false });
+        record(verdict);
+        if (verdict.kind === "done") return ui.release();
+        if (verdict.kind === "unprepared" || !verdict.instance) {
+          return void await ui.alert("现在切换不了", `${verdict.why}\n\n旧服务照常在跑。`);
+        }
+        const lines = [
+          ...(round ? ["刚才确认之后情况变了，按现在的再确认一次。", ""] : []),
+          ...(verdict.kind === "wait"
+            ? ["现在切换会打断：", ...verdict.items.slice(0, 8).map((item) => `· ${item.title} —— ${item.why}`),
+              ...(verdict.items.length > 8 ? [`…另有 ${verdict.items.length - 8} 个`] : [])]
+            : [`确认不了现在切换会不会打断谁（${verdict.why}），按会打断对待。`]),
+          "", "选「继续等」的话，这些都结束后自动切换；旧服务和在跑的任务照常。",
+        ];
+        // 关掉对话框按最后一个算：最后一个是不动的那个。
+        const choice = await ui.ask("现在就切换到新版服务？", lines.join("\n"), ["现在切换", "继续等"]);
+        if (choice !== 0) return;
+        const confirmed = verdict.kind === "wait" ? new Set(verdict.items.map((item) => item.id)) : null;
+        const outcome = await switchOver({ instance: verdict.instance, compat: verdict.compat, confirmed }, { force: true });
+        if (outcome.kind !== "widened") return;
+      }
+      await ui.alert("没有切换", "确认之后情况一直在变，这次没切换。旧服务照常在跑，可以再试一次。");
     } finally {
       state.busy = false;
       if (state.phase === "waiting" && !state.timer) schedule();
