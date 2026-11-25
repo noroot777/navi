@@ -277,7 +277,7 @@ fn shell_open(target: &str) {
   let _ = target;
 }
 
-/// 原生对话框，返回按下的是第几个按钮（关掉 = 最后一个，按「取消」算）。
+/// 原生对话框（最多三个按钮），返回按下的是第几个按钮（关掉 = 最后一个，按「取消」算：最后一个要放最稳妥的那个）。
 pub fn dialog(app: &AppHandle, message: &Value) -> i64 {
   let text = |key: &str| message.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
   let buttons: Vec<String> = message.get("buttons").and_then(Value::as_array).map(|list| {
@@ -288,7 +288,17 @@ pub fn dialog(app: &AppHandle, message: &Value) -> i64 {
     builder = builder.parent(&window);
   }
   match buttons.as_slice() {
-    [first, second, ..] => {
+    [first, second, third, ..] => {
+      let result = builder
+        .buttons(MessageDialogButtons::YesNoCancelCustom(first.clone(), second.clone(), third.clone()))
+        .blocking_show_with_result();
+      match result {
+        MessageDialogResult::Custom(label) if &label == first => 0,
+        MessageDialogResult::Custom(label) if &label == second => 1,
+        _ => 2,
+      }
+    }
+    [first, second] => {
       let result = builder.buttons(MessageDialogButtons::OkCancelCustom(first.clone(), second.clone())).blocking_show_with_result();
       match result {
         MessageDialogResult::Ok | MessageDialogResult::Yes => 0,

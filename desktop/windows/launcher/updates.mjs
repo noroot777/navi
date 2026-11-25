@@ -1,7 +1,7 @@
 // 什么时候查更新、问不问、装不装（对应 mac 的 Updater.swift；查、下、验签、交给安装包在壳里，见 shell/src/update.rs）。
 //
 // 带更新源的构建（NAVI_WIN_UPDATES=1）起来 1 分钟后查一次，之后每 6 小时一次；托盘「检查更新…」随时查。
-// 查到新版就问用户：「现在更新」「以后再说」「跳过这一版」（记在 settings.json 的 skippedVersion，自动检查不再问它，
+// 查到新版就问用户：「现在更新」「跳过这一版」「以后再说」（关掉对话框按最后一个算）（记在 settings.json 的 skippedVersion，自动检查不再问它，
 // 手动检查照样摆出来）。点了「现在更新」窗口盖上下载进度，下完壳把安装包交给系统、自己退出，安装包装完重开 Navi。
 // 换的只是壳：服务和 agent 不停，新壳起来后再按 handover.mjs 换到新运行时。
 import { readSettings, writeSettings } from "./settings.mjs";
@@ -48,8 +48,8 @@ export function createUpdates({ cfg, send, ui, enabled = process.env.NAVI_WIN_UP
         `现在是 ${cfg.version}。${notes ? `\n\n${notes.slice(0, 1200)}` : ""}`,
         "更新只换窗口这一层，几十秒就好：在跑的服务和任务都不停，装好后等它们都能交接了再切到新版服务。",
       ].join("\n\n");
-      const choice = await ui.ask(`Navi ${found.version} 可以更新了`, detail, ["现在更新", "以后再说", "跳过这一版"]);
-      if (choice === 2) writeSettings(cfg, { skippedVersion: found.version });
+      const choice = await ui.ask(`Navi ${found.version} 可以更新了`, detail, ["现在更新", "跳过这一版", "以后再说"]);
+      if (choice === 1) writeSettings(cfg, { skippedVersion: found.version });
       if (choice === 0) await install(found.version);
     } finally {
       state.busy = false;

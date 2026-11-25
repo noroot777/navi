@@ -180,19 +180,19 @@ try {
     r.impact = { runtimeHandover: { blocked: [{ id: "t9", title: "调度台", reason: "调度台当前回合不能无损接管" }], target: COMPAT }, shutdown: { resources: [] } };
     r.handover.observe(r.health.instance);
     await waitFor("在等", () => r.handover.state.items.length === 1);
-    r.answer = 0;
+    r.answer = 1;
     r.handover.reconsider();
     await waitFor("问了一次", () => r.asked.length === 1);
     assert.match(r.asked[0].detail, /调度台 —— 调度台当前回合不能无损接管/);
-    assert.deepEqual(r.asked[0].buttons, ["继续等", "现在切换"], "默认是继续等");
+    assert.deepEqual(r.asked[0].buttons, ["现在切换", "继续等"], "关掉对话框按最后一个算：继续等");
     await sleep(30);
     assert.ok(!r.calls.some((call) => call.startsWith("stop")), "选继续等：不停");
     assert.equal(r.handover.state.phase, "waiting");
-    r.answer = 1;
+    r.answer = 0;
     r.handover.reconsider();
     await waitFor("强制换完", () => r.released === 1);
     assert.deepEqual(r.sequence(), [`backup:${OLD.slice(0, 12)}`, "stop:41"], "用户点了现在切换：不要许可，照样先留底");
-    console.log("✓ 菜单「切换到新版服务…」：列出会打断的，默认继续等；点了现在切换才不等许可，照样先给库留底");
+    console.log("✓ 菜单「切换到新版服务…」：列出会打断的，关掉对话框就是继续等；点了现在切换才不等许可，照样先给库留底");
   }
 
   // ── 留底：SQLite 在线备份，WAL 里的也在，只留 5 份 ──────────────────────
@@ -245,11 +245,11 @@ try {
     await reply({ error: "网络不通" });
     await waitFor("失败原因", () => ui.alerts.includes("检查更新没成功"));
 
-    ui.answer = 2;
+    ui.answer = 1;
     updates.checkNow();
     await reply({ version: "0.0.2", notes: "修了几处" });
     await waitFor("问了", () => ui.asked.length === 1);
-    assert.deepEqual(ui.asked[0].buttons, ["现在更新", "以后再说", "跳过这一版"]);
+    assert.deepEqual(ui.asked[0].buttons, ["现在更新", "跳过这一版", "以后再说"], "关掉对话框按最后一个算：以后再说");
     assert.match(ui.asked[0].detail, /现在是 0\.0\.1。\n\n修了几处/);
     assert.match(ui.asked[0].detail, /服务和任务都不停/);
     await waitFor("记下跳过", () => readSettings(cfg).skippedVersion === "0.0.2");

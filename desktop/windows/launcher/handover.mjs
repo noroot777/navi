@@ -203,8 +203,9 @@ export function createHandover({ cfg, ui, timing = {}, overrides = {} }) {
           ...(verdict.items.length > 8 ? [`…另有 ${verdict.items.length - 8} 个`] : [])]
         : [`确认不了现在切换会不会打断谁（${verdict.why}），按会打断对待。`];
       lines.push("", "选「继续等」的话，这些都结束后自动切换；旧服务和在跑的任务照常。");
-      const choice = await ui.ask("现在就切换到新版服务？", lines.join("\n"), ["继续等", "现在切换"]);
-      if (choice !== 1) return;
+      // 关掉对话框按最后一个算：最后一个是不动的那个。
+      const choice = await ui.ask("现在就切换到新版服务？", lines.join("\n"), ["现在切换", "继续等"]);
+      if (choice !== 0) return;
       const result = await deps.probe();
       const instance = ours(result, cfg);
       if (!instance) return void await ui.alert("没有切换", "端口上这会儿认不出自己那份服务。");
