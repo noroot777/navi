@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import type { Group, Task, TaskListItem } from "@navi/shared";
 import { isUserFollowUp } from "@navi/shared";
@@ -8,7 +8,7 @@ import { RuntimeActivityPreview } from "../task-runtime/RuntimeActivityPreview.t
 import { RuntimeAutoOpen } from "../task-runtime/RuntimeAutoOpen.tsx";
 import { PlanModeChip } from "./PlanModeChip.tsx";
 import { AcceptGateWaitCard } from "../review/AcceptGateWaitCard.tsx";
-import { InspectorHost } from "../inspector/index.ts";
+import { InspectorHost, type InspectorHostControls } from "../inspector/index.ts";
 import { TaskFileLinks } from "../components/TaskFileLink.tsx";
 import { useFileView } from "../files/useFileView.ts";
 import { useFileViewTab } from "../files/fileViewTab.tsx";
@@ -58,6 +58,16 @@ import { useAddReplyQuote } from "./replyQuote.ts";
 import { useReuseInput } from "./ReuseInput.tsx";
 import { DispatchHeldLine, useDispatchHolder } from "./dispatched/DispatchHeldLine.tsx";
 
+type InspectorOpenTab = InspectorHostControls["openTab"];
+
+/** 把右侧面板的 openTab 递给面板外面、在它之前就得建好的东西（裁定那一行的「看报告和依据」）。 */
+function OpenTabBridge({ openTab, into }: { openTab: InspectorOpenTab; into: RefObject<InspectorOpenTab | null> }) {
+  useLayoutEffect(() => {
+    into.current = openTab;
+    return () => { into.current = null; };
+  }, [into, openTab]);
+  return null;
+}
 
 export function TaskDetail({
   task,
@@ -120,7 +130,12 @@ export function TaskDetail({
   const { inspectors: fileViewInspectors, reveal: fileViewReveal } = useFileViewTab(stackInspectors, fileView, TASK_FILE_TABS);
   const inspectors = usePreviewTab(fileViewInspectors, previewOpen);
   // 等你裁定时回复框顶上那一行（DisputeRulingDock）：选了一档，这一个框就成了那一步。
-  const ruling = useDisputeRulingDock({ task, reviews: free.state?.reviews, known: !!free.state, onChanged: free.setState, notify });
+  // 那一行里「看报告和依据」去审议格那一轮；openTab 只在下面 InspectorHost 的渲染里拿得到，借一个 ref 递上来。
+  const openTabRef = useRef<InspectorOpenTab | null>(null);
+  const ruling = useDisputeRulingDock({
+    task, reviews: free.state?.reviews, known: !!free.state, onChanged: free.setState, notify,
+    onOpenRound: (target) => openTabRef.current?.("review", reviewTargetRequest({ source: "free", ...target })),
+  });
   // 此刻能做什么（运行 / 停止 / 归档 / 重新排队 / 重跑上一回合 / 派验证）整份由服务端判，这里只照着画。
   const actions = useTaskActions(task.id);
   // 「上一回合崩了、任务却停在终态」的那颗重来落在说这件事的地方，带字：普通回合挂在会话里那一回合
@@ -557,6 +572,7 @@ export function TaskDetail({
                 </div>
               )}
               <RuntimeAutoOpen taskId={task.id} browser={runtime.state.browser} openTab={openTab} />
+              <OpenTabBridge openTab={openTab} into={openTabRef} />
               <RuntimeActivityPreview runtime={runtime} />
               {markDoneOpen && (
                 <ConfirmDialog

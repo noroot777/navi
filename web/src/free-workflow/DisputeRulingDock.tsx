@@ -11,6 +11,7 @@ import {
 } from "./disputeCopy.ts";
 import { openDisputeTarget, rulingContext, sameDisputeTarget, type RulingChoice, type RulingContext } from "./disputeRuling.ts";
 import { clearRulingDraft, submitRuling, useRulingDockPresence, useRulingDraft } from "./disputeRulingStore.ts";
+import { disputeWho } from "./freeReviewRounds.ts";
 
 const EXCHANGES = Array.from({ length: MAX_FREE_REVIEW_DEBATE_EXCHANGES }, (_, index) => String(index + 1));
 
@@ -27,6 +28,19 @@ function tipOf(choice: RulingChoice, context: RulingContext): string {
 function DockPresence({ taskId, context }: { taskId: string; context: RulingContext }) {
   useRulingDockPresence(taskId, context.target, !!context.blocked);
   return null;
+}
+
+/**
+ * 键上面那一句：这条驳回争的是什么——不知道争什么，几颗键就没法按。执行者写给用户的那一句（`summary`）；
+ * 老驳回没有那一句，就只说谁不认什么，不替它编。报告和两段依据在审议格那一轮里，后面那颗点过去。
+ */
+function RulingLead({ context, onOpen }: { context: RulingContext; onOpen?: (target: FreeReviewDisputeTarget) => void }) {
+  return (
+    <p className="ruling-lead">
+      <span>{context.dispute.summary ?? disputeWho(context.round)}</span>
+      {onOpen && <button type="button" onClick={() => onOpen(context.target)}>看报告和依据</button>}
+    </p>
+  );
 }
 
 function ExchangesPicker({ value, busy, onChange, onCancel }: {
@@ -51,7 +65,8 @@ function ExchangesPicker({ value, busy, onChange, onCancel }: {
 }
 
 /**
- * 有一条驳回等你裁定时，回复框顶上多出的那一行：几种下一步，纯文字的切换键。点一颗，回复框就变成
+ * 有一条驳回等你裁定时，回复框顶上多出的那一行：先一句这条驳回争的是什么（`RulingLead`），下面是
+ * 几种下一步，纯文字的切换键。点一颗，回复框就变成
  * 那一步——要交代的话写在框里（选填），发送键写着这一按的名字；再点同一颗、或按 Esc，回到平常的回复。
  * 先选一档、再按写着动作的键，这两步就是确认，不弹确认框（用户 2026-11-15）。
  *
@@ -68,13 +83,15 @@ function ExchangesPicker({ value, busy, onChange, onCancel }: {
  * 选中的那一档和写的话连同它针对的那一条驳回一起存
  * （`disputeRulingStore`），驳回换了一条就跟着旧那条走掉。
  */
-export function useDisputeRulingDock({ task, reviews, known, onChanged, notify }: {
+export function useDisputeRulingDock({ task, reviews, known, onChanged, notify, onOpenRound }: {
   task: Pick<TaskListItem, "id" | "status" | "stage" | "archived" | "handoff">;
   reviews: readonly FreeReviewRun[] | null | undefined;
   /** 审查状态已经读到。 */
   known: boolean;
   onChanged: (state: FreeWorkflowApiState) => void;
   notify: (message: string) => void;
+  /** 在审议格里打开那一轮（报告 + 驳回的两段依据）；不给就不出那颗键。 */
+  onOpenRound?: (target: FreeReviewDisputeTarget) => void;
 }): ReplyOverride | undefined {
   // 交出去到回来之间（`busy`）草稿不收写入：框只读、键按不动、哪儿都引不进来，见 disputeRulingStore。
   const { draft, update, submitting: busy } = useRulingDraft(task.id, openDisputeTarget(reviews), known);
@@ -125,6 +142,7 @@ export function useDisputeRulingDock({ task, reviews, known, onChanged, notify }
   const head = (
     <ReplyDockRow
       label="怎么裁定这条驳回"
+      lead={<RulingLead context={context} onOpen={onOpenRound} />}
       choices={context.choices.map((item) => ({ id: item, label: choiceLabel(item), tip: tipOf(item, context), held }))}
       pressed={choice}
       onPick={pick}
