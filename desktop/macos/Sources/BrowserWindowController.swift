@@ -16,6 +16,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   private var healthTimer: Timer?
   private var guardTimer: Timer?
   private var guardProbing = false
+  private var unreachableProbes = 0
   /// 页面因为端口换了人被撤下时停在哪个路由，自己那份回来后回到那里。
   private var resumeURL: URL?
   /// 页面还没载进来时收到的 navi:// 链接要去的路由（DeepLink），下一次载页面时直接载到那里。
@@ -298,29 +299,47 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   /// 实例号挡下（见 `bind`），但页面会一直报错。所以页面在的时候还要定时认：不是自己那份了就撤掉页面、说清楚。
   private func startInstanceGuard() {
     guard NaviConfig.isLocal, guardTimer == nil else { return }
-    guardTimer = Timer.scheduledTimer(withTimeInterval: Self.instanceGuardInterval, repeats: true) { [weak self] _ in
-      self?.checkInstance()
+    guardTimer = Timer.scheduledTimer(withTimeInterval: Self.instanceGuardInterval, repeats: true) { [weak self] timer in
+      self?.checkInstance(timer)
     }
   }
 
   func stopInstanceGuard() {
     guardTimer?.invalidate()
     guardTimer = nil
+    guardProbing = false
+    unreachableProbes = 0
   }
 
-  private func checkInstance() {
-    guard !guardProbing, guardTimer != nil else { return }
+  private func checkInstance(_ timer: Timer) {
+    guard !guardProbing, guardTimer === timer else { return }
     guardProbing = true
     NaviHealth.probe(NaviConfig.windowHealthURL) { probe in
       DispatchQueue.main.async { [weak self] in
-        guard let self else { return }
+        guard let self, self.guardTimer === timer else { return }
         self.guardProbing = false
-        guard self.guardTimer != nil else { return }
+        if case .unreachable = probe {
+          // 服务忙时连续几秒答不出探活，一个超时不能证明端口换了人。
+          self.unreachableProbes += 1
+          if self.unreachableProbes < 3 { return }
+        }
         guard let instance = NaviHealth.ours(probe) else { return self.instanceLost() }
+        self.unreachableProbes = 0
         // 还是自己那份，但服务重起过（实例号换了）：页面手上的旧实例号会被拒，换上新的重载一遍。
-        if instance.id != self.boundInstance { self.bind(instance) { self.webView.reload() } }
+        if instance.id != self.boundInstance {
+          self.bind(instance) {
+            if self.guardTimer === timer { self.webView.reload() }
+          }
+        }
       }
     }
+  }
+
+  func navigationProbeFailed(_ probe: NaviProbe) {
+    // 导航在身份未确认时已取消。已载入的页面继续交给定时探活，避免一次超时就清空整页。
+    if case .unreachable = probe, guardTimer != nil,
+       let current = webView.url, NaviConfig.isSameOrigin(current) { return }
+    instanceLost()
   }
 
   /// 端口上不再是认过的那一份：页面连同它的轮询、SSE 一起撤掉（一个请求都不再发给新来的那份），

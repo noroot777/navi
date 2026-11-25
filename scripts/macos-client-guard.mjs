@@ -6,7 +6,7 @@
 //   · 4317 换人时换上一份**旧版 ash**：不认实例号，什么请求来了都照办 —— 第 3 轮审查 F1 的那个口子。
 // 换人 = 自己那份停了（窗口端口不再有人听）、旧版 ash 接手 4317。页面每 30ms 发一次写请求：从头到尾
 // 一条都不许落到 4317 上（旧版 ash 收到就会执行）；刷新那一下拦住、什么都不点也会被定时认人撤下；
-// 自家服务原地重起（实例号换了）时换上新的接着用；换回来回到原路由。
+// 短时探活超时保留原文档；持续不响应走恢复流程。自家服务原地重起时换上新的实例号并回到原路由。
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -15,6 +15,9 @@ import { once } from "node:events";
 export async function testInstanceGuard({ binary, env, port, windowPort, data, runtime, children, until }) {
   let occupant = "ours";
   let generation = 1;
+  let stallsLeft = 0;
+  let completedStalls = 0;
+  let healthReplies = 0;
   const idOf = () => occupant === "ours" ? `ours-${generation}` : "foreign-1";
   const requests = [];
   const health = () => JSON.stringify({ ok: true, pid: occupant === "ours" ? 1 : 4444, instance: occupant === "ours"
@@ -30,6 +33,12 @@ export async function testInstanceGuard({ binary, env, port, windowPort, data, r
   };
   const onWindow = (request, response) => {
     if (request.url === "/api/health") {
+      if (stallsLeft > 0) {
+        stallsLeft -= 1;
+        response.once("close", () => { completedStalls += 1; });
+        return;
+      }
+      healthReplies += 1;
       response.setHeader("Content-Type", "application/json");
       response.end(health());
       return;
@@ -60,9 +69,10 @@ export async function testInstanceGuard({ binary, env, port, windowPort, data, r
   let window = await listen(windowPort, onWindow);
   try {
     const writes = (id) => requests.filter((r) => r.url === "/api/write" && r.id === id);
-    for (const mode of ["reload", "watch"]) {
+    for (const mode of ["reload", "watch", "unresponsive"]) {
       occupant = "ours";
       generation += 1;
+      completedStalls = 0;
       requests.length = 0;
       const guard = spawn(binary, ["guard", mode], { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
       children.add(guard);
@@ -75,6 +85,17 @@ export async function testInstanceGuard({ binary, env, port, windowPort, data, r
       const bound = idOf();
       await until(() => writes(bound).length > 2, `${mode}: the page never wrote`);
       assert.deepEqual([...new Set(requests.map((r) => r.cookie))], [bound], `${mode}: every request carries the confirmed instance`);
+      if (mode !== "unresponsive") {
+        const misses = mode === "reload" ? 1 : 2;
+        stallsLeft = misses;
+        const repliesBefore = healthReplies;
+        if (mode === "reload") guard.stdin.write("STALL\n");
+        await until(() => completedStalls === misses && (mode === "reload" || healthReplies > repliesBefore),
+          `${mode}: the health requests did not time out and recover`);
+        guard.stdin.write("RECOVERED\n");
+        await until(() => out.includes("RETAINED"), `${mode}: the probe did not report its document: ${out}`);
+        assert.match(out, /RETAINED original document\n/, `${mode}: a short timeout preserves the live document`);
+      }
       if (mode === "watch") {
         // 自家服务原地重起：实例号换了，旧的被拒，定时认人换上新的，之后的写请求照常执行。
         generation += 1;
@@ -82,19 +103,25 @@ export async function testInstanceGuard({ binary, env, port, windowPort, data, r
         await until(() => writes(restarted).some((r) => r.cookie === restarted && r.accepted),
           `${mode}: the page never rebound to our restarted service`, 20000);
       }
-      // 自己那份停了：窗口端口没人听，旧版 ash 接手 4317。
-      await close(window);
-      window = null;
+      // 4317 被旧版 ash 接手。窗口端口拒绝连接，或一直不回探活。
+      if (mode === "unresponsive") {
+        stallsLeft = Infinity;
+      } else {
+        await close(window);
+        window = null;
+      }
       occupant = "foreign";
       guard.stdin.write("FLIPPED\n");
       await until(() => out.includes("BLANKED"), `guard probe (${mode}) never covered the page: ${out}`, 20000);
       assert.match(out, /BLANKED url=about:blank content=\|\|\n/,
         `${mode}: the whole page is taken down, nothing of the other Navi shown: ${out}`);
+      if (mode === "unresponsive") assert.ok(completedStalls >= 3, "only sustained timeouts take down the page");
       assert.deepEqual(requests.filter((r) => r.on === "base"), [],
         `${mode}: nothing the window sent ever reached 4317, where an old Navi would have executed it`);
       generation += 1;
       occupant = "ours";
-      window = await listen(windowPort, onWindow);
+      stallsLeft = 0;
+      window ??= await listen(windowPort, onWindow);
       guard.stdin.write("BACK\n");
       await until(() => out.includes("RESTORED"), `guard probe (${mode}) never came back: ${out}`, 20000);
       const back = idOf();

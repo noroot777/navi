@@ -25,12 +25,12 @@ extension BrowserWindowController: WKNavigationDelegate, WKUIDelegate, WKDownloa
       return
     }
     if NaviConfig.isSameOrigin(url) {
-      // 本机地址：端口上可能已经换了人，放行之前认一次（见 BrowserWindowController 的 instanceLost）。
+      // 本机地址：端口上可能已经换了人，放行之前认一次。
       NaviHealth.probe(NaviConfig.windowHealthURL) { probe in
         DispatchQueue.main.async { [weak self] in
           guard let self, let instance = NaviHealth.ours(probe) else {
             decisionHandler(.cancel)
-            self?.instanceLost()
+            self?.navigationProbeFailed(probe)
             return
           }
           // 自己那份重起过就先换上新的实例号，否则这一下载回来的是一张 409。
