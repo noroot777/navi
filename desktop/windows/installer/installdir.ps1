@@ -20,9 +20,16 @@ function Test-Under([string]$Path, [string]$Root) {
 }
 
 # 进程表查不出来不能当成「没人在用」：抛出去，退出码非 0。
+# 调起这个脚本的那一串（自己、安装包或卸载器）不算：卸载器跑在安装目录里（`uninstall.exe _?=<安装目录>`，从「设置」
+# 卸载时是复制到临时目录的 Au_.exe，命令行里同样带着安装目录），不排除它就永远认为有人在用。
 function Get-Users([string]$Root) {
-  @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
-    $_.ProcessId -ne $PID -and ((Test-Under $_.ExecutablePath $Root) -or ($_.CommandLine -and $_.CommandLine.IndexOf($Root, [StringComparison]::OrdinalIgnoreCase) -ge 0))
+  $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+  $parent = @{}
+  foreach ($process in $all) { $parent[[int]$process.ProcessId] = [int]$process.ParentProcessId }
+  $self = @(); $id = [int]$PID
+  while ($parent.ContainsKey($id) -and -not ($self -contains $id)) { $self += $id; $id = $parent[$id] }
+  @($all | Where-Object {
+    -not ($self -contains [int]$_.ProcessId) -and ((Test-Under $_.ExecutablePath $Root) -or ($_.CommandLine -and $_.CommandLine.IndexOf($Root, [StringComparison]::OrdinalIgnoreCase) -ge 0))
   })
 }
 
