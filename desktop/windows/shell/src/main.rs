@@ -11,6 +11,7 @@ mod paths;
 #[cfg(windows)]
 mod spawn;
 mod tray;
+mod update;
 mod window;
 
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use controller::Shell;
 use tauri::Manager;
 
 fn main() {
+  apply_rehearsal_env();
   let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
   if args.first().is_some_and(|arg| arg == "--spawn-detached") {
     #[cfg(windows)]
@@ -44,6 +46,7 @@ fn main() {
       }
     }))
     .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_updater::Builder::new().build())
     .manage(shell.clone())
     .invoke_handler(tauri::generate_handler![window::shell_screen, window::shell_action, window::page_report])
     .setup(move |app| {
@@ -64,6 +67,19 @@ fn main() {
       handle.state::<Arc<Shell>>().quit();
     }
   });
+}
+
+/// 演练构建（desktop/windows/README.md「本地演练」）编进来的一组环境变量：LOCALAPPDATA、NAVI_URL 这些指到临时位置。
+/// 写在 exe 里而不是靠启动它的那一方传：更新装完后是安装包把新壳重新打开的，它不会带着演练时的环境。
+/// 正式构建没有这一组，这里什么都不做。
+fn apply_rehearsal_env() {
+  let Some(raw) = option_env!("NAVI_WIN_REHEARSAL_ENV") else { return };
+  let Ok(serde_json::Value::Object(vars)) = serde_json::from_str::<serde_json::Value>(raw) else { return };
+  for (key, value) in vars {
+    if let Some(value) = value.as_str() {
+      std::env::set_var(key, value);
+    }
+  }
 }
 
 fn is_link(arg: &str) -> bool {

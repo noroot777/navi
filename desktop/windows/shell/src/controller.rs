@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-use crate::{paths, tray, window};
+use crate::{paths, tray, update, window};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -27,6 +27,8 @@ pub struct Shell {
   pub screen: Mutex<Value>,
   pub page: Mutex<window::Page>,
   pub menu: Mutex<Option<tray::Items>>,
+  /// 最近一次查到、还没装的那一版（src/update.rs）。
+  pub update: Mutex<Option<tauri_plugin_updater::Update>>,
 }
 
 impl Shell {
@@ -52,6 +54,7 @@ impl Shell {
       .arg(&script)
       .env("NAVI_WIN_SHELL", std::env::current_exe().unwrap_or_default())
       .env("NAVI_WIN_VERSION", app.package_info().version.to_string())
+      .env("NAVI_WIN_UPDATES", if update::configured(app) { "1" } else { "0" })
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped());
@@ -134,6 +137,8 @@ impl Shell {
       "openExternal" => window::open_external(&text("url")),
       "openPath" => window::open_path(&text("path")),
       "menu" => tray::update(app, self, &message),
+      "updateCheck" => update::check(app, self, message.get("id").cloned().unwrap_or(Value::Null)),
+      "updateInstall" => update::install(self, message.get("id").cloned().unwrap_or(Value::Null), &text("version")),
       "dialog" => {
         let (app, shell, message) = (app.clone(), self.clone(), message.clone());
         std::thread::spawn(move || {

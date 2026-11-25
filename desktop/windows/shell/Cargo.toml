@@ -18,6 +18,7 @@ tauri-build = { version = "=2.7.6", features = [] }
 tauri = { version = "=2.12.7", features = ["tray-icon", "custom-protocol"] }
 tauri-plugin-single-instance = "=2.5.5"
 tauri-plugin-dialog = "=2.8.4"
+tauri-plugin-updater = "=2.14.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
