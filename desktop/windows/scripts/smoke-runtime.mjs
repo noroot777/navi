@@ -34,112 +34,22 @@ const stripAnsi = (text) => text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "
 
 export async function smokeRuntime(source, { work = tmpdir() } = {}) {
   assert.equal(process.platform, "win32", "这份冒烟要在 Windows 上跑");
+  // 容器一拿到，后面的每一步（连建临时目录在内）都在同一段收尾里：哪一步失败，Job 助手都会被放开，进程能退出。
+  // exercise 把建出来的 temporary / server 随手记进 held，收尾按它停、按它删。
   const job = await claimProcessJob();
-  const stale = reclaimScratch(work, "navi-win-smoke-");
-  for (const directory of stale.removed) step(`收掉上一次被打断的冒烟留下的 ${directory}`);
-  for (const line of stale.failed) console.warn(`⚠︎ 上一次冒烟留下的目录删不掉，下次再试：${line}`);
-  const temporary = claimScratch(work, "navi-win-smoke-");
-  const env = { LOCALAPPDATA: join(temporary, "LocalAppData") };
-  let server;
+  const held = {};
   let failure;
+  let problems = [];
   try {
-    // ── 发布：暂存 → 改名，已发布的不覆盖，清单不过不用 ──────────────────────────
-    const store = runtimeStore(env);
-    console.log("▶ 发布运行时（整份拷进临时 LOCALAPPDATA 再校验，上万个文件，慢的机器上要好几分钟）");
-    const runtime = installRuntime(source, store, { activate: false });
-    assert.equal(resolve(runtime, ".."), resolve(store));
-    assert.match(basename(runtime), /^[a-f0-9]{64}$/);
-    assert.equal(installRuntime(source, store, { activate: false }), runtime, "同一份运行时再发布一次应原样复用");
-    assert.deepEqual(readdirSync(store).filter((name) => name.startsWith(".installing-")), []);
-    const { problems, native } = scanWindowsBinaries(runtime);
-    assert.deepEqual(problems, []);
-    step(`发布到 ${runtime}（${native.length} 个原生文件都是 x64 PE，没有链接；重复发布原样复用）`);
-
-    // ── 自带 node：架构、版本、文件库读写、ConPTY ────────────────────────────────
-    const node = join(runtime, "node", "node.exe");
-    const database = join(temporary, "probe.db");
-    const probe = spawnSync(node, ["--input-type=module", "-e", `
-      import assert from "node:assert/strict";
-      import { DatabaseSync } from "node:sqlite";
-      import pty from "node-pty";
-      import { NAVI_MCP_SERVER_NAME } from "@navi/shared/mcp";
-      assert.equal(process.arch, "x64");
-      assert.ok(NAVI_MCP_SERVER_NAME);
-      let db = new DatabaseSync(${JSON.stringify(database)});
-      db.exec("create table probe (value text)");
-      db.prepare("insert into probe values (?)").run("NAVI_SQLITE_OK");
-      db.close();
-      db = new DatabaseSync(${JSON.stringify(database)});
-      assert.equal(db.prepare("select value from probe").get().value, "NAVI_SQLITE_OK");
-      db.close();
-      const output = await new Promise((resolve, reject) => {
-        let output = "";
-        const child = pty.spawn("cmd.exe", ["/d", "/c", "echo NAVI_%COMPUTERNAME:~0,0%PTY_OK"], { name: "xterm", cols: 80, rows: 24, cwd: process.cwd(), env: process.env, useConpty: true });
-        const timer = setTimeout(() => { child.kill(); reject(new Error("pty timeout: " + output)); }, 15000);
-        child.onData((data) => { output += data; });
-        child.onExit(({ exitCode }) => { clearTimeout(timer); exitCode === 0 && output.includes("NAVI_PTY_OK") ? resolve(output) : reject(new Error(exitCode + ": " + output)); });
-      });
-      console.log(process.version, "sqlite+conpty");
-      process.exit(0);
-    `], { cwd: join(runtime, "server"), encoding: "utf8", timeout: 60_000, windowsHide: true });
-    assert.equal(probe.status, 0, `${probe.error ?? ""}\n${probe.stdout}${probe.stderr}`);
-    step(`自带 node ${probe.stdout.trim()}：x64、@navi/shared 经转发包加载、sqlite 写入后重开读回、ConPTY 跑 cmd 读到输出`);
-
-    // ── server：临时数据根、非 4317 端口 ───────────────────────────────────────
-    const home = join(temporary, "home");
-    for (const folder of ["AppData/Roaming", "project"]) mkdirSync(join(home, folder), { recursive: true });
-    const data = dataRoot(env);
-    server = await startServer({ node, runtime, dataDir: data, env: {
-      ...env, USERPROFILE: home, HOME: home, APPDATA: join(home, "AppData/Roaming"),
-    } });
-    assert.notEqual(server.port, 4317);
-    assert.ok(samePath(server.health.instance?.dataDir ?? temporary, data), `health 报的数据根不是冒烟给的那一份：${JSON.stringify(server.health.instance)}`);
-    assert.ok(samePath(server.health.instance?.codeDir ?? temporary, runtime), `health 报的代码根不是发布出来的那一份：${JSON.stringify(server.health.instance)}`);
-    assert.ok(existsSync(join(data, "navi.db")), "数据根里没有 navi.db");
-    step(`server pid ${server.child.pid} 在 :${server.port} 报健康，代码根是发布目录，数据根 ${data}`);
-
-    const base = `http://127.0.0.1:${server.port}/api`;
-    const call = async (path, init = {}) => {
-      const response = await fetch(`${base}${path}`, { ...init, headers: { "content-type": "application/json", ...init.headers }, signal: AbortSignal.timeout(20_000) });
-      const text = await response.text();
-      return { status: response.status, body: text ? JSON.parse(text) : null };
-    };
-    const created = await call("/projects", { method: "POST", body: JSON.stringify({ name: "smoke", repoPath: join(home, "project") }) });
-    assert.ok(created.status < 300, `建项目失败：${created.status} ${JSON.stringify(created.body)}`);
-    const projectId = created.body.id;
-    const listed = await call("/projects");
-    assert.ok(listed.body.some((project) => project.id === projectId), "建好的项目读不回来");
-    step(`经 API 写入项目 ${projectId} 并读回`);
-
-    // ── 终端：server 自己的 ConPTY 路径（隔离 worker 里起 shell），敲一条命令读输出 ─────────
-    const terminal = await call(`/projects/${projectId}/terminal/sessions`, { method: "POST", body: JSON.stringify({ cols: 120, rows: 30 }) });
-    assert.equal(terminal.status, 201, `开终端失败：${JSON.stringify(terminal.body)}`);
-    const sessionPath = `/projects/${projectId}/terminal/sessions/${terminal.body.id}`;
-    await readTerminal(`${base}${sessionPath}/events?after=0`, async () => {
-      // 回显里是带引号的表达式，只有真执行了才会出现拼起来的 NAVI_TERMINAL_OK。
-      const input = await call(`${sessionPath}/input`, { method: "POST", body: JSON.stringify({ data: "echo ('NAVI_' + 'TERMINAL_OK')\r" }) });
-      assert.equal(input.status, 204);
-    });
-    const closed = await call(sessionPath, { method: "DELETE" });
-    assert.equal(closed.status, 204, `结束终端会话失败：${JSON.stringify(closed.body)}`);
-    step(`终端会话 ${terminal.body.id}（${terminal.body.shell ?? "shell"}）跑出了 NAVI_TERMINAL_OK，结束会话确认整组退出`);
-
-    // ── web ──────────────────────────────────────────────────────────────────────
-    const page = await fetch(`http://127.0.0.1:${server.port}/`, { signal: AbortSignal.timeout(20_000) });
-    const html = await page.text();
-    assert.equal(page.status, 200);
-    const asset = html.match(/(?:src|href)="(\/assets\/[^"]+\.js)"/)?.[1];
-    assert.ok(asset, "页面里没有脚本资源");
-    const script = await fetch(`http://127.0.0.1:${server.port}${asset}`, { signal: AbortSignal.timeout(20_000) });
-    assert.equal(script.status, 200);
-    assert.ok((await script.arrayBuffer()).byteLength > 1000);
-    step(`web 页面与 ${asset} 都取得到`);
-  } catch (error) {
-    failure = error;
-    if (server) console.error(`--- server 输出 ---\n${server.output().slice(-4000)}`);
+    try { await exercise(source, work, held); }
+    catch (error) {
+      failure = error;
+      if (held.server) console.error(`--- server 输出 ---\n${held.server.output().slice(-4000)}`);
+    }
+    problems = await cleanUp({ ...held, job });
+  } finally {
+    job.release();
   }
-  const problems = await cleanUp({ server, job, temporary });
-  job.release();
   if (failure) {
     if (problems.length) console.error(`收尾也有问题：\n  ${problems.join("\n  ")}`);
     throw failure;
@@ -147,6 +57,105 @@ export async function smokeRuntime(source, { work = tmpdir() } = {}) {
   if (problems.length) throw new Error(`收尾没停干净：\n  ${problems.join("\n  ")}`);
   step("Job 里除冒烟自己外一个进程不剩，没有进程跑在临时目录里，临时目录已整个删掉");
   console.log("WINDOWS_RUNTIME_SMOKE_OK");
+}
+
+async function exercise(source, work, held) {
+  const stale = reclaimScratch(work, "navi-win-smoke-");
+  for (const directory of stale.removed) step(`收掉上一次被打断的冒烟留下的 ${directory}`);
+  for (const line of stale.failed) console.warn(`⚠︎ 上一次冒烟留下的目录删不掉，下次再试：${line}`);
+  const temporary = held.temporary = claimScratch(work, "navi-win-smoke-");
+  const env = { LOCALAPPDATA: join(temporary, "LocalAppData") };
+  // ── 发布：暂存 → 改名，已发布的不覆盖，清单不过不用 ──────────────────────────
+  const store = runtimeStore(env);
+  console.log("▶ 发布运行时（整份拷进临时 LOCALAPPDATA 再校验，上万个文件，慢的机器上要好几分钟）");
+  const runtime = installRuntime(source, store, { activate: false });
+  assert.equal(resolve(runtime, ".."), resolve(store));
+  assert.match(basename(runtime), /^[a-f0-9]{64}$/);
+  assert.equal(installRuntime(source, store, { activate: false }), runtime, "同一份运行时再发布一次应原样复用");
+  assert.deepEqual(readdirSync(store).filter((name) => name.startsWith(".installing-")), []);
+  const { problems, native } = scanWindowsBinaries(runtime);
+  assert.deepEqual(problems, []);
+  step(`发布到 ${runtime}（${native.length} 个原生文件都是 x64 PE，没有链接；重复发布原样复用）`);
+
+  // ── 自带 node：架构、版本、文件库读写、ConPTY ────────────────────────────────
+  const node = join(runtime, "node", "node.exe");
+  const database = join(temporary, "probe.db");
+  const probe = spawnSync(node, ["--input-type=module", "-e", `
+    import assert from "node:assert/strict";
+    import { DatabaseSync } from "node:sqlite";
+    import pty from "node-pty";
+    import { NAVI_MCP_SERVER_NAME } from "@navi/shared/mcp";
+    assert.equal(process.arch, "x64");
+    assert.ok(NAVI_MCP_SERVER_NAME);
+    let db = new DatabaseSync(${JSON.stringify(database)});
+    db.exec("create table probe (value text)");
+    db.prepare("insert into probe values (?)").run("NAVI_SQLITE_OK");
+    db.close();
+    db = new DatabaseSync(${JSON.stringify(database)});
+    assert.equal(db.prepare("select value from probe").get().value, "NAVI_SQLITE_OK");
+    db.close();
+    const output = await new Promise((resolve, reject) => {
+      let output = "";
+      const child = pty.spawn("cmd.exe", ["/d", "/c", "echo NAVI_%COMPUTERNAME:~0,0%PTY_OK"], { name: "xterm", cols: 80, rows: 24, cwd: process.cwd(), env: process.env, useConpty: true });
+      const timer = setTimeout(() => { child.kill(); reject(new Error("pty timeout: " + output)); }, 15000);
+      child.onData((data) => { output += data; });
+      child.onExit(({ exitCode }) => { clearTimeout(timer); exitCode === 0 && output.includes("NAVI_PTY_OK") ? resolve(output) : reject(new Error(exitCode + ": " + output)); });
+    });
+    console.log(process.version, "sqlite+conpty");
+    process.exit(0);
+  `], { cwd: join(runtime, "server"), encoding: "utf8", timeout: 60_000, windowsHide: true });
+  assert.equal(probe.status, 0, `${probe.error ?? ""}\n${probe.stdout}${probe.stderr}`);
+  step(`自带 node ${probe.stdout.trim()}：x64、@navi/shared 经转发包加载、sqlite 写入后重开读回、ConPTY 跑 cmd 读到输出`);
+
+  // ── server：临时数据根、非 4317 端口 ───────────────────────────────────────
+  const home = join(temporary, "home");
+  for (const folder of ["AppData/Roaming", "project"]) mkdirSync(join(home, folder), { recursive: true });
+  const data = dataRoot(env);
+  const server = held.server = await startServer({ node, runtime, dataDir: data, env: {
+    ...env, USERPROFILE: home, HOME: home, APPDATA: join(home, "AppData/Roaming"),
+  } });
+  assert.notEqual(server.port, 4317);
+  assert.ok(samePath(server.health.instance?.dataDir ?? temporary, data), `health 报的数据根不是冒烟给的那一份：${JSON.stringify(server.health.instance)}`);
+  assert.ok(samePath(server.health.instance?.codeDir ?? temporary, runtime), `health 报的代码根不是发布出来的那一份：${JSON.stringify(server.health.instance)}`);
+  assert.ok(existsSync(join(data, "navi.db")), "数据根里没有 navi.db");
+  step(`server pid ${server.child.pid} 在 :${server.port} 报健康，代码根是发布目录，数据根 ${data}`);
+
+  const base = `http://127.0.0.1:${server.port}/api`;
+  const call = async (path, init = {}) => {
+    const response = await fetch(`${base}${path}`, { ...init, headers: { "content-type": "application/json", ...init.headers }, signal: AbortSignal.timeout(20_000) });
+    const text = await response.text();
+    return { status: response.status, body: text ? JSON.parse(text) : null };
+  };
+  const created = await call("/projects", { method: "POST", body: JSON.stringify({ name: "smoke", repoPath: join(home, "project") }) });
+  assert.ok(created.status < 300, `建项目失败：${created.status} ${JSON.stringify(created.body)}`);
+  const projectId = created.body.id;
+  const listed = await call("/projects");
+  assert.ok(listed.body.some((project) => project.id === projectId), "建好的项目读不回来");
+  step(`经 API 写入项目 ${projectId} 并读回`);
+
+  // ── 终端：server 自己的 ConPTY 路径（隔离 worker 里起 shell），敲一条命令读输出 ─────────
+  const terminal = await call(`/projects/${projectId}/terminal/sessions`, { method: "POST", body: JSON.stringify({ cols: 120, rows: 30 }) });
+  assert.equal(terminal.status, 201, `开终端失败：${JSON.stringify(terminal.body)}`);
+  const sessionPath = `/projects/${projectId}/terminal/sessions/${terminal.body.id}`;
+  await readTerminal(`${base}${sessionPath}/events?after=0`, async () => {
+    // 回显里是带引号的表达式，只有真执行了才会出现拼起来的 NAVI_TERMINAL_OK。
+    const input = await call(`${sessionPath}/input`, { method: "POST", body: JSON.stringify({ data: "echo ('NAVI_' + 'TERMINAL_OK')\r" }) });
+    assert.equal(input.status, 204);
+  });
+  const closed = await call(sessionPath, { method: "DELETE" });
+  assert.equal(closed.status, 204, `结束终端会话失败：${JSON.stringify(closed.body)}`);
+  step(`终端会话 ${terminal.body.id}（${terminal.body.shell ?? "shell"}）跑出了 NAVI_TERMINAL_OK，结束会话确认整组退出`);
+
+  // ── web ──────────────────────────────────────────────────────────────────────
+  const page = await fetch(`http://127.0.0.1:${server.port}/`, { signal: AbortSignal.timeout(20_000) });
+  const html = await page.text();
+  assert.equal(page.status, 200);
+  const asset = html.match(/(?:src|href)="(\/assets\/[^"]+\.js)"/)?.[1];
+  assert.ok(asset, "页面里没有脚本资源");
+  const script = await fetch(`http://127.0.0.1:${server.port}${asset}`, { signal: AbortSignal.timeout(20_000) });
+  assert.equal(script.status, 200);
+  assert.ok((await script.arrayBuffer()).byteLength > 1000);
+  step(`web 页面与 ${asset} 都取得到`);
 }
 
 async function readTerminal(url, afterOpen) {
@@ -202,6 +211,8 @@ async function cleanUp({ server, job, temporary }) {
   };
   await attempt("停 server", () => server?.stop());
   await attempt("回收 Job", () => job.reap());
+  // 临时目录还没建出来就失败了：没有按路径可核的东西。
+  if (!temporary) return problems;
   await attempt("核对残留", async () => {
     const escaped = processesUnder(temporary);
     if (!escaped.length) return;

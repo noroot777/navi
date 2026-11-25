@@ -118,6 +118,10 @@ try {
   writeFileSync(join(binaries, "nested/arm.dll"), pe(0xaa64));
   writeFileSync(join(binaries, "pty.node"), Buffer.from([0xcf, 0xfa, 0xed, 0xfe, 7, 0, 0, 1]));
   writeFileSync(join(binaries, "spawn-helper"), Buffer.from([0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2]));
+  // fat 头的另外三种：FAT_MAGIC_64，以及反字节序写的 FAT_CIGAM / FAT_CIGAM_64（架构个数也是小端）。
+  writeFileSync(join(binaries, "fat64"), Buffer.from([0xca, 0xfe, 0xba, 0xbf, 0, 0, 0, 2]));
+  writeFileSync(join(binaries, "fat-cigam"), Buffer.from([0xbe, 0xba, 0xfe, 0xca, 2, 0, 0, 0]));
+  writeFileSync(join(binaries, "fat-cigam64"), Buffer.from([0xbf, 0xba, 0xfe, 0xca, 2, 0, 0, 0]));
   writeFileSync(join(binaries, "linux.so"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]));
   writeFileSync(join(binaries, "Fake.class"), Buffer.from([0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 52]));
   writeFileSync(join(binaries, "text.node"), "not a binary");
@@ -127,7 +131,7 @@ try {
   const scan = scanWindowsBinaries(binaries);
   assert.deepEqual(scan.native, ["ok.node"]);
   assert.deepEqual(scan.problems.sort(), [
-    ...(canLink ? ["alias.node：是链接"] : []), "linux.so：elf", "nested/arm.dll：pe arm64", "pty.node：mach-o", "spawn-helper：mach-o", "text.node：扩展名是原生文件，内容却不是 PE",
+    ...(canLink ? ["alias.node：是链接"] : []), "fat-cigam64：mach-o", "fat-cigam：mach-o", "fat64：mach-o", "linux.so：elf", "nested/arm.dll：pe arm64", "pty.node：mach-o", "spawn-helper：mach-o", "text.node：扩展名是原生文件，内容却不是 PE",
   ]);
   console.log("✓ 只认 x64 PE：别的架构、Mach-O（含 fat）、ELF、冒名 .node、链接都会被拦下，Java class 不误报");
 

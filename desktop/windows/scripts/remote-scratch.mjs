@@ -14,6 +14,11 @@
 // 账本只认**完整、校验过**的记录：写入走「临时文件 + 改名」，读的人永远看不到写了一半的文件；读不出来、
 // 缺字段的一律当「身份未知」，报出来、原样留着，绝不据此去结束进程或删目录。目标机器按记账时解析出的
 // 地址记下，回收时不按当时的环境变量去猜。
+//
+// 一条账**同一时刻只有一个持有者**，持有者写在文件名上：属主自己记的账是 `<id>.json`（持有者 = 记录里的
+// owner）；属主不在了，回收者先把它**改名**认领成 `<id>.claim-<自己的 pid>.json` —— 改名是原子的，几个回收者
+// 同时认领只有一个成功，其余的拿到 ENOENT 就走开。之后的每次写入、最后的销账都只碰自己认领到的那个文件，
+// 别人手里的快照覆盖不了它、也销不掉它。认领者自己又被杀了，下一个回收者照样按文件名里的 pid 认出来、再认领。
 import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -23,21 +28,26 @@ import { psq } from "../../../scripts/win-remote/ps.mjs";
 
 export const journalDir = () => process.env.NAVI_WIN_REMOTE_JOURNAL || join(homedir(), ".cache", "navi", "win-remote-smoke");
 export const journalFile = (id) => join(journalDir(), `${id}.json`);
+const claimFile = (id, pid) => join(journalDir(), `${id}.claim-${pid}.json`);
 export const remoteRootName = (id) => `navi-win-runtime-${id}`;
 const ID = /^[a-f0-9]{12}$/;
+const ENTRY = /^([a-f0-9]{12})(?:\.claim-(\d+))?\.json$/;
+const PARTIAL = /^[a-f0-9]{12}(?:\.claim-\d+)?\.json\.(\d+)\.tmp$/;
 
+// 记录对象上的 file 是「我手里这一份在哪」，不写进文件。
 function save(record) {
   mkdirSync(journalDir(), { recursive: true });
-  const partial = `${journalFile(record.id)}.${process.pid}.tmp`;
-  writeFileSync(partial, JSON.stringify(record));
-  renameSync(partial, journalFile(record.id));
+  const partial = `${record.file}.${process.pid}.tmp`;
+  const { file, ...body } = record;
+  writeFileSync(partial, JSON.stringify(body));
+  renameSync(partial, file);
 }
 
 /** 送命令之前调用：记下这次要在对端建的目录、目标机器（解析好的地址）和属主（当前进程）。返回这条记录。 */
 export function remember({ id, host }) {
   if (!ID.test(id)) throw new Error(`对端目录 id 不合规：${id}`);
   if (typeof host !== "string" || !/^https?:\/\//.test(host)) throw new Error(`对端地址不合规：${host}`);
-  const record = { id, host, owner: process.pid, sessions: [], createdAt: new Date().toISOString() };
+  const record = { id, host, owner: process.pid, sessions: [], createdAt: new Date().toISOString(), file: journalFile(id) };
   save(record);
   return record;
 }
@@ -48,8 +58,9 @@ export function track(record, { projectId, sessionId }) {
   save(record);
 }
 
-export function forget(id) {
-  rmSync(journalFile(id), { force: true });
+/** 销账：只删自己手里那一份。 */
+export function forget(record) {
+  rmSync(record.file, { force: true });
 }
 
 function validated(record, id) {
@@ -62,20 +73,52 @@ function validated(record, id) {
   return record;
 }
 
-/** 列出账本：完整的给出记录，读不出或缺字段的给 { id, unknown }（不授权任何清理）。 */
+function read(file, id) {
+  return validated(JSON.parse(readFileSync(file, "utf8")), id);
+}
+
+/**
+ * 列出账本：完整的给出记录和它的持有者（holder），读不出或缺字段的给 { id, file, unknown }（不授权任何清理）。
+ * 这只是一份快照：要动哪一条，先 claim。
+ */
 export function records() {
   let names = [];
   try { names = readdirSync(journalDir()); } catch { return []; }
   for (const name of names) {
     // 写到一半就被杀掉的临时文件：写它的进程已经不在了，删掉（正式记录要么还是旧的，要么根本没写成）。
-    const partial = /^[a-f0-9]{12}\.json\.(\d+)\.tmp$/.exec(name);
+    const partial = PARTIAL.exec(name);
     if (partial && !processAlive(Number(partial[1]))) rmSync(join(journalDir(), name), { force: true });
   }
-  return names.filter((name) => /^[a-f0-9]{12}\.json$/.test(name)).map((name) => {
-    const id = name.slice(0, 12);
-    try { return validated(JSON.parse(readFileSync(join(journalDir(), name), "utf8")), id); }
-    catch (error) { return { id, unknown: error.message }; }
+  return names.flatMap((name) => {
+    const match = ENTRY.exec(name);
+    if (!match) return [];
+    const [, id, claimant] = match;
+    const file = join(journalDir(), name);
+    try {
+      const record = read(file, id);
+      return [{ ...record, file, holder: claimant ? Number(claimant) : record.owner }];
+    } catch (error) {
+      if (error.code === "ENOENT") return [];
+      return [{ id, file, unknown: error.message }];
+    }
   });
+}
+
+/**
+ * 认领一条持有者已经不在的账：改名成自己的认领文件，改名成功的那一个才算持有；别人先认领走了返回 null。
+ * 认领后从自己那份重读（快照可能过时），属主改成自己再写回。
+ */
+export function claim(entry) {
+  const target = claimFile(entry.id, process.pid);
+  try { renameSync(entry.file, target); }
+  catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  const record = { ...read(target, entry.id), file: target };
+  record.owner = process.pid;
+  save(record);
+  return record;
 }
 
 // 删一整棵目录树。不能用 Remove-Item：Windows PowerShell 5.1 删不了超过 260 字符的路径，而冒烟中途被切时
@@ -159,7 +202,7 @@ export async function settle(record, { exec, closeSession, attempts, pause }) {
   if (!remote.ok) problems.push(`对端目录：${remote.detail}`);
   const late = await closeSessions(record, closeSession);
   const all = [...new Set([...problems, ...late])];
-  if (!all.length) forget(record.id);
+  if (!all.length) forget(record);
   return { ok: !all.length, detail: remote.detail, problems: all };
 }
 
@@ -169,16 +212,24 @@ export async function reclaimPending({ exec, closeSession, log = console.log, at
   for (const record of records()) {
     if (record.unknown) {
       failures++;
-      log(`✕ 账本记录 ${journalFile(record.id)} 读不出完整身份（${record.unknown}），原样留着、不去碰对端；确认无用后手动删掉它`);
+      log(`✕ 账本记录 ${record.file} 读不出完整身份（${record.unknown}），原样留着、不去碰对端；确认无用后手动删掉它`);
       continue;
     }
-    if (record.owner === process.pid || processAlive(record.owner)) continue;
-    const result = await settle(record, { exec, closeSession, attempts, pause });
+    if (record.holder === process.pid || processAlive(record.holder)) continue;
+    let claimed;
+    try { claimed = claim(record); }
+    catch (error) {
+      failures++;
+      log(`✕ 认领 ${record.file} 失败（${error.message}），原样留着`);
+      continue;
+    }
+    if (!claimed) continue;
+    const result = await settle(claimed, { exec, closeSession, attempts, pause });
     if (result.ok) {
       log(`✓ 结清上一次留下的对端会话与目录：${result.detail}`);
     } else {
       failures++;
-      log(`✕ 上一次留下的 ${remoteRootName(record.id)} 没结清（${result.problems.join("；")}），账留在 ${journalFile(record.id)}`);
+      log(`✕ 上一次留下的 ${remoteRootName(record.id)} 没结清（${result.problems.join("；")}），账留在 ${claimed.file}`);
     }
   }
   return failures;

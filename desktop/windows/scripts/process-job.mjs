@@ -123,8 +123,19 @@ export async function claimProcessJob() {
       return value.trim();
     } finally { clearTimeout(timer); }
   };
-  const ready = await next(30_000);
-  if (ready !== "READY") throw new Error(`Job 建不起来：${ready} ${stderr}`);
+  // 助手起不来（报错、退出、30 秒没回话）也得收掉它，否则它的管道吊着事件循环，调用方报完错也退不出去。
+  // 可以直接结束它：它在 Assign 成功之后紧接着说 READY，没说 READY 基本就是还没把本进程收进容器，结束它不会
+  // 连带本进程（KILL_ON_JOB_CLOSE 杀的是容器里的进程）；只有 30 秒期限恰好落在 Assign 与写出 READY 之间那一瞬，
+  // 本进程才会跟着它走 —— 那时本来也是以失败收场。超时那一路它可能还在编译 C#，不结束的话它过后会去收一个
+  // 早已不是我们的 pid。
+  try {
+    const ready = await next(30_000);
+    if (ready !== "READY") throw new Error(`Job 建不起来：${ready} ${stderr}`);
+  } catch (error) {
+    helper.kill();
+    for (const stream of [helper.stdin, helper.stdout, helper.stderr]) stream.destroy();
+    throw error;
+  }
   return {
     /** 结束容器里除本进程以外的全部成员，并确认内核报的成员只剩本进程。 */
     async reap() {

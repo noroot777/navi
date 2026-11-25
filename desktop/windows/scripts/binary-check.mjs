@@ -20,8 +20,11 @@ export function binaryKind(file) {
   if (bytes.length >= 4) {
     const magic = bytes.readUInt32BE(0);
     if ([0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe].includes(magic)) return { kind: "mach-o" };
-    // 0xcafebabe 同时是 fat Mach-O 和 Java class 的魔数；fat 头紧跟的是架构个数（很小），class 是版本号（≥ 45）。
+    // fat Mach-O 有四种头（mach-o/fat.h：FAT_MAGIC / FAT_CIGAM / FAT_MAGIC_64 / FAT_CIGAM_64，CIGAM 是反字节序写的）。
+    // 0xcafebabe 同时是 Java class 的魔数；fat 头紧跟的是架构个数（很小），class 是版本号（≥ 45）。
     if (magic === 0xcafebabe && bytes.length >= 8 && bytes.readUInt32BE(4) < 30) return { kind: "mach-o" };
+    if (magic === 0xcafebabf && bytes.length >= 8 && bytes.readUInt32BE(4) < 30) return { kind: "mach-o" };
+    if ([0xbebafeca, 0xbfbafeca].includes(magic) && bytes.length >= 8 && bytes.readUInt32LE(4) < 30) return { kind: "mach-o" };
     if (magic === 0x7f454c46) return { kind: "elf" };
   }
   if (bytes.length >= 0x40 && bytes[0] === 0x4d && bytes[1] === 0x5a) {

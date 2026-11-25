@@ -13,7 +13,7 @@ import { claimScratch, processAlive, reclaimScratch } from "../desktop/shared/sc
 
 const temporary = realpathSync(mkdtempSync(join(tmpdir(), "navi-runtime-scratch-")));
 process.env.NAVI_WIN_REMOTE_JOURNAL = join(temporary, "journal");
-const { cleanRemote, cleanupCommand, journalDir, journalFile, reclaimPending, records, remember, track } =
+const { claim, cleanRemote, cleanupCommand, forget, journalDir, journalFile, reclaimPending, records, remember, track } =
   await import("../desktop/windows/scripts/remote-scratch.mjs");
 const { rexec } = await import("./win-remote/transport.mjs");
 const gone = () => spawnSync(process.execPath, ["-e", "0"]).pid;
@@ -111,6 +111,63 @@ try {
 
   const verdictless = await cleanRemote({ id: "aaaaaaaaaaaa", host, sessions: [] }, { exec: async () => ({ code: 0, out: "done but no verdict" }), attempts: 1, pause: 1 });
   assert.equal(verdictless.ok, false, "没有 ROOT_GONE 那一行就不算清掉，哪怕退出码是 0");
+
+  // ── 一条账同一时刻只有一个持有者 ───────────────────────────────────────────
+  // 审查复现过：两个回收者同时结算同一条死账，各拿一份快照互相覆盖，后销账的把另一个新记上的会话一起丢了。
+  process.env.NAVI_WIN_REMOTE_JOURNAL = join(temporary, "journal-claims");
+  mkdirSync(journalDir(), { recursive: true });
+  const deadOwner = gone();
+  writeFileSync(journalFile("abababababab"), JSON.stringify({ id: "abababababab", owner: deadOwner, host, sessions: [] }));
+
+  // 两个回收者拿着同一份快照认领：改名只成功一次，另一个拿到 null 走开。
+  writeFileSync(journalFile("cdcdcdcdcdcd"), JSON.stringify({ id: "cdcdcdcdcdcd", owner: deadOwner, host, sessions: [] }));
+  const snapshot = records().find((entry) => entry.id === "cdcdcdcdcdcd");
+  const first = claim(snapshot);
+  assert.equal(first.owner, process.pid);
+  assert.equal(claim(snapshot), null, "同一条账不能被认领两次");
+  forget(first);
+
+  // 认领者自己又被杀了：留下的认领文件按文件名里的 pid 认出来，下一个回收者再认领、结清。
+  writeFileSync(join(journalDir(), `efefefefefef.claim-${deadOwner}.json`), JSON.stringify({ id: "efefefefefef", owner: deadOwner, host, sessions: [{ projectId: "p", sessionId: "E" }] }));
+
+  // A 认领了 abab、正卡在清理请求里；这时另一个进程（B）来回收，必须一条都不碰。
+  let entered;
+  let resume;
+  const inExec = new Promise((done) => { entered = done; });
+  const hold = new Promise((done) => { resume = done; });
+  const closedByA = [];
+  const reclaimA = reclaimPending({
+    log: () => {}, attempts: 1, pause: 1,
+    closeSession: async (session) => { closedByA.push(session.sessionId); },
+    exec: async (cmd, options) => {
+      const id = /navi-win-runtime-([a-f0-9]{12})/.exec(cmd)[1];
+      options.onSession({ projectId: "p", sessionId: `A-${id}` });
+      if (id === "abababababab") { entered(); await hold; }
+      return { code: 0, out: "ROOT_GONE simulated" };
+    },
+  });
+  await inExec;
+  assert.ok(existsSync(join(journalDir(), `abababababab.claim-${process.pid}.json`)), "认领之后账在认领者名下");
+  const rival = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    const { reclaimPending } = await import(${JSON.stringify(new URL("../desktop/windows/scripts/remote-scratch.mjs", import.meta.url).href)});
+    const execs = [];
+    const closed = [];
+    const failures = await reclaimPending({
+      log: () => {}, attempts: 1, pause: 1,
+      closeSession: async (session) => { closed.push(session.sessionId); },
+      exec: async (cmd) => { execs.push(/navi-win-runtime-([a-f0-9]{12})/.exec(cmd)[1]); return { code: 0, out: "ROOT_GONE b" }; },
+    });
+    console.log(JSON.stringify({ execs, closed, failures }));
+  `], { encoding: "utf8", env: { ...process.env } });
+  assert.equal(rival.status, 0, rival.stderr);
+  // A 是一条一条结的：它卡在 abab 上时 efef 还没人认领，B 拿走 efef 是对的；A 正持有的 abab，B 一下都不能碰。
+  assert.deepEqual(JSON.parse(rival.stdout.trim()), { execs: ["efefefefefef"], closed: ["E"], failures: 0 },
+    "别的进程正持有的账另一个回收者不碰；认领者死了留下的认领文件，下一个回收者再认领、连账上的会话一起结清");
+  resume();
+  assert.equal(await reclaimA, 0, "轮到 efef 时它已经被 B 认领走了，A 跳过而不是报错");
+  assert.deepEqual(readdirSync(journalDir()), [], "两条都结清了，账本空了");
+  assert.deepEqual(closedByA, ["A-abababababab"], "A 只关了自己那条清理请求的会话");
+  console.log("✓ 一条账同一时刻只有一个持有者：认领靠原子改名只成一次，别人正持有的不碰，认领者死了下一个再认领");
 
   // ── rexec 调用方中止 ───────────────────────────────────────────────────────
   const controller = new AbortController();

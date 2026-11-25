@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_HOST, closeSession, detectLocalAddress, rexec } from "../../../scripts/win-remote/transport.mjs";
 import { psq } from "../../../scripts/win-remote/ps.mjs";
 import { claimScratch, reclaimScratch } from "../../shared/scratch.mjs";
-import { PS_DROP_TREE, journalFile, reclaimPending, remember, remoteRootName, settle as settleRecord, track } from "./remote-scratch.mjs";
+import { PS_DROP_TREE, reclaimPending, remember, remoteRootName, settle as settleRecord, track } from "./remote-scratch.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "../../..");
@@ -52,10 +52,11 @@ if (!existsSync(join(runtime, ".runtime.json"))) {
 await reclaimPending({ exec: rexec, closeSession });
 for (const directory of reclaimScratch(tmpdir(), "navi-win-remote-smoke-").removed) console.log(`✓ 收掉上一次留下的本机暂存 ${directory}`);
 
+// 暂存目录、账、HTTP 服务都在下面那段 try 里才建出来，哪一步失败都走同一段 settle：建出来几样就收几样。
 const id = randomBytes(6).toString("hex");
-const staging = claimScratch(tmpdir(), "navi-win-remote-smoke-");
-const record = remember({ id, host: HOST });
 const controller = new AbortController();
+let staging;
+let record;
 let server;
 let main;
 let settling;
@@ -63,12 +64,13 @@ let settling;
 function settle() {
   settling ??= (async () => {
     server?.close();
-    rmSync(staging, { recursive: true, force: true });
+    if (staging) rmSync(staging, { recursive: true, force: true });
+    if (!record) return true;
     const result = await settleRecord(record, { exec: rexec, closeSession });
     if (result.ok) {
       console.log(`✓ 对端终端会话已关、临时目录已删，收尾后另发请求核实过：${result.detail}`);
     } else {
-      console.log(`✕ 对端没结清（${result.problems.join("；")}）；账留在 ${journalFile(id)}，下次跑 remote-smoke 或 --reclaim 会先清`);
+      console.log(`✕ 对端没结清（${result.problems.join("；")}）；账留在 ${record.file}，下次跑 remote-smoke 或 --reclaim 会先清`);
     }
     return result.ok;
   })();
@@ -89,6 +91,8 @@ for (const name of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 }
 
 try {
+  staging = claimScratch(tmpdir(), "navi-win-remote-smoke-");
+  record = remember({ id, host: HOST });
   const payload = join(staging, "payload");
   cpSync(runtime, join(payload, "runtime"), { recursive: true });
   for (const tool of TOOLS) {
