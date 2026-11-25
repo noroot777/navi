@@ -280,7 +280,8 @@ NAVI_URL=http://127.0.0.1:14977 NAVI_DATA_DIR=/tmp/navi-try HOME=/tmp/navi-home 
 
 | 文件 | 管什么 |
 |---|---|
-| `scripts/bundle-runtime.mjs` | 把 node、产物、生产依赖装进 app |
+| `scripts/bundle-runtime.mjs` | 把 node、产物、生产依赖装进 app（和 Windows 共用的几步在 `desktop/shared/runtime-bundle.mjs`） |
+| `../shared/runtime-store.mjs` | 运行时内容清单、发布与回收（包里拷成 `app/scripts/runtime-store.mjs`，Windows 包也用它） |
 | `scripts/build-number.mjs` | 严格递增的 CFBundleVersion |
 | `scripts/install-app.sh` | 换进安装目录（按目录加锁）；旧包还有进程在用就不换 |
 | `scripts/bundle-users.sh` | 还有哪些进程在用某个 .app（按真实文件身份认） |

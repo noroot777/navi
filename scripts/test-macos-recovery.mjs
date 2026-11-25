@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { sealRuntime } from "../desktop/macos/scripts/runtime-store.mjs";
+import { sealRuntime } from "../desktop/shared/runtime-store.mjs";
 import { isPidAlive, sleep } from "./platform.mjs";
 import { runTestProcess } from "./test-process.mjs";
 import { spawnTestFixture } from "./test-process-scope.mjs";
@@ -37,7 +37,7 @@ if (process.platform !== "darwin") {
     for (const folder of ["node/bin", "scripts", "server/dist/db"]) mkdirSync(join(path, folder), { recursive: true });
     writeFileSync(join(path, "node/bin/node"), `#!/bin/sh\nexec '${process.execPath}' "$@"\n`, { mode: 0o755 });
     for (const script of ["runtime-store.mjs", "start-detached.mjs"]) {
-      copyFileSync(join(root, script === "runtime-store.mjs" ? "desktop/macos/scripts" : "scripts", script), join(path, "scripts", script));
+      copyFileSync(join(root, script === "runtime-store.mjs" ? "desktop/shared" : "scripts", script), join(path, "scripts", script));
     }
     writeFileSync(join(path, "server/dist/db/schema.js"), incompatible ? "old incompatible schema" : "schema");
     writeFileSync(join(path, "server/dist/index.js"), `const fs=require('node:fs'),http=require('node:http');

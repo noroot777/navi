@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
-import { sealRuntime, installRuntime, verifyRuntime } from "../desktop/macos/scripts/runtime-store.mjs";
+import { sealRuntime, installRuntime, verifyRuntime } from "../desktop/shared/runtime-store.mjs";
 import { runTestProcess } from "./test-process.mjs";
 import { spawnTestFixture } from "./test-process-scope.mjs";
 import { withTestResources } from "./test-process-resources.mjs";
@@ -22,7 +22,7 @@ if (process.platform !== "darwin") {
     const payload = join(app, "Contents/Resources/app");
     const next = join(temporary, "build/Navi.app");
     const nextPayload = join(next, "Contents/Resources/app");
-    const runtimeTool = join(root, "desktop/macos/scripts/runtime-store.mjs");
+    const runtimeTool = join(root, "desktop/shared/runtime-store.mjs");
     const binary = join(temporary, "runtime-driver");
     const ready = join(temporary, "ready.json");
     const activity = join(temporary, "activity");
