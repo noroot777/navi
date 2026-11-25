@@ -8,11 +8,13 @@
 // feed\（latest.json + 新版安装包，按临时私钥签过）。一切落在演练根下：装到 <根>\l\Programs\Navi（/D=），数据、
 // 运行时仓库、WebView2 数据在 <根>\l\Navi，服务的 USERPROFILE / APPDATA 在 <根>\h。动到演练根之外的只有当前
 // 用户注册表里安装包本来就要写的那几项（卸载项、navi://、登录项、厂商键）和开始菜单快捷方式 —— 开头先确认它们
-// 本来都不在（在就不跑），收尾时只删指向演练根的那几项。:4317 上那份只读一次 /api/health，不碰。
+// 本来都不在（在就不跑），收尾时只删指向演练根的那几项；还有更新时壳在 %TEMP% 下载安装包的 Navi-<版本>-updater-*
+// 目录，收尾删掉开工时没有、里面只有安装包的那几个。这条命令被中途结束（走不到收尾）时，remote-scratch.mjs 的
+// 清理命令照同样的规矩删登记。:4317 上那份只读一次 /api/health，不碰。
 //
 // 窗口、对话框按 UI 自动化元素找、按元素点（进程号认窗口，名字认按钮），不按屏幕坐标。每一项打一行 ✓ / ✕。
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -198,7 +200,8 @@ const feed = createServer((request, response) => {
   }
 });
 
-const before = { chrome: chromes(), keys: {} };
+const updaterDirs = () => { try { return readdirSync(process.env.TEMP).filter((name) => /^Navi-.+-updater-/.test(name)); } catch { return []; } };
+const before = { chrome: chromes(), keys: {}, updaters: updaterDirs() };
 const startMenu = join(process.env.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs", "Navi.lnk");
 const desktopLink = join(ps("[Environment]::GetFolderPath('Desktop')"), "Navi.lnk");
 let terminal = null;
@@ -403,10 +406,20 @@ try {
   if (launched.length) removed.push(`演练另起的浏览器 ${launched.join(",")}`);
   const opened = chromes().filter((pid) => !before.chrome.includes(pid));
   if (!before.chrome.length && opened.length) { spawnSync("taskkill.exe", ["/IM", "chrome.exe", "/T", "/F"], { windowsHide: true }); removed.push(`浏览器（演练打开的 ${opened.length} 个进程）`); }
+  for (const name of updaterDirs().filter((dir) => !before.updaters.includes(dir))) {
+    const dir = join(process.env.TEMP, name);
+    try {
+      if (!readdirSync(dir, { recursive: true }).every((file) => /^Navi-.+-installer\.exe$/.test(String(file)))) continue;
+      rmSync(dir, { recursive: true, force: true });
+      removed.push(name);
+    } catch (error) { note(`删不掉 ${dir}：${error.message}`); }
+  }
   await sleep(1500);
   note(`收尾删掉：${removed.join("、") || "（没有要删的）"}${strays.length ? `；结束残留进程 ${strays.join(",")}` : ""}`);
   const left = Object.entries(KEYS).filter(([name, key]) => (name === "run" ? intoRoot(reg(key, "Navi")) : keyExists(key) && !before.keys[name]));
   check(!left.length && !existsSync(startMenu) && !existsSync(desktopLink), "收尾：注册表里演练写的都删了、快捷方式不在", JSON.stringify(left));
+  const updatersLeft = updaterDirs().filter((dir) => !before.updaters.includes(dir));
+  check(!updatersLeft.length, "收尾：更新时下载安装包的临时目录删了", updatersLeft.join("、"));
   check((await health(4317))?.pid === legacy?.pid, ":4317 上那份没被碰（进程没变）");
   console.log(failures ? `✕ ${failures} 项没过` : "✓ 全部通过");
   process.exit(failures ? 1 : 0);

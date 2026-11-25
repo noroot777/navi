@@ -127,7 +127,10 @@ export function claim(entry) {
 export const PS_DROP_TREE = String.raw`function Drop-Tree($path) { if (-not (Test-Path -LiteralPath $path)) { return }; try { [IO.Directory]::Delete('\\?\' + $path, $true) } catch { }; if (Test-Path -LiteralPath $path) { cmd.exe /d /c ('rd /s /q "\\?\' + $path + '"') 2>$null | Out-Null } }`;
 
 /**
- * 对端清理命令：结束名字里带这个目录名的进程 → 删目录 → 过一秒再核一遍，两样都没了才报 ROOT_GONE。
+ * 对端清理命令：结束名字里带这个目录名的进程 → 删目录 → 删当前用户名下指着这个目录的 Navi 登记 → 过一秒再核一遍，
+ * 都没了才报 ROOT_GONE。登记那一步是给 install-check 兜底的：它被结束在半路就走不到自己的收尾，装上的卸载项、
+ * navi://、厂商键、登录项、开始菜单和桌面快捷方式会一直留着、还指着已经删掉的目录（下一次演练开头因此拒绝跑）。
+ * 只删值里带这个目录名的，跟 install-check 收尾同一条规矩；别的 Navi 登记一项都不碰。
  * 进程表要真查出来：Get-CimInstance 出错（WMI 服务卡住之类）时拿到的是空结果，不能当成「一个都没有」。
  */
 export function cleanupCommand(id) {
@@ -151,12 +154,29 @@ export function cleanupCommand(id) {
     `  if ((Get-Date) -gt $deadline) { break }`,
     `  Start-Sleep -Milliseconds 500`,
     `}`,
+    `function Into([string]$value) { return $value -and $value.IndexOf($name, [StringComparison]::OrdinalIgnoreCase) -ge 0 }`,
+    `function Registrations {`,
+    `  $found = @()`,
+    `  $u = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Navi'; if ((Test-Path $u) -and (Into (Get-ItemProperty $u).UninstallString)) { $found += $u }`,
+    `  $c = 'HKCU:\\Software\\Classes\\navi'; if ((Test-Path "$c\\shell\\open\\command") -and (Into (Get-ItemProperty "$c\\shell\\open\\command").'(default)')) { $found += $c }`,
+    `  $v = 'HKCU:\\Software\\Navi'; if ((Test-Path "$v\\Navi") -and @(Get-ChildItem $v).Count -eq 1 -and @((Get-Item $v).Property).Count -eq 0 -and (Into (Get-ItemProperty "$v\\Navi").'(default)')) { $found += $v }`,
+    `  $r = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'; if ((Test-Path $r) -and (Into (Get-ItemProperty $r).Navi)) { $found += "$r|Navi" }`,
+    `  $shell = New-Object -ComObject WScript.Shell`,
+    `  foreach ($link in (Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs\\Navi.lnk'), (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Navi.lnk')) { if ((Test-Path -LiteralPath $link) -and (Into $shell.CreateShortcut($link).TargetPath)) { $found += $link } }`,
+    `  return $found`,
+    `}`,
+    `$unregistered = 0`,
+    `foreach ($item in @(Registrations)) {`,
+    `  try { if ($item -like '*|Navi') { Remove-ItemProperty ($item -replace '\\|Navi$', '') -Name Navi -Force -ErrorAction Stop } else { Remove-Item -LiteralPath $item -Recurse -Force -ErrorAction Stop }; $unregistered++ } catch { }`,
+    `}`,
     // 刚被结束的那条命令可能正走到自己的收尾、又碰了一下目录：隔一秒再看一眼才下结论。
     `Start-Sleep -Milliseconds 1000`,
     `$left = Hits`,
+    `$registered = @(Registrations)`,
+    `if ($registered.Count) { Write-Output ("ROOT_LEFT " + $root + " 登记还在：" + ($registered -join ',')); exit 1 }`,
     `if ($script:queryError) { Write-Output ("ROOT_LEFT " + $root + " 进程表查不出来：" + $script:queryError); exit 1 }`,
     `if ((Test-Path -LiteralPath $root) -or $left.Count) { Write-Output ("ROOT_LEFT " + $root + " exists=" + (Test-Path -LiteralPath $root) + " procs=" + (($left | ForEach-Object { "$($_.ProcessId) $($_.Name)" }) -join ',')); exit 1 }`,
-    `Write-Output ("ROOT_GONE " + $root + " existed=" + $existed + " killed=" + $killed)`,
+    `Write-Output ("ROOT_GONE " + $root + " existed=" + $existed + " killed=" + $killed + " unregistered=" + $unregistered)`,
   ].join("\n");
 }
 
