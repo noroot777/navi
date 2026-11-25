@@ -16,7 +16,7 @@ import { mkdirSync } from "node:fs";
 import { runtimeId } from "./config.mjs";
 import { decideLink, parseLink } from "./deep-link.mjs";
 import { createHandover } from "./handover.mjs";
-import { forgetUnfinished, noteUnfinished, readUnfinished } from "./handover-duty.mjs";
+import { forgetUnfinished, markHandover, noteUnfinished, readUnfinished } from "./handover-duty.mjs";
 import { isServing, mismatch, ours, probe as probeHealth } from "./health.mjs";
 import { activeHold, beginMaintenance } from "./maintenance.mjs";
 import { assessImpact, stopServer, widened } from "./restart.mjs";
@@ -603,14 +603,22 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
      */
     async shutdown() {
       this.stop();
-      try { await handover.settled(); } catch (error) { log(`切换收尾出错：${error.message}`); }
-      if (!handover.successorPending()) return;
-      log("壳退出了，旧服务已经交出去：先把新版服务起起来再退");
-      const result = await handover.discharge((left) => launcher.ensureRunning(left));
-      if (result.ok) return log("新版服务起来了");
-      log(`新版服务没起来：${result.why}`);
-      // 这时没有窗口可说：留张纸条，下次打开 Navi 时告诉用户（那一次照常会再起服务）。
-      try { noteUnfinished(cfg, result.why); } catch (error) { log(`纸条也没留下：${error.message}`); }
+      if (!handover.state.inflight && !handover.successorPending()) return;
+      // 安装包、卸载器这时在等这个进程退出：立块牌子，让它们等着（或者拒绝动手），别把唯一的接续者强杀掉。
+      let unmark = () => {};
+      try { unmark = markHandover(cfg); } catch (error) { log(`「正在交接」的牌子没立上：${error.message}`); }
+      try {
+        try { await handover.settled(); } catch (error) { log(`切换收尾出错：${error.message}`); }
+        if (!handover.successorPending()) return;
+        log("壳退出了，旧服务已经交出去：先把新版服务起起来再退");
+        const result = await handover.discharge((left) => launcher.ensureRunning(left));
+        if (result.ok) return log("新版服务起来了");
+        log(`新版服务没起来：${result.why}`);
+        // 这时没有窗口可说：留张纸条，下次打开 Navi 时告诉用户（那一次照常会再起服务）。
+        try { noteUnfinished(cfg, result.why); } catch (error) { log(`纸条也没留下：${error.message}`); }
+      } finally {
+        unmark();
+      }
     },
     state,
   };

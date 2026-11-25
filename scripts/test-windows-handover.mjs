@@ -55,7 +55,13 @@ function rig(name, timing = {}) {
     cfg, oldDir, instance, calls: [], logs: [], asked: [], alerts: [], released: 0, held: [],
     health: { kind: "navi", instance: instance(oldDir) },
     impact: { runtimeHandover: { blocked: [], target: COMPAT }, shutdown: { resources: [] } },
-    grant: () => ({ lease: "L1", protocol: 1 }),
+    // 许可：强制切换（带 accept）照服务端那样，在「封口之后」的名单里核对用户确认过的那几项（见 acquireForcedRuntimeHandover）
+    grant: (body) => {
+      if (!body.accept) return { lease: "L1", protocol: 1 };
+      const now = typeof r.impact === "function" ? { items: [] } : blockersOf(r.impact, COMPAT);
+      const extra = (now.items ?? []).filter((item) => !body.accept.includes(item.id));
+      return extra.length ? { error: "确认之后又多了会被打断的", widened: extra } : { lease: "L1", protocol: 1 };
+    },
     valid: true, stopped: { kind: "stopped" }, backup: () => join(cfg.dataDir, "backups", "x.db"), answer: 0, answers: [],
     onAsk: () => {}, publishError: null, busy: null, stopGate: null, alive: true, releaseAnswer: { released: true },
   };
@@ -69,9 +75,14 @@ function rig(name, timing = {}) {
     impact: async (id, compat) => { r.calls.push(`impact:${id}:${compat.schema}`); return typeof r.impact === "function" ? r.impact() : { impact: r.impact }; },
     handover: async (id, body) => {
       r.calls.push(`handover:${JSON.stringify(body)}`);
-      if (body.release) return r.releaseAnswer;
-      if (body.commit) return r.commitAnswer ? r.commitAnswer() : { committed: r.valid };
-      return r.grant();
+      // 跟服务端一样：兑现过的许可还不回去
+      if (body.release) return r.committedLease ? { released: false } : r.releaseAnswer;
+      if (body.commit) {
+        const answer = r.commitAnswer ? r.commitAnswer() : { committed: r.valid };
+        if (answer.committed === true) r.committedLease = true;
+        return answer;
+      }
+      return r.grant(body);
     },
     stop: async (target) => {
       r.calls.push(`stop:${target.pid}`);
@@ -205,11 +216,15 @@ try {
     r.answer = 0;
     r.handover.reconsider();
     await waitFor("强制换完", () => r.released === 1);
-    assert.deepEqual(r.sequence(), [`backup:${OLD.slice(0, 12)}`, "stop:41"], "用户点了现在切换：不要许可，照样先留底");
+    assert.deepEqual(r.sequence(), [
+      `handover:${JSON.stringify({ ...COMPAT, holdResources: true, accept: ["t9"] })}`,
+      `backup:${OLD.slice(0, 12)}`,
+      'handover:{"commit":"L1"}',
+      "stop:41",
+    ], "用户点了现在切换：带着他确认过的那张去拿许可（旧服务封口后核对），留底、兑现，它自己退");
     const tail = r.calls.slice(r.calls.lastIndexOf("ask"));
     assert.ok(tail.indexOf("publish") > 0, "点了之后、停之前重新发布一遍新版");
-    assert.ok(tail.lastIndexOf(`impact:old-1:${COMPAT.schema}`) > tail.indexOf(`backup:${OLD.slice(0, 12)}`), "留底之后、停之前再核一遍名单");
-    console.log("✓ 菜单「切换到新版服务…」：列出会打断的，关掉对话框就是继续等；点了现在切换才不等许可，照样先给库留底");
+    console.log("✓ 菜单「切换到新版服务…」：列出会打断的，关掉对话框就是继续等；点了现在切换才不等，带着确认过的名单拿许可、先给库留底、兑现后它自己退");
   }
 
   // ── 强制切换只认用户点的那一份、那一张：变了就重新问 ────────────────────
@@ -228,7 +243,10 @@ try {
     await sleep(30);
     assert.match(w.asked[1].detail, /情况变了/);
     assert.match(w.asked[1].detail, /终端「cargo watch」/, "新冒出来的那个摆给用户看");
-    assert.ok(!w.calls.some((call) => call.startsWith("stop")), "名单比确认时多了：不停");
+    assert.ok(w.calls.includes(`handover:${JSON.stringify({ ...COMPAT, holdResources: true, accept: ["t9"] })}`),
+      "名单由旧服务封口之后核对：带着确认过的那张去拿许可");
+    assert.ok(!w.calls.some((call) => call.startsWith("stop") || call.startsWith('handover:{"commit"') || call.startsWith("backup")),
+      "封口后的名单比确认时多了：不发许可，不留底、不兑现、不停");
     assert.deepEqual(w.alerts, [], "不是失败，是重新问");
     assert.equal(activeHold(w.cfg), null, "没停也松开维护锁");
     assert.equal(w.handover.state.phase, "waiting");
@@ -251,9 +269,24 @@ try {
     await waitFor("确认不了", () => u.handover.state.why?.includes("超时"));
     u.handover.reconsider();
     await waitFor("换完", () => u.calls.includes("stop:41"));
-    assert.match(u.asked[0].detail, /确认不了.*按会打断对待/);
-    assert.equal(u.asked.length, 1, "对着「确认不了」点的：按全都会打断算，锁里不再拿名单比");
-    console.log("✓ 强制切换：锁里再核实例和名单，换了服务或者多了没确认过的就不停、重新问；对着「确认不了」点的照切");
+    assert.match(u.asked[0].detail, /确认不了[\s\S]*列出来再问你一次/);
+    assert.equal(u.asked.length, 1, "对着「确认不了」点的、封口后也没有会打断的：照切");
+    assert.ok(u.calls.includes(`handover:${JSON.stringify({ ...COMPAT, holdResources: true, accept: [] })}`), "按一项都没确认过去拿许可");
+    u.handover.stop();
+
+    const v = rig("force-unknown-then-listed");
+    v.impact = () => ({ error: "超时" });
+    v.onAsk = (count) => { if (count === 1) v.impact = { runtimeHandover: { blocked: [], target: COMPAT }, shutdown: { resources: [{ kind: "terminal", id: "s3", label: "npm run dev" }] } }; };
+    v.answers = [0, 1];
+    v.handover.observe(v.health.instance);
+    await waitFor("确认不了", () => v.handover.state.why?.includes("超时"));
+    v.handover.reconsider();
+    await waitFor("又问了一次", () => v.asked.length === 2);
+    await sleep(30);
+    assert.match(v.asked[1].detail, /终端「npm run dev」/, "封口后看到了会被打断的：摆出来再问");
+    assert.ok(!v.calls.some((call) => call.startsWith("stop")), "他没确认过那个终端：不停");
+    v.handover.stop();
+    console.log("✓ 强制切换：锁里认人，名单交给旧服务封口之后核对，换了服务或者多了没确认过的就不停、重新问；对着「确认不了」点的按一项都没确认过算");
   }
 
   // ── 新版运行时没发布好：强制也不切，说清楚 ───────────────────────────────
@@ -401,7 +434,7 @@ try {
     assert.equal(await lock.handover.settled(), null, "收尾不会抛出去");
     assert.equal(lock.handover.successorPending(), true);
 
-    // 强制切换：停是撤不回的。停的结果不明（超时）也欠着；还没动手就发现不对，不欠
+    // 强制切换也走许可：兑现了就欠着，等它退的结果不明（超时）也欠着；服务端明说兑现不了，不欠
     const forced = rig("force-stop-failed");
     forced.impact = { runtimeHandover: { blocked: [{ id: "t9", title: "调度台", reason: "x" }], target: COMPAT }, shutdown: { resources: [] } };
     forced.stopped = { kind: "failed", why: "服务进程 41 20 秒内没有退出" };
@@ -409,16 +442,18 @@ try {
     await waitFor("在等", () => forced.handover.state.items.length === 1);
     forced.handover.reconsider();
     await waitFor("说明", () => forced.alerts.length === 1);
-    assert.equal(forced.handover.successorPending(), true, "已经动手停了：不管结局都欠着起新版");
+    assert.equal(forced.handover.successorPending(), true, "兑现了：不管等它退的结局如何都欠着起新版");
     forced.handover.stop();
-    const early = rig("force-stop-changed");
+    const early = rig("force-refused");
     early.impact = forced.impact;
-    early.stopped = { kind: "changed", why: "端口上换成了别的 Navi" };
+    early.valid = false;
     early.handover.observe(early.health.instance);
     await waitFor("在等", () => early.handover.state.items.length === 1);
     early.handover.reconsider();
     await waitFor("说明", () => early.alerts.length === 1);
-    assert.equal(early.handover.successorPending(), false, "停之前就发现不对、什么都没动：不欠");
+    assert.match(early.alerts[0].detail, /失效/);
+    assert.ok(!early.calls.some((call) => call.startsWith("stop")));
+    assert.equal(early.handover.successorPending(), false, "服务端明说没兑现：旧服务原样在，不欠");
     early.handover.stop();
 
     // 退出前结清：起不来就一直起，起到新版为止；限时内起不来就交回原因
@@ -437,21 +472,16 @@ try {
     const began = Date.now();
     assert.deepEqual(await stuck.handover.discharge((left) => { given.push(left); return new Promise(() => {}); }), { ok: false, why: "等过了时限" });
     assert.ok(Date.now() - began < 1_000 && given.length === 1 && given[0] <= 60, "交给 ensureRunning 的期限是剩下的时间，到点不等它");
-    // 强制切换没有许可可问：旧服务还在答话就照实说停没停下不明，不空转到时限
-    const unsure = rig("discharge-forced", { discharge: 5_000, retry: 10 });
-    unsure.impact = forced.impact;
+    // 兑现过、旧的那份却一直还在答话（等它退超时了）：不靠计时结清，限时内一直起，到点照实交回原因
+    const unsure = rig("discharge-lingering", { discharge: 80, retry: 10 });
     unsure.stopped = { kind: "failed", why: "服务进程 41 20 秒内没有退出" };
     unsure.handover.observe(unsure.health.instance);
-    await waitFor("在等", () => unsure.handover.state.items.length === 1);
-    unsure.handover.reconsider();
-    await waitFor("说明", () => unsure.alerts.length === 1);
+    await waitFor("没切换", () => unsure.handover.state.why?.includes("没有退出"));
     unsure.handover.stop();
-    const quick = Date.now();
     const verdict = await unsure.handover.discharge(async () => ({ kind: "ready", instance: unsure.health.instance }));
     assert.equal(verdict.ok, false);
-    assert.match(verdict.why, /停没停下不明/);
-    assert.ok(Date.now() - quick < 1_000);
-    console.log("✓ 起新版的责任：兑现、强停之前就记下；兑现结果不明只接着问、绝不去停，看到新版或者旧服务亲口说没兑现才结清（晚到的兑现执行了也接得住）；松锁出错不丢；退出前在时限里一直起到新版");
+    assert.match(verdict.why, /还在答话/);
+    console.log("✓ 起新版的责任：兑现之前就记下；兑现结果不明只接着问、绝不去停，看到新版或者旧服务亲口说没兑现才结清（晚到的兑现执行了也接得住）；松锁出错不丢；退出前在时限里一直起到新版");
   }
 
   // ── 壳在切换途中退出：控制器先把这一趟做完，旧服务交出去了就把新版起起来再退 ────────
@@ -485,9 +515,12 @@ try {
     const shutdown = controller.shutdown().then(() => { finished = true; events.push("shutdown"); });
     await sleep(40);
     assert.equal(finished, false, "这一趟没做完不退");
+    const mark = join(dirname(r.cfg.settingsFile), "handover-active.json");
+    assert.equal(JSON.parse(readFileSync(mark, "utf8")).pid, process.pid, "收尾期间立着「正在交接」的牌子：安装包、卸载器看到就不强杀它");
     events.push("stopped");
     open();
     await shutdown;
+    assert.ok(!existsSync(mark), "做完撤牌子");
     assert.ok(starts > before, "旧服务停了：退出前把新版起起来");
     assert.ok(lines.some((line) => line.includes("先把新版服务起起来")) && lines.some((line) => line.includes("新版服务起来了")),
       "是退出这一步自己起的新版，不靠窗口那边重连");
@@ -508,6 +541,7 @@ try {
     await waitFor("起来时连一次", () => idleStarts === 1);
     await quiet.shutdown();
     assert.equal(idleStarts, 1, "没在切换：直接退，不碰服务");
+    assert.ok(!existsSync(join(dirname(idle.cfg.settingsFile), "handover-active.json")), "没在切换：不立牌子");
 
     const failing = rig("shutdown-note");
     const sentNotes = [];

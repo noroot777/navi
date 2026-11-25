@@ -3,6 +3,7 @@
 //     %LOCALAPPDATA%\Navi\runtimes、路径不分大小写；mac 包是 format 1、仓库在数据根下，原样不变；
 //   · Windows 桌面版申请接管时带 holdResources：服务退出会收掉、又接不过去的东西（终端、项目服务……）还在，
 //     就不发许可、许可当场撤掉，旧服务原样留着（acquireRuntimeHandover 的 standing）；
+//   · 强制切换（acquireForcedRuntimeHandover）：同样先封口，封口之后的名单里多出用户没确认过的就不发许可、当场解封；
 //   · 兑现许可（commitRuntimeHandover）：核验和下线是同一步，兑现后不再到期、撤不回，随即自己退出。
 import "./isolated-data.js";
 import assert from "node:assert/strict";
@@ -11,7 +12,7 @@ import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { managedRuntimeStore, runtimeCompatibilityAt } from "../src/runtime-compatibility.js";
-import { acquireRuntimeHandover } from "../src/runtime-handover.js";
+import { acquireForcedRuntimeHandover, acquireRuntimeHandover } from "../src/runtime-handover.js";
 import { commitRuntimeHandover, reserveRuntimeHandover, runtimeHandoverActive, runtimeHandoverDeadline } from "../src/runtime-handover-state.js";
 import { heldTurns } from "../src/turn-lock.js";
 import type { RestartImpact } from "../src/reattach.js";
@@ -86,6 +87,30 @@ try {
   assert.ok(mac2.lease, "不传 standing（mac）时不问这一项");
   releaseRuntimeHandover(mac2.lease!);
   console.log("✓ holdResources：终端、项目服务还在就不切，问的是封口之后的最后一份，许可随即撤掉；mac 不传就不问");
+
+  const blocking = (...ids: string[]): RestartImpact => ({ ...empty, runtimeHandover: { sessions: [],
+    blocked: ids.map((id) => ({ id, title: `任务 ${id}`, reason: "调度台当前回合不能无损接管" })) } });
+  const seal = async () => { assert.equal(runtimeHandoverActive(), true, "先封口"); };
+  const grown = await acquireForcedRuntimeHandover(async () => blocking("t9"), new Set(["t9"]), seal, async () => {
+    assert.equal(runtimeHandoverActive(), true, "封口之后才看会打断的终端");
+    return [{ id: "terminal:s2", title: "终端「cargo watch」" }];
+  });
+  assert.equal(grown.lease, undefined, "确认之后新开的终端：不发许可");
+  assert.deepEqual(grown.widened, [{ id: "terminal:s2", title: "终端「cargo watch」" }], "把多出来的交回去重新问");
+  assert.equal(runtimeHandoverActive(), false, "当场解封，旧服务照常接活");
+  const task = await acquireForcedRuntimeHandover(async () => blocking("t9", "t10"), new Set(["t9"]), seal, async () => []);
+  assert.deepEqual(task.widened?.map((item) => item.id), ["t10"], "多出没确认过的任务也一样");
+  const agreed = await acquireForcedRuntimeHandover(async () => blocking("t9"), new Set(["t9", "terminal:s1"]), seal,
+    async () => [{ id: "terminal:s1", title: "终端「PowerShell」" }]);
+  assert.ok(agreed.lease, "都在确认过的里面（变少也算）：发许可");
+  assert.equal(runtimeHandoverActive(), true, "发了许可就一直封着，直到兑现后旧服务退出");
+  releaseRuntimeHandover(agreed.lease!);
+  const unknown = await acquireForcedRuntimeHandover(async () => empty, new Set(), seal, async () => []);
+  assert.match(unknown.error ?? "", /确认不了/, "旧服务报不出会打断谁：不发");
+  assert.equal(runtimeHandoverActive(), false);
+  await assert.rejects(acquireForcedRuntimeHandover(async () => blocking(), new Set(), async () => { throw new Error("仍有请求在执行"); }, async () => []), /仍有请求/);
+  assert.equal(runtimeHandoverActive(), false, "封不住口：许可撤掉");
+  console.log("✓ 强制切换：封口之后核对用户确认过的名单，多出一项就不发许可、当场解封；发了许可就一直封着");
 
   const realNow = Date.now;
   const later = (ms: number) => { const base = realNow(); Date.now = () => base + ms; };

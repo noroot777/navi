@@ -29,6 +29,7 @@ LangString webview2InstallError ${LANG_SIMPCHINESE} "错误：安装 WebView2 �
 LangString webview2InstallSuccess ${LANG_SIMPCHINESE} "成功安装 WebView2"
 LangString deleteAppData ${LANG_SIMPCHINESE} "同时删除 Navi 的数据（任务、设置和运行时，在 %LOCALAPPDATA%\Navi）"
 LangString naviInstallDirBusy ${LANG_SIMPCHINESE} "下面这些程序还在用 ${PRODUCTNAME} 安装目录里的文件，这次没有改动任何东西：$\n$\n$R9$\n$\n关掉它们之后再试一次。"
+LangString naviHandoverBusy ${LANG_SIMPCHINESE} "${PRODUCTNAME} 正在把后台服务换到新版，还没做完，这次没有改动任何东西（中途打断的话，服务会停着没人起）。$\n$\n等一两分钟再试一次。"
 LangString naviRuntimeLeftover ${LANG_SIMPCHINESE} "旧版自带的运行时（$INSTDIR\runtime）删不干净，多半有程序正把那里当工作目录。关掉它之后再试一次。"
 LangString naviDataBusy ${LANG_SIMPCHINESE} "Navi 服务还在运行，数据这次没有删（卸载不会停掉在跑的服务和任务）：$\n$\n$R9$\n$\n要删就先在任务管理器里结束它们，再手动删除 $LOCALAPPDATA\Navi。"
 LangString naviDataLeftover ${LANG_SIMPCHINESE} "Navi 的数据已经挪开，但有一部分没删掉，留在：$\n$R9$\n$\n可以稍后手动删除。"
