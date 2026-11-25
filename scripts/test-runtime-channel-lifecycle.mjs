@@ -83,9 +83,8 @@ if (process.platform !== "darwin") {
   if (process.platform === "darwin") {
     const common = (await runTestProcess("git", ["rev-parse", "--git-common-dir"])).stdout.trim();
     const root = dirname(realpathSync(common));
-    const bundler = readFileSync(new URL("../desktop/macos/scripts/bundle-runtime.mjs", import.meta.url), "utf8");
-    const version = bundler.match(/const NODE_VERSION = "([^"]+)"/)[1];
-    node = join(process.env.NAVI_MAC_CACHE ?? join(root, "desktop/macos/build/cache"), `node-${version}-darwin-arm64/bin/node`);
+    const { NODE_VERSION } = await import("../desktop/shared/runtime-bundle.mjs");
+    node = join(process.env.NAVI_MAC_CACHE ?? join(root, "desktop/macos/build/cache"), `node-${NODE_VERSION}-darwin-arm64/bin/node`);
     assert.ok(existsSync(node), "prepare the pinned macOS runtime cache before testing portable Node installation");
   }
   const home = join(temporary, "gateway");

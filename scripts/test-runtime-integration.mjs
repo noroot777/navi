@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { Agent, fetch as directFetch } from "undici";
-import { sealRuntime } from "../desktop/macos/scripts/runtime-store.mjs";
+import { sealRuntime } from "../desktop/shared/runtime-store.mjs";
 import { ensureSparkle } from "../desktop/macos/scripts/sparkle.mjs";
 import { seedSource, agentSource, codexSource } from "./macos-runtime-fixture.mjs";
 import { runTestProcess } from "./test-process.mjs";
