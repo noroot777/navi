@@ -263,6 +263,15 @@ export function remoteWrapper({ cmd, cwd = null, token, timeout, self, port }) {
   ].filter(Boolean).join("; ");
 }
 
+/** 删掉对端一个终端会话(里面的 shell 和它的容器随之结束);已经不在了(404)也算删掉。 */
+export async function closeSession({ host = DEFAULT_HOST, projectId, sessionId }) {
+  try {
+    await api(`/projects/${projectId}/terminal/sessions/${sessionId}`, { method: "DELETE" }, host);
+  } catch (error) {
+    if (!/ → 404\b/.test(error.message)) throw error;
+  }
+}
+
 /**
  * 在对端 Windows 上跑一条命令。
  *
@@ -272,8 +281,12 @@ export function remoteWrapper({ cmd, cwd = null, token, timeout, self, port }) {
  *                 开发机这头的硬期限是 timeout + CLEANUP_GRACE —— 多出来的那段是留给对端
  *                 杀树、确认、回传的,不是第二个 deadline。
  * @param onLine   实时预览回调 —— 传的是 PTY 画面(脏),只用来看进度,别拿它当结果
+ * @param signal   调用方中止(开发机这头收到 Ctrl-C 之类):走跟超时同一条收尾 —— 删掉终端会话,
+ *                 wrapper 所在的 pwsh 一死、容器句柄被回收,整棵树跟着走;按 code 130 返回。
+ * @param onSession 会话一建好就交出 { projectId, sessionId }:开发机这头被 kill -9 时 finally 删不了它,
+ *                 调用方记下来,事后用 closeSession 补删(remote-smoke 的账本就是这么用的)。
  */
-export async function rexec(cmd, { cwd = null, timeout = 15 * 60_000, onLine = null, host = DEFAULT_HOST, projectId = null } = {}) {
+export async function rexec(cmd, { cwd = null, timeout = 15 * 60_000, onLine = null, host = DEFAULT_HOST, projectId = null, signal = null, onSession = null } = {}) {
   const token = randomBytes(9).toString("hex");
   const sink = collector(token);
 
@@ -292,6 +305,10 @@ export async function rexec(cmd, { cwd = null, timeout = 15 * 60_000, onLine = n
   const hardMs = timeout + CLEANUP_GRACE;
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), hardMs);
+  const cancel = () => ac.abort();
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener("abort", cancel, { once: true });
+  const cancelled = () => ({ code: 130, out: "[win-remote] 调用方中止,终端会话随即删掉", aborted: true });
 
   // 下面这一整段都得在 try 里:回传服务一 listen 就是个活着的 handle,只要还开着,
   // Node 事件循环就不会空 —— 而**建会话之前**的每一步都可能抛(对端重启、地址写错、
@@ -312,6 +329,7 @@ export async function rexec(cmd, { cwd = null, timeout = 15 * 60_000, onLine = n
       signal: ac.signal,
     }, host);
 
+    onSession?.({ projectId: pid, sessionId: session.id });
     const wrapper = remoteWrapper({ cmd, cwd, token, timeout, self, port });
 
     // 我们往 PTY 里塞的全部字符 —— 回显判定拿它当原文比对(见 echoFilter)。
@@ -366,7 +384,7 @@ export async function rexec(cmd, { cwd = null, timeout = 15 * 60_000, onLine = n
     return await Promise.race([
       sink.done,
       new Promise((r) => {
-        const fire = () => r({ code: 124, out: `[win-remote] 超时 ${hardMs}ms(命令期限 ${timeout}ms + 收尾 ${CLEANUP_GRACE}ms),未收到回传`, timedOut: true });
+        const fire = () => r(signal?.aborted ? cancelled() : { code: 124, out: `[win-remote] 超时 ${hardMs}ms(命令期限 ${timeout}ms + 收尾 ${CLEANUP_GRACE}ms),未收到回传`, timedOut: true });
         if (ac.signal.aborted) fire();
         else ac.signal.addEventListener("abort", fire, { once: true });
       }),
@@ -375,11 +393,13 @@ export async function rexec(cmd, { cwd = null, timeout = 15 * 60_000, onLine = n
     // deadline 到点时,卡住的那一跳会以 AbortError 抛出来。但 rexec 对调用者的承诺是
     // 「超时按失败返回而不是抛」(收回传那条路径一直是这么做的),控制面卡住没道理换一种。
     if (ac.signal.aborted) {
+      if (signal?.aborted) return cancelled();
       return { code: 124, out: `[win-remote] 超时 ${hardMs}ms,对端 Navi 的控制面请求没在期限内返回`, timedOut: true };
     }
     throw e;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", cancel);
     ac.abort();
     await sink.close();
     // pump 的失败只影响预览(实时画面),不该顶掉真正的结果或真正的错误 —— 但也不能

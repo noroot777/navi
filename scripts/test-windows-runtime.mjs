@@ -7,17 +7,20 @@
 // 真起服务、ConPTY、Windows 上的改名与删除，见 desktop/windows/scripts/smoke-runtime.mjs（要在 Windows 上跑）。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { installRuntime, sealRuntime, verifyRuntime } from "../desktop/shared/runtime-store.mjs";
+import { claimScratch, reclaimScratch } from "../desktop/shared/scratch.mjs";
 import { binaryKind, scanWindowsBinaries } from "../desktop/windows/scripts/binary-check.mjs";
 import { dataRoot, logsDir, runtimeStore } from "../desktop/windows/scripts/layout.mjs";
 import { writeSharedForwarder } from "../desktop/windows/scripts/win-deps.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const temporary = realpathSync(mkdtempSync(join(tmpdir(), "navi-windows-runtime-")));
+reclaimScratch(tmpdir(), "navi-windows-runtime-");
+const temporary = realpathSync(claimScratch(tmpdir(), "navi-windows-runtime-"));
 const publish = (source, store) => installRuntime(source, store, { activate: false });
 // 那台 Windows 测试机建不出符号链接：链接相关的几条只在建得出来的系统上跑。
 const canLink = process.platform !== "win32";
@@ -65,6 +68,21 @@ try {
   assert.throws(() => publish(tampered, store), /校验失败/);
   assert.deepEqual(readdirSync(store).filter((name) => name.startsWith(".installing-")), []);
   console.log("✓ 清单对不上不用：源不对拒绝发布，已发布的坏了拒绝复用且不被覆盖");
+
+  // 发布中途被杀留下的暂存：属主已经不在的由下一次发布收掉；属主还活着的、不带属主的老名字都不动。
+  const gone = spawnSync(process.execPath, ["-e", "0"]).pid;
+  const stale = join(store, `.installing-${gone}-${randomUUID()}`);
+  const live = join(store, `.installing-${process.pid}-${randomUUID()}`);
+  const legacy = join(store, `.installing-${randomUUID()}`);
+  for (const stage of [stale, live, legacy]) {
+    mkdirSync(join(stage, "server"), { recursive: true });
+    writeFileSync(join(stage, "server/half-copied.js"), "");
+  }
+  assert.equal(publish(next, store), join(store, nextID));
+  assert.ok(!existsSync(stale), "属主已经不在的暂存应被收掉");
+  assert.ok(existsSync(live) && existsSync(legacy), "属主活着的、认不出属主的暂存不该动");
+  for (const stage of [live, legacy]) rmSync(stage, { recursive: true, force: true });
+  console.log("✓ 发布中途被杀留下的暂存由下一次发布收掉，别人正在用的不动");
 
   if (canLink) {
     const linked = payload(join(temporary, "linked"), "three");

@@ -5,15 +5,17 @@
 //     追不到死父进程的后代，由冒烟的 Job Object 回收（desktop/windows/scripts/process-job.mjs）。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { startServer } from "../desktop/shared/runtime-smoke.mjs";
+import { claimScratch, reclaimScratch } from "../desktop/shared/scratch.mjs";
 
 const WINDOWS = process.platform === "win32";
 const job = WINDOWS ? await (await import("../desktop/windows/scripts/process-job.mjs")).claimProcessJob() : null;
-const temporary = realpathSync(mkdtempSync(join(tmpdir(), "navi-runtime-smoke-stop-")));
+reclaimScratch(tmpdir(), "navi-runtime-smoke-stop-");
+const temporary = realpathSync(claimScratch(tmpdir(), "navi-runtime-smoke-stop-"));
 const runtime = join(temporary, "runtime");
 mkdirSync(join(runtime, "server/dist"), { recursive: true });
 writeFileSync(join(runtime, "server/dist/index.js"), `

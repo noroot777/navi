@@ -149,6 +149,10 @@ export function collectRuntimes(store) {
 function publishRuntime(source, store, activate) {
   const manifest = verifyRuntime(source);
   mkdirSync(store, { recursive: true, mode: 0o700 });
+  // Windows 包（format 2）发布时没有真正的仓库锁（.store.lock 只在 mac 上是独占锁），暂存目录名带上发布者 pid：
+  // 发布中途被杀留下的那份，由下一次发布认出属主已经不在、收掉。mac 在独占锁下发布，原样不动。
+  const owned = manifest.format === 2;
+  if (owned) reclaimStages(store);
   const target = join(realpathSync(store), manifest.id);
   if (existsSync(target)) {
     if (lstatSync(target).isSymbolicLink()) throw new Error(`运行时目标不能是链接：${target}`);
@@ -156,7 +160,7 @@ function publishRuntime(source, store, activate) {
     if (activate) activateRuntime(store, manifest.id);
     return target;
   }
-  const stage = join(store, `.installing-${randomUUID()}`);
+  const stage = join(store, owned ? `.installing-${process.pid}-${randomUUID()}` : `.installing-${randomUUID()}`);
   try {
     cpSync(source, stage, { recursive: true, verbatimSymlinks: true });
     verifyRuntime(stage, manifest.id);
@@ -169,6 +173,16 @@ function publishRuntime(source, store, activate) {
     return target;
   } finally {
     rmSync(stage, { recursive: true, force: true, ...(WINDOWS ? { maxRetries: 10 } : {}) });
+  }
+}
+
+function reclaimStages(store) {
+  for (const name of readdirSync(store)) {
+    const pid = Number(/^\.installing-(\d+)-[0-9a-f-]{36}$/.exec(name)?.[1]);
+    if (!pid) continue;
+    try { process.kill(pid, 0); continue; } catch (error) { if (error.code === "EPERM") continue; }
+    // 删不掉（还有跑出来的进程开着里面的文件）就留给下一次，不拦这次发布。
+    try { rmSync(join(store, name), { recursive: true, force: true, maxRetries: 4 }); } catch {}
   }
 }
 

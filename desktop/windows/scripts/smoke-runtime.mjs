@@ -10,16 +10,18 @@
 // server 的 USERPROFILE/APPDATA 也指过去，不碰这台机器上已有的 Navi、它的端口和数据。
 //
 // 停干净靠 Job Object（process-job.mjs）：起任何进程之前先把自己收进容器，收尾时容器里除自己外一个不剩才算数，
-// 不靠父进程号追树。冒烟成功、失败都走同一段收尾，每一步各自兜底，前一步失败不跳过后一步。
+// 不靠父进程号追树。冒烟成功、失败都走同一段收尾，每一步各自兜底，前一步失败不跳过后一步。冒烟自己被强杀、
+// 收尾没走到时，容器随它一起关掉（里面的进程由内核结束），临时目录由下一次冒烟认出属主已经不在、收掉（scratch.mjs）。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { installRuntime } from "../../shared/runtime-store.mjs";
 import { startServer } from "../../shared/runtime-smoke.mjs";
+import { claimScratch, reclaimScratch } from "../../shared/scratch.mjs";
 import { scanWindowsBinaries } from "./binary-check.mjs";
 import { dataRoot, runtimeStore } from "./layout.mjs";
 import { claimProcessJob } from "./process-job.mjs";
@@ -33,13 +35,17 @@ const stripAnsi = (text) => text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "
 export async function smokeRuntime(source, { work = tmpdir() } = {}) {
   assert.equal(process.platform, "win32", "这份冒烟要在 Windows 上跑");
   const job = await claimProcessJob();
-  const temporary = mkdtempSync(join(work, "navi-win-smoke-"));
+  const stale = reclaimScratch(work, "navi-win-smoke-");
+  for (const directory of stale.removed) step(`收掉上一次被打断的冒烟留下的 ${directory}`);
+  for (const line of stale.failed) console.warn(`⚠︎ 上一次冒烟留下的目录删不掉，下次再试：${line}`);
+  const temporary = claimScratch(work, "navi-win-smoke-");
   const env = { LOCALAPPDATA: join(temporary, "LocalAppData") };
   let server;
   let failure;
   try {
     // ── 发布：暂存 → 改名，已发布的不覆盖，清单不过不用 ──────────────────────────
     const store = runtimeStore(env);
+    console.log("▶ 发布运行时（整份拷进临时 LOCALAPPDATA 再校验，上万个文件，慢的机器上要好几分钟）");
     const runtime = installRuntime(source, store, { activate: false });
     assert.equal(resolve(runtime, ".."), resolve(store));
     assert.match(basename(runtime), /^[a-f0-9]{64}$/);
