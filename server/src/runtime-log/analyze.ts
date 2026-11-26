@@ -1,18 +1,15 @@
 // 把服务端、页面、mac 壳三份运行日志对齐成一条时间线，找出每一次「窗口闪一下」是谁出了事。
 //
-// 「闪一下」在日志里的样子，**任何一种观察单独出现都算一次**，不靠另一来源补证据才成立：
-//   · 壳：撤掉页面（`page.takedown`）、重载页面（`page.reload`）、网页进程被系统结束；
-//   · 页面：崩到错误屏（`page.crash`）、主动整页重载（`page.reload`）、被整页刷新进来（`page.boot` nav=reload）；
-//   · 服务：一次**重启**（`server.start` 且认得出上一轮，见 analyze-restart.ts）。
-// 哪几条是同一次按身份认（analyze-occurrences.ts），不按时间挨得近不近。
+// 每一次**只由亲眼看到它的那一方来数**（analyze-occurrences.ts）：桌面壳里由壳数，页面只数壳看不见的崩溃和
+// 自己发起的重载，浏览器里再加上被整页刷新。服务重启没有窗口看见就不算一次，只进「服务重启」清单。
 //
-// 原因先看这一次里**直接观察到的**东西，再拿别的来源去解释撤页：
-//   1. 服务重启（壳报的新实例进程号对上了 server.start，或者只有服务自己的重启）→ 上一轮怎么没的按证据说
-//   2. 网页进程被结束、页面崩了 —— 壳 / 页面自己看见的，不让旁边时间上碰巧的事盖掉
-//   3. 撤页：电脑刚睡醒 → 服务卡住（卡顿区间跟撤页重叠，带调用栈、CPU、GC、当时的请求）→ 附近服务重启了
-//      → 端口上换了人 / 连接被拒 / 查不到
-//   4. 页面整页重载：谁发起的；同一次载入里报过的错
-// 只靠时间对上的关联在证据里明说「按时间推测」，不当成已证实的因果。
+// 原因先看看到它的那一方自己说了什么：
+//   1. 壳发现服务的实例号变了 → 服务重启；网页进程被结束；页面崩了；页面自己发起重载（谁发起的）
+//   2. 壳那一侧页面不在了（撤页 / 没载出来 / 没显示出来）：电脑刚睡醒 → 服务卡住（卡顿区间跟出事时刻重叠，带
+//      调用栈、CPU、GC、当时的请求）→ 附近有服务重启 → 端口上换了人 / 连接被拒 / 查不到
+//   3. 窗口菜单里点了重载；浏览器里被整页刷新：刷新之前那一页报过的错
+// 别的来源只是时间上对得上的，在证据里一律标「按时间对上」，不当成已证实的因果；上一轮服务怎么停的只说
+// 记录里写了什么（analyze-restart.ts）。
 import type { CauseKind, Incident, RuntimeLogRecord, RuntimeLogReport, StackTally } from "@navi/shared/runtime-log";
 import { restartVerdicts, type RestartVerdict } from "./analyze-restart.js";
 import { groupOccurrences, isShell, loadKey, type Occurrence } from "./analyze-occurrences.js";
@@ -112,6 +109,15 @@ const RELOAD_REASONS: Record<string, string> = {
   "error-screen": "在错误屏上点了重新载入", "load-failure": "在加载失败提示上点了刷新", reclaim: "放开回合占位后重新加载",
 };
 
+/** 别的来源在这一次附近的记录只按时间对得上，统一这样标：附在证据里，不当成已证实的原因。 */
+const NEAR = "（按时间对上）";
+
+/** `[from, to]` 里离 `at` 最近的一次认得出上一轮的服务重启。 */
+function nearbyRestart(all: RuntimeLogRecord[], restarts: Map<RuntimeLogRecord, RestartVerdict>, from: number, to: number, at: number) {
+  const candidates = within(all, from, to, (r) => r.ev === "server.start" && (restarts.get(r)?.basis ?? "none") !== "none");
+  return candidates.sort((a, b) => Math.abs(t(a) - at) - Math.abs(t(b) - at))[0];
+}
+
 function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Incident, "timeline"> {
   const { seen } = occurrence;
   const start = t(seen[0]!);
@@ -120,11 +126,10 @@ function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Inci
   const has = (ev: string, src?: (r: RuntimeLogRecord) => boolean) => seen.some((r) => r.ev === ev && (!src || src(r)));
   const evidence: string[] = [];
   const failures = seen.filter((r) => isShell(r) && (r.ev === "page.takedown" || r.ev === "page.load_failed" || r.ev === "page.not_presented"));
-  const takedown = failures[0];
   for (const failure of failures.filter((f, i) => failures.findIndex((g) => g.ev === f.ev) === i)) evidence.push(describeShellFailure(failure));
-  if (seen.some(isShell)) evidence.push(...refusedEvidence(all, start - 5_000, end + 60_000));
+  if (seen.some(isShell)) evidence.push(...refusedEvidence(all, start - 5_000, end + 60_000).map((line) => `${NEAR}${line}`));
 
-  // 同一次载入里报过的错（按载入身份认，不按时间）；没有载入标识的老记录只认这一次自己那几条。
+  // 同一次载入里报过的错（页面自己那条线，按载入身份认）；没有载入标识的老记录只认这一次自己那几条。
   const pageErrors = all.filter((r) => r.src === "web" && (r.ev === "page.crash" || r.ev === "page.error")
     && (loadKey(r) ? occurrence.loads.has(loadKey(r)!) : seen.includes(r)));
   const describeErrors = () => {
@@ -133,25 +138,19 @@ function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Inci
       evidence.push(`${where} ${error.name ?? "?"}${error.msg ? `：${error.msg}` : ""}${Array.isArray(error.frames) && error.frames.length ? `（${(error.frames as string[])[0]}）` : ""}`);
     }
   };
-  const restartLines = (byTime: boolean) => {
-    for (const { start: restart } of occurrence.restarts.filter((r) => r.byTime === byTime)) {
-      if (byTime) evidence.push(`（按时间推测）${restart.at < at ? "之前" : "之后"} ${secs(Math.abs(t(restart) - start))} 有一次服务重启`);
-      evidence.push(...restartEvidence(restart, restarts.get(restart)!, all, start));
-    }
+  const restartNear = (from: number, to: number) => {
+    const restart = nearbyRestart(all, restarts, from, to, start);
+    if (!restart) return false;
+    const gap = t(restart) - start;
+    evidence.push(`${NEAR}${gap <= 0 ? "这之前" : "这之后"} ${secs(Math.abs(gap))}，服务重启了一次`, ...restartEvidence(restart, restarts.get(restart)!, all, start));
+    return true;
   };
 
-  // 1. 这一次里直接看到了重启。
-  const direct = occurrence.restarts.filter((r) => !r.byTime);
-  if (direct.length) {
-    restartLines(false);
-    return { at, cause: "restart", summary: direct.length > 1 ? `服务连着重启了 ${direct.length} 次` : "服务重启了", evidence };
-  }
+  // 1. 看到它的那一方自己就说明了是怎么回事。
   if (has("page.reload", (r) => isShell(r) && r.reason === "instance_changed")) {
-    evidence.push("窗口发现服务的实例号变了（服务重启过），但没有那份新服务的启动记录");
-    return { at, cause: "restart", summary: "服务重启了", evidence };
+    restartNear(start - 10 * 60_000, end + 30_000);
+    return { at, cause: "restart", summary: "窗口发现服务换了一份（实例号变了），重载了页面", evidence };
   }
-
-  // 2. 壳 / 页面自己看见的故障。
   if (has("webcontent.terminated")) {
     return { at, cause: "webcontent", summary: "窗口的网页进程被系统结束了（多半是内存压力或 WebKit 崩溃），整页重载", evidence };
   }
@@ -159,39 +158,43 @@ function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Inci
     describeErrors();
     return { at, cause: "page_error", summary: "页面脚本出错，整页换成了错误屏", evidence };
   }
-
-  // 3. 壳那一侧页面不在了：拿服务那一侧的记录解释它。
-  if (takedown) {
+  const webReload = seen.find((r) => r.src === "web" && r.ev === "page.reload");
+  if (webReload) {
+    describeErrors();
+    return { at, cause: "reload", summary: `页面整页重载：${RELOAD_REASONS[String(webReload.reason)] ?? "原因没报上来"}`, evidence };
+  }
+  // 2. 壳那一侧页面不在了：自己说明不了为什么，附上服务那一侧时间对得上的记录。
+  const failure = failures[0];
+  if (failure) {
+    const what = failure.ev === "page.takedown" ? "窗口撤下页面" : failure.ev === "page.load_failed" ? "窗口没载出页面" : "页面没显示出来";
     const sleep = within(all, start - 30_000, end + 5_000, (r) => r.ev === "system.sleep");
     if (sleep.length) {
-      evidence.push(`（按时间推测）服务在撤页前 ${secs(start - t(sleep[0]!))} 记到电脑睡了 ${secs(Number(sleep[0]!.ms ?? 0))}`);
-      return { at, cause: "sleep", summary: "电脑刚从睡眠中醒来，醒来那一下探活没连上", evidence };
+      evidence.push(`${NEAR}服务在这之前 ${secs(start - t(sleep[0]!))} 记到电脑睡了 ${secs(Number(sleep[0]!.ms ?? 0))}`);
+      return { at, cause: "sleep", summary: `${what}，时间上对得上电脑刚从睡眠中醒来`, evidence };
     }
     const stalls = all.filter((r) => r.ev === "loop.stall" && r.src === "server");
     const stacks = all.filter((r) => r.ev === "loop.stall.stack");
     const overlapping = stalls.filter((stall) => {
       const [from, to] = stallInterval(stall);
-      return from <= t(takedown) + 1_000 && to >= t(takedown) - 8_000;
+      return from <= t(failure) + 1_000 && to >= t(failure) - 8_000;
     }).sort((a, b) => Number(b.ms) - Number(a.ms));
     if (overlapping.length) {
-      evidence.push(...describeStall(overlapping[0]!, stacks));
-      return { at, cause: "stall", summary: `服务卡住 ${secs(Number(overlapping[0]!.ms))} 没应答，窗口当成服务没了`, evidence };
+      const [first, ...rest] = describeStall(overlapping[0]!, stacks);
+      evidence.push(`${NEAR}${first}`, ...rest);
+      return { at, cause: "stall", summary: `${what}，时间上对得上服务卡住了 ${secs(Number(overlapping[0]!.ms))}`, evidence };
     }
-    if (occurrence.restarts.length) {
-      restartLines(true);
-      return { at, cause: "restart", summary: "服务没了，随后重启", evidence };
+    if (restartNear(start - 90_000, end + 30_000)) {
+      return { at, cause: "restart", summary: `${what}，时间上对得上服务重启`, evidence };
     }
-    const loadFailed = failures.find((f) => f.ev === "page.load_failed");
-    const notPresented = failures.find((f) => f.ev === "page.not_presented");
     const probed = failures.find((f) => f.ev === "page.takedown");
-    if (!probed && loadFailed) return { at, cause: "load_failed", summary: "窗口载页面失败（网络层报错），服务端没有对应的卡顿或重启", evidence };
-    if (!probed && notPresented) return { at, cause: "not_presented", summary: "页面载进来了却没显示出来，服务端没有对应的卡顿或重启", evidence };
     if (probed?.probe === "not_ours" || probed?.probe === "not_navi") {
       return { at, cause: "not_ours", summary: "端口上应答的不是自己那份服务（被别的 Navi 或别的程序占了）", evidence };
     }
     if (probed?.probe === "down") {
-      return { at, cause: "refused_connection", summary: "服务端口拒绝连接，但服务端没有重启记录", evidence };
+      return { at, cause: "refused_connection", summary: "服务端口拒绝连接，服务那一侧附近没有重启记录", evidence };
     }
+    if (!probed && failure.ev === "page.load_failed") return { at, cause: "load_failed", summary: "窗口载页面失败（网络层报错），服务那一侧附近没有卡顿或重启", evidence };
+    if (!probed) return { at, cause: "not_presented", summary: "页面载进来了却没显示出来，服务那一侧附近没有卡顿或重启", evidence };
     const serverNearby = within(all, start - 15 * 60_000, end + 15 * 60_000, (r) => r.src === "server");
     evidence.push(serverNearby.length
       ? "服务端这段时间没有卡顿（≥1 秒）、重启、睡眠记录——多半是机器整体被压着（CPU/内存/磁盘满载）或者网络栈的问题"
@@ -199,23 +202,17 @@ function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Inci
     return { at, cause: "unknown", summary: "没查到服务端那一侧的原因", evidence };
   }
 
-  // 4. 页面整页重载。
-  const webReload = seen.find((r) => r.src === "web" && r.ev === "page.reload");
-  if (webReload) {
-    describeErrors();
-    return { at, cause: "reload", summary: `页面整页重载：${RELOAD_REASONS[String(webReload.reason)] ?? "原因没报上来"}`, evidence };
-  }
+  // 3. 窗口菜单里点了重载。
   if (has("page.reload", (r) => isShell(r) && r.reason === "user")) {
     return { at, cause: "reload", summary: "在窗口菜单里点了重新载入", evidence };
   }
+
+  // 浏览器里被整页刷新：刷新之前那一页报过的错是它自己那条线上的；服务重启只是时间对得上。
   if (pageErrors.length) {
     describeErrors();
     return { at, cause: "page_error", summary: "页面报错之后被整页刷新", evidence };
   }
-  if (occurrence.restarts.length) {
-    restartLines(true);
-    return { at, cause: "restart", summary: "页面被整页刷新，附近服务重启过", evidence };
-  }
+  restartNear(start - 90_000, end + 30_000);
   return { at, cause: "reload", summary: "页面被整页刷新（浏览器刷新 / ⌘R，或浏览器自己重载）", evidence };
 }
 
@@ -237,7 +234,7 @@ export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummar
   for (const record of sorted) counts[record.src] = (counts[record.src] ?? 0) + 1;
 
   const restartMap = restartVerdicts(all, exits);
-  const incidents: Incident[] = groupOccurrences(all, restartMap).filter((occurrence) => inWindow(occurrence.seen[0]!.at)).map((occurrence) => {
+  const incidents: Incident[] = groupOccurrences(all).filter((occurrence) => inWindow(occurrence.seen[0]!.at)).map((occurrence) => {
     const verdict = classify(occurrence, { all, restarts: restartMap });
     const from = t(occurrence.seen[0]!) - 20_000;
     const to = t(occurrence.seen.at(-1)!) + 10_000;

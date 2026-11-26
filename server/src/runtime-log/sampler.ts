@@ -9,7 +9,7 @@
 // 30 分钟里没再卡就撤掉。触发武装的那一次卡顿本身采不到（那时候还没开）—— 卡顿一般会反复出现，
 // 采到的是后面几次。
 //
-// 记的只是函数名和代码里的相对位置（@navi/shared/runtime-log 的 scrubFrame），不是任何数据。
+// 记的只是核对过的代码位置（@navi/shared/runtime-log 的 verifyFrames，不存函数名），不是任何数据。
 import { Session } from "node:inspector";
 import { scrubFrame, verifyFrames } from "@navi/shared/runtime-log";
 import { CODE_DIR } from "../paths.js";
@@ -120,8 +120,7 @@ function summarize(profile: Profile, stopPerf: number, stall: StallWindow): void
   const fromUs = stall.startPerf * 1000 - offsetUs;
   const toUs = stall.endPerf * 1000 - offsetUs;
   const counts = new Map<string, { frames: string[]; count: number }>();
-  // 同一个节点在几百个样本里反复出现：每个节点只核对一次出处。名字按行号从代码文件里读（verifyFrames），
-  // 生产跑的是 server/dist 的 JS，行号就是那份文件的；开发时 tsx 直接跑 TS，采样器给的是转译后的行号，读不准就只留位置。
+  // 同一个节点在几百个样本里反复出现：每个节点只核对一次出处。
   const verified = new Map<number, string>();
   let total = 0;
   let t = profile.startTime;

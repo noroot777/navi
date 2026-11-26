@@ -9,8 +9,8 @@
 // 「白名单」指的是**取值本身**来自固定集合或能核对出处，不是「长得像安全的」：
 //   · 报错原文只输出下面那张固定模板表里的一句；错误名、错误码、系统调用名、HTTP 方法只认名单；
 //   · 路由只认服务端注册过的路由模板；
-//   · 栈帧的位置要是磁盘上真有的 navi 代码文件；函数名不取上报的那一份，由那个代码位置推出来
-//     （`verifyFrames`）——上报的名字可以是运行时拼出来的，可能来自数据；
+//   · 栈帧只存磁盘上真有的 navi 代码位置（`verifyFrames`），**不存函数名**——上报的名字可以是运行时拼出来的、
+//     页面随便填的，怎么核都证明不了它来自代码；只有 Node 内置模块的公开导出名这一份封闭名单带名字；
 //   · 页面生成的标识（标签页、这一次载入）服务端收下时换成摘要，页面塞什么都只剩一串散列。
 // 前两轮审查实测过按形状认的版本会漏：原生 `JSON.parse` 报错把数据的字段名带在引号里；
 // `/tasks/abc123/page/token123/customer` 这样的动态段长得像路由常量；`CustomerAcquisitionBudget` 长得
@@ -172,19 +172,15 @@ export function scrubFrame(
 export type CodeLocations = {
   /** 这个代码位置在不在：`server/dist/x.js`、`assets/a.js`、`node:fs`、`node_modules/hono`（位置去掉行列号）。 */
   exists(file: string): boolean;
-  /**
-   * 这一帧该叫什么名字，**由可信的那一侧给出**：navi 代码文件从源码里读出那一行所在的函数（`reported` 不看）；
-   * Node 内置模块只认它公开导出的名字（封闭集合）。给不出就 null，这一帧只留位置。
-   */
+  /** 这一帧能带的名字：只有 Node 内置模块、且 `reported` 是它公开导出的名字（封闭集合）；其余一律 null，只留位置。 */
   nameAt(file: string, line: number | null, reported: string): string | null;
 };
 
 /**
- * 栈帧候选过出处核对，输出「名字 位置」或只有「位置」：
+ * 栈帧候选过出处核对，输出代码位置（Node 内置模块的公开导出带名字）：
  *   · 位置不在 → `<other>`；
- *   · 名字**不从上报的那一份里取**——上报的函数名可以是运行时拼出来的（`{ [title]: () => {} }`、
- *     `Object.defineProperty(fn, "name", …)`），页面还能随便填；核对「这个词在代码文件里出现过」也不够，
- *     注释、界面文案、字符串常量里什么词都有（第 3 轮审查实测 `OpenAI` 就这样带了出去）。
+ *   · 上报的函数名不留：它可以是运行时拼出来的（`{ [title]: () => {} }`、`Object.defineProperty(fn, "name", …)`），
+ *     页面还能随便填；核对「这个词在代码文件里出现过」也挡不住（第 3 轮审查实测 `OpenAI` 就这样带了出去）。
  */
 export function verifyFrames(frames: unknown, locations: CodeLocations, limit = 8): string[] {
   if (!Array.isArray(frames)) return [];
@@ -313,8 +309,6 @@ export function sanitizeWebEvent(
       set("sincePrevMs", count(event.sincePrevMs));
       // 同一个标签页上一次载入的 load：把「那一次重载 / 崩溃」和「接着载进来的这一次」对成同一次。
       set("prev", id(event.prev));
-      // 页面所在的桌面壳进程（壳写在 UA 里）：壳那一侧的撤页 / 重载按它对到这一页，不按「同平台的下一页」。
-      set("shellPid", count(event.shellPid, 4_194_304));
       break;
     case "page.error":
     case "page.crash": {

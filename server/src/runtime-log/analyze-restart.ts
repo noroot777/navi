@@ -7,8 +7,8 @@
 //      · 残留——这次启动看见上一轮的锁还在（`previous`），或者退出账本给那一轮记了残留：它没收完尾就没了。
 //        同时还有退出意向（收到了信号、开始退出）就是「进了退出流程没走完」，残留压过意向，不说成正常停；
 //      · 那一轮自己写下的退出记录：只说明它**走到了哪一步**（收到了哪个信号、走到了退出码多少的那一步），
-//        锁也放掉了。它是进程自己写的，写完之后照样可能被强杀（第 3 轮审查实测：SIGTERM 收尾放完锁、
-//        退出前一刻 SIGKILL，旧版说成了「收到 SIGTERM 退出」）——最终怎么结束的，进程外没有记录就不下结论；
+//        锁也放掉了。它是进程自己写的，写完之后照样可能被强杀（复审第 1 轮实测：SIGTERM 收尾放完锁、
+//        退出前一刻 SIGKILL）——最终怎么结束的，进程外没有记录就不下结论，也不替它猜是谁发的信号；
 //      · 什么都没有：**就说不知道**。身份只能证明「是哪一轮」，证明不了它删过锁、走过退出流程——账本被清理、
 //        锁被截坏、记录超出读取范围，都会是这个样子（第 2 轮审查实测：SIGKILL 之后截坏锁，旧版说成了正常删锁）。
 // 一条上一轮的线索都没有就不算重启，但也不说成「全新启动」：可能只是更早的日志已经不在了。
@@ -35,25 +35,26 @@ const GUESS_WINDOW_MS = 86_400_000;
 type Previous = { run?: string | null; evidence?: string; silentMs?: number | null; kind?: string; signal?: string };
 type Ending = Omit<RestartVerdict, "basis">;
 
+// 措辞只分两段：「记到的」是记录里有的事实（注明是进程自己记的还是下一份启动时看到的）；「可能是」是常见的几种
+// 情况，明说是可能。不把进程自己写的步骤说成最终结局，不把可能说成原因。
+
 function unfinished(intent: { kind?: string; signal?: string } | null, silentMs: unknown): Ending {
-  const silent = silentMs ? `，最后一次心跳之后静默 ${secs(Number(silentMs))}` : "";
+  const silent = silentMs ? `，最后一次心跳之后静默了 ${secs(Number(silentMs))}` : "";
+  const lock = `锁还留着（下一份服务启动时看到的）${silent}`;
   if (intent) {
     const what = intent.kind === "signal" ? `收到 ${intent.signal ?? "信号"}` : "开始退出";
-    return { how: `上一份服务${what}、进了退出流程，但没收完尾（锁还留着）${silent}——收尾途中被强杀，或者数据目录写不进去`, ending: "unfinished" };
+    return { how: `上一份服务${what}（进程自己记的），但${lock}；可能是收尾途中被强杀，或者数据目录写不进去`, ending: "unfinished" };
   }
-  return { how: `上一份服务没留下任何退出记录就没了${silent}——被强杀（kill -9）、系统内存不够被结束，或原生崩溃`, ending: "vanished" };
+  return { how: `上一份服务没留下任何退出记录，${lock}；可能是被强杀（kill -9）、内存不够被系统结束，或者原生崩溃`, ending: "vanished" };
 }
 
-/** 进程自己记下、锁也放掉了：说它走到了哪一步，最终结局留空。 */
+/** 进程自己记下、锁也放掉了：只说它走到了哪一步，最终怎么结束的不下结论。 */
 function finished(exit: ExitSummary): Ending {
   const after = "，锁也放掉了；之后进程最终怎么结束的没有进程外的记录";
   if (exit.kind === "signal") {
-    return {
-      how: `上一份服务收到 ${exit.signal}（运行了 ${secs(Number(exit.uptimeMs ?? 0))}）开始收尾${after}——这个信号是有人让它停：升级、npm run restart、装更新或关机`,
-      ending: "stop_requested",
-    };
+    return { how: `上一份服务收到 ${exit.signal}（进程自己记的，运行了 ${secs(Number(exit.uptimeMs ?? 0))}）${after}`, ending: "stop_requested" };
   }
-  return { how: `上一份服务自己走到了退出（退出码 ${exit.code ?? "?"}）${after}`, ending: "exiting" };
+  return { how: `上一份服务走到了退出、退出码 ${exit.code ?? "?"}（进程自己记的）${after}`, ending: "exiting" };
 }
 
 /** 一条账本记录说明的结局。残留记录自己带着「当时看没看到退出意向」。 */
@@ -64,8 +65,7 @@ function fromLedger(exit: ExitSummary, intent: ExitSummary | undefined): Ending 
 }
 
 const UNKNOWN: Ending = {
-  how: "上一份服务怎么停的没有留下记录：退出账本里没有它，锁也没留下认得出的残留（账本或锁文件被清理、截坏，"
-    + "或者那条记录超出了读取范围）——分不出是正常停的还是被强杀",
+  how: "上一份服务没有退出记录，也没看到它残留的锁；怎么停的不知道（账本或锁文件可能被清理、截坏，或者记录超出了读取范围）",
   ending: "unknown",
 };
 

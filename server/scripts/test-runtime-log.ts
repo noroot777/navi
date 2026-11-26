@@ -73,7 +73,7 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.equal(described.msg, undefined);
   assert.ok(!JSON.stringify(described).includes("acme"), "系统调用报错里的路径不能进日志");
 
-  // 栈帧：位置要是真有的 navi 代码；名字由那个位置推出来，不取上报的那一份。
+  // 栈帧：只留核对过的代码位置，函数名一个都不存（Node 内置模块的公开导出除外）。
   const journalLines = readFileSync(join(CODE_DIR, "server/src/runtime-log/journal.ts"), "utf8").split("\n");
   const insideRuntimeLog = journalLines.findIndex((line) => line.startsWith("export function runtimeLog(")) + 3;
   const candidates = shared.scrubStack([
@@ -91,9 +91,9 @@ function serverLines(): Array<Record<string, unknown>> {
   const at = `server/src/runtime-log/journal.ts:${insideRuntimeLog}`;
   assert.deepEqual(candidates.slice(0, 2), [`runtimeLog ${at}`, `CustomerAcquisitionBudget ${at}`]);
   const verified = shared.verifyFrames(candidates, serverCodeLocations, 12);
-  assert.equal(verified[0], `runtimeLog ${at}`, "名字是从代码里那一行所在的函数读出来的");
-  assert.equal(verified[1], `runtimeLog ${at}`, "上报的名字不管是什么，都换成代码里读出来的");
-  assert.equal(verified[2], "server/src/runtime-log/journal.ts:1", "那一行不在任何函数里：只留位置");
+  assert.equal(verified[0], at, "navi 代码只留位置，对着代码看那一行就知道是哪个函数");
+  assert.equal(verified[1], at, "上报的名字不管是什么都不留");
+  assert.equal(verified[2], "server/src/runtime-log/journal.ts:1");
   assert.equal(verified[3], "<other>", "不存在的文件不当代码位置");
   assert.equal(verified[4], "<other>");
   assert.ok(["node_modules/hono", "<other>"].includes(verified[5]!), `依赖不给名字：${verified[5]}`);
@@ -103,7 +103,7 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.ok(!/CustomerAcquisitionBudget|OpenAI/.test(JSON.stringify(verified)));
   assert.equal(serverCodeLocations.exists("server/../../../etc/hosts"), false, "跳出代码目录的不认");
 
-  // 真抛一次：名字是运行时拼出来的（来自数据）就进不了日志；具名函数里的那一帧照样有名字。
+  // 真抛一次：名字是运行时拼出来的（来自数据）也进不了日志；那一帧照样定位得到这个文件。
   // 这个名字在本文件里只能拼出来，不能整个写出来。
   const dataName = ["Quarterly", "Merger", "Plan"].join("");
   const dynamic = { [dataName]: () => { throw new TypeError("x is not a function"); } };
@@ -112,7 +112,8 @@ function serverLines(): Array<Record<string, unknown>> {
   try { namedThrowerForRuntimeLogTest(); } catch (caught) { thrown = caught; }
   const real = describeError(thrown);
   assert.ok(!JSON.stringify(real).includes(dataName), `运行时拼出来的函数名不能进日志：${JSON.stringify(real.frames)}`);
-  assert.ok((real.frames as string[]).some((frame) => frame.startsWith("namedThrowerForRuntimeLogTest server/scripts/test-runtime-log.ts:")), JSON.stringify(real.frames));
+  assert.ok(!JSON.stringify(real).includes("namedThrower"), "写在代码里的函数名也不存");
+  assert.ok((real.frames as string[]).some((frame) => frame.startsWith("server/scripts/test-runtime-log.ts:")), JSON.stringify(real.frames));
   assert.deepEqual(shared.scrubStack("f@http://localhost:4317/assets/index-abc.js:1:900", ["http://localhost:4317"]), ["f assets/index-abc.js:1:900"],
     "页面产物带列号：压成一行的产物只有它能定位");
 
@@ -128,16 +129,14 @@ function serverLines(): Array<Record<string, unknown>> {
     frames: ["assets/a.js:1:5", "assets/a.js:1:9", "<other>", "<native>", "<other>"],
   }, "页面报的函数名一个都不留：文件真在、词在产物里出现过都不算");
   assert.ok(!/abc123|Customer|OpenAI/.test(JSON.stringify(web)), "页面生成的标识只留摘要");
-  const runtimeLogSource = readFileSync(join(CODE_DIR, "web/src/lib/runtimeLog.ts"), "utf8").split("\n");
-  const insideReportPageCrash = runtimeLogSource.findIndex((line) => line.startsWith("export function reportPageCrash(")) + 2;
   assert.equal(webCodeLocations.exists("src/lib/runtimeLog.ts"), true, "开发时的页面源码按磁盘上的文件核对");
-  assert.equal(webCodeLocations.nameAt("src/lib/runtimeLog.ts", insideReportPageCrash, "OpenAI"), "reportPageCrash", "源码里按行读出所在的函数");
+  assert.equal(webCodeLocations.nameAt("src/lib/runtimeLog.ts", 1, "reportPageCrash"), null, "页面报的名字一个都不收");
   assert.equal(webCodeLocations.exists("src/../../server/src/main.ts"), false);
   assert.equal(shared.sanitizeWebEvent({ ev: "page.crash", name: "TypeError", msg: "客户收购预算 500 万元" }, options)!.msg, undefined, "页面报的 msg 必须正好是固定说法里的一句");
   assert.equal(shared.sanitizeWebEvent({ ev: "page.crash", name: "TypeError", msg: "Cannot read properties of undefined/null" }, options)!.msg, "Cannot read properties of undefined/null");
   assert.equal(shared.sanitizeWebEvent({ ev: "task.content", text: "x" }, options), null, "名单外的事件不收");
   assert.deepEqual(shared.sanitizeWebEvent({ ev: "page.boot", nav: "reload", sincePrevMs: 1200.4, hidden: false, extra: "x", prev: "l0", shellPid: 4242 }, options),
-    { ev: "page.boot", nav: "reload", hidden: false, sincePrevMs: 1200, shellPid: 4242 }, "多塞的字段、不像标识的标识都不收");
+    { ev: "page.boot", nav: "reload", hidden: false, sincePrevMs: 1200 }, "多塞的字段、不像标识的标识都不收");
 }
 
 // ── 1b. 慢请求和卡顿时在处理的请求记注册的路由模板，不是请求路径 ─────────
@@ -240,9 +239,12 @@ function serverLines(): Array<Record<string, unknown>> {
   const at = (ms: number) => new Date(T + ms).toISOString();
   const S = (ms: number, ev: string, fields: Record<string, unknown> = {}) => ({ at: at(ms), src: "server" as const, pid: 100, ev, ...fields });
   const M = (ms: number, ev: string, fields: Record<string, unknown> = {}) => ({ at: at(ms), src: "mac" as const, pid: 9, ev, ...fields });
-  // 窗口里的页面：每次载进来一页（load），带着上一页是哪个（prev）。
+  // 窗口里的页面：每次载进来一页（load），带着上一页是哪个（prev）；壳记下它显示出来了（page.presented）。
   let page = 0;
-  const boot = (ms: number, nav = "navigate") => ({ at: at(ms), src: "web" as const, pid: 100, ev: "page.boot", shell: "mac", shellPid: 9, tab: "tab1", nav, prev: `p${page}`, load: `p${++page}` });
+  const boot = (ms: number, nav = "navigate") => [
+    { at: at(ms), src: "web" as const, pid: 100, ev: "page.boot", shell: "mac", tab: "tab1", nav, prev: `p${page}`, load: `p${++page}` },
+    M(ms + 100, "page.presented"),
+  ];
   const records = [
     S(0, "server.start", { inst: "aaaa", run: "run-a" }),
     // 卡顿：06:00 起卡 7 秒，窗口在第 5 秒撤页、又起了一份服务被挡回
@@ -252,24 +254,24 @@ function serverLines(): Array<Record<string, unknown>> {
     M(363_200, "server.spawn", { serverPid: 555 }),
     S(363_500, "server.refused", { holderPid: 100, pid: 555 }),
     S(365_000, "loop.stall", { n: 4, ms: 7000, from: at(358_000), cpuMs: 300, gcMs: 0, rssMB: 500, heapMB: 300, inflight: [{ method: "POST", route: "/api/tasks/:x/messages", ageMs: 7000 }] }),
-    S(365_100, "loop.stall.stack", { n: 4, ms: 7000, samples: 690, stacks: [{ pct: 92, frames: ["execFileSync node:child_process", "regressionSnapshot server/dist/regression-snapshot.js:14"] }] }),
+    S(365_100, "loop.stall.stack", { n: 4, ms: 7000, samples: 690, stacks: [{ pct: 92, frames: ["execFileSync node:child_process", "server/dist/regression-snapshot.js:14"] }] }),
     M(366_000, "page.reload", { reason: "user" }),
-    boot(367_000, "reload"),
+    ...boot(367_000, "reload"),
     // 正常重启：SIGTERM 之后起来新的一份
     S(1_200_000, "server.start", { inst: "bbbb", run: "run-b", pid: 101, startupMs: 2400 }),
     M(1_201_000, "page.reload", { reason: "instance_changed", serverPid: 101 }),
-    boot(1_202_000, "reload"),
+    ...boot(1_202_000, "reload"),
     // 被强杀：残留锁、没有退出记录
     S(2_400_000, "server.start", { inst: "cccc", run: "run-c", pid: 102, previous: { run: "run-b", evidence: "none", silentMs: 4000 } }),
     M(2_401_000, "page.reload", { reason: "instance_changed", serverPid: 102 }),
-    boot(2_402_000, "reload"),
+    ...boot(2_402_000, "reload"),
     // 睡眠唤醒
     S(3_600_000, "system.sleep", { ms: 1_800_000 }),
     M(3_600_400, "page.takedown", { probe: "down", via: "guard" }),
-    boot(3_603_000),
+    ...boot(3_603_000),
     // 网页进程被结束
     M(4_800_000, "webcontent.terminated"),
-    boot(4_800_500, "reload"),
+    ...boot(4_800_500, "reload"),
     // 服务端什么都没有
     M(6_000_000, "page.takedown", { probe: "unreachable", via: "guard", streak: 3 }),
     S(6_100_000, "server.vitals", { rssMB: 400 }),
@@ -282,24 +284,26 @@ function serverLines(): Array<Record<string, unknown>> {
   const causes = report.incidents.map((incident) => incident.cause);
   assert.deepEqual(causes, ["stall", "restart", "restart", "sleep", "webcontent", "unknown"], JSON.stringify(report.incidents.map((i) => i.summary)));
   const [stall, graceful, killed] = report.incidents;
-  assert.match(stall!.summary, /卡住 7\.0 秒/);
+  assert.match(stall!.summary, /卡住了 7\.0 秒/);
   assert.ok(stall!.evidence.includes("窗口撤下页面：连续 3 次探活没等到答复"), JSON.stringify(stall!.evidence));
   assert.ok(stall!.evidence.some((line) => line.includes("窗口以为服务没了又起了一份（进程 555），被单例锁挡回")), JSON.stringify(stall!.evidence));
   assert.ok(stall!.evidence.some((line) => line.includes("在等")), "CPU 远小于卡顿时长 → 在等");
-  assert.ok(stall!.evidence.some((line) => line.includes("regressionSnapshot")));
+  assert.ok(stall!.evidence.some((line) => line.includes("server/dist/regression-snapshot.js:14")));
   assert.ok(stall!.evidence.some((line) => line.includes("POST /api/tasks/:x/messages")));
-  assert.ok(graceful!.evidence.some((line) => line.includes("SIGTERM") && !line.includes("推测")), "按 runId 对上的不写推测");
+  assert.match(graceful!.summary, /实例号变了/, "窗口自己看见的服务换了一份");
+  assert.ok(graceful!.evidence.some((line) => line.includes("SIGTERM") && !line.includes("推测")), "上一轮按 runId 对上的不写推测");
+  assert.ok(graceful!.evidence.some((line) => line.startsWith("（按时间对上）")), "服务那一侧的重启只是时间上对得上");
   assert.ok(killed!.evidence.some((line) => line.includes("没留下任何退出记录")));
   assert.equal(report.restarts.length, 2, "查不到上一轮的那条 server.start 不算重启");
   assert.ok(report.incidents.every((incident) => incident.timeline.filter((r) => r.ev === "page.boot").length <= 1), "窗口每次载回来的那一页只归它前面那一次");
-  assert.equal(report.hotspots[0]?.frame, "regressionSnapshot server/dist/regression-snapshot.js:14");
+  assert.equal(report.hotspots[0]?.frame, "server/dist/regression-snapshot.js:14");
   assert.equal(report.stalls.waiting, 1);
   const text = renderRuntimeLogReport(report, { timeline: true });
   assert.match(text, /窗口闪一下 \/ 重载：6 次/);
   assert.match(text, /卡顿时最常在跑的代码/);
 }
 
-// ── 4b. 上一轮按证据说到哪一步；每次观察按身份成一次 ────────────────────
+// ── 4b. 上一轮只说记录里有的；每次只由看见的那一方来数 ──────────────────
 {
   const T = Date.parse("2026-11-26T01:00:00.000Z");
   const at = (s: number) => new Date(T + s * 1000).toISOString();
@@ -308,7 +312,7 @@ function serverLines(): Array<Record<string, unknown>> {
   const M = (s: number, ev: string, fields: Record<string, unknown> = {}) => ({ at: at(s), src: "mac" as const, pid: 9, ev, ...fields });
   const sigterm = (s: number, runId?: string) => ({ at: at(s), pid: 100, kind: "signal" as const, signal: "SIGTERM", uptimeMs: 99_000, ...(runId ? { runId } : {}) });
 
-  // A 正常停（SIGTERM）→ B 起来 → B 没留下任何记录就没了 → C 起来。C 不能被说成「有人让它停的」。
+  // A 正常停（SIGTERM）→ B 起来 → B 没留下任何记录就没了 → C 起来。C 不能借 A 的 SIGTERM。
   const exits = [sigterm(99, "a"), { at: at(200), pid: 200, runId: "b", kind: "residual" as const, evidence: "none" as const, silentMs: 5000 }];
   for (const previous of [{ run: "b", evidence: "none", silentMs: 5000 }, undefined]) {
     const report = analyzeRuntimeLog([
@@ -319,32 +323,38 @@ function serverLines(): Array<Record<string, unknown>> {
     assert.deepEqual(report.restarts.map((r) => r.at), [at(100), at(200)], "查不到上一轮的 A 不算重启");
     assert.match(report.restarts[0]!.how, /SIGTERM/);
     assert.ok(!report.restarts[1]!.how.includes("SIGTERM"), `B 的异常消失不能借 A 的 SIGTERM：${report.restarts[1]!.how}`);
-    assert.match(report.restarts[1]!.how, /没留下任何退出记录/);
-    assert.equal(report.incidents.length, 2, "连着两次重启各算一次");
-    assert.ok(report.incidents.every((incident) => incident.cause === "restart"));
+    assert.match(report.restarts[1]!.how, /没留下任何退出记录.*可能是/);
+    assert.equal(report.incidents.length, 0, "服务重启没有窗口看见就不算一次闪，只进重启清单");
   }
 
-  // 认得出是哪一轮、却没有它的任何退出证据：说不知道，不说它删过锁、走过退出流程。
+  // 认得出是哪一轮、却没有它的任何退出证据：说不知道。
   const twoStarts = [S(0, "server.start", { run: "a", pid: 100 }), S(100, "server.start", { run: "b", pid: 200 })];
   const noEvidence = analyzeRuntimeLog(twoStarts, []).restarts[0]!.how;
-  assert.match(noEvidence, /没有留下记录/);
-  assert.ok(!/删掉了自己的锁|走过退出流程|有人让它停/.test(noEvidence), noEvidence);
-  // 同一轮既有退出意向又有残留：它进了退出流程但没收完尾，残留压过意向。
+  assert.match(noEvidence, /怎么停的不知道/);
+  assert.ok(!/删掉了自己的锁|走过退出流程|有人让它停|放掉了/.test(noEvidence), noEvidence);
+  // 同一轮既有退出意向又有残留：残留压过意向，只说记到了什么、可能是什么。
   const residualWithIntent = analyzeRuntimeLog(twoStarts, [sigterm(99, "a"), { at: at(100), pid: 100, runId: "a", kind: "residual", evidence: "exit_intent" }]).restarts[0]!.how;
-  assert.match(residualWithIntent, /收到 SIGTERM、进了退出流程，但没收完尾/);
-  assert.ok(!residualWithIntent.includes("有人让它停"), residualWithIntent);
+  assert.match(residualWithIntent, /收到 SIGTERM（进程自己记的），但锁还留着（下一份服务启动时看到的）；可能是/);
+  // 进程自己写下的退出记录只说明它走到了哪一步：收到 SIGTERM、放掉了锁之后照样可能被强杀，不说成「它退出了」。
+  const stopped = analyzeRuntimeLog(twoStarts, [sigterm(99, "a")]).restarts[0]!.how;
+  assert.match(stopped, /收到 SIGTERM（进程自己记的.*锁也放掉了；之后进程最终怎么结束的没有进程外的记录/);
+  assert.ok(!/SIGTERM 退出|自己退出了|有人/.test(stopped), stopped);
+  const exited = analyzeRuntimeLog(twoStarts, [{ at: at(99), pid: 100, runId: "a", kind: "exit", code: 0 }]).restarts[0]!.how;
+  assert.match(exited, /走到了退出、退出码 0（进程自己记的），锁也放掉了；之后进程最终怎么结束的没有进程外的记录/);
 
-  // 日志窗口里只有一次启动，上一轮不在这份日志里：退回按时间找，且写明推测；残留记录也算。
+  // 上一轮不在这份日志里：退回按时间找，且写明推测；残留记录也算。
   const guessed = analyzeRuntimeLog([S(100, "server.start", { run: "new", pid: 200 })], [sigterm(99)]);
-  assert.equal(guessed.incidents.length, 1, "窗口里第一条启动也可能是重启");
   assert.match(guessed.restarts[0]!.how, /^（按时间推测）.*SIGTERM/);
-  assert.ok(guessed.incidents[0]!.evidence[0]!.startsWith("（按时间推测）"));
   const onlyResidual = analyzeRuntimeLog([S(100, "server.start", { run: "b", pid: 200 })], [{ at: at(100), pid: 100, runId: "a", kind: "residual", evidence: "none" }]);
-  assert.equal(onlyResidual.incidents.length, 1);
-  assert.match(onlyResidual.restarts[0]!.how, /^（按时间推测）上一份服务没留下任何退出记录就没了/);
-  assert.equal(analyzeRuntimeLog([S(100, "server.start", { run: "new" })], []).incidents.length, 0, "找不到上一轮的线索就不算重启");
+  assert.match(onlyResidual.restarts[0]!.how, /^（按时间推测）上一份服务没留下任何退出记录/);
+  assert.equal(analyzeRuntimeLog([S(100, "server.start", { run: "new" })], []).restarts.length, 0, "找不到上一轮的线索就不算重启");
 
-  // 页面崩到错误屏、浏览器整页刷新：没有壳的事件也各算一次。
+  // 读取窗口之前那次启动是上下文：窗口里第一次重启靠它认上一轮，它自己不进结果。
+  const windowed = analyzeRuntimeLog([S(-8 * 86_400, "server.start", { run: "old", pid: 100 }), S(100, "server.start", { run: "new", pid: 200 })], [], T);
+  assert.deepEqual(windowed.restarts.map((r) => r.at), [at(100)], "窗口外那次启动不报，但这次重启认得出上一轮");
+  assert.equal(windowed.counts.server, 1, "统计只算窗口里的");
+
+  // 页面崩到错误屏、浏览器整页刷新：页面自己看见的，各算一次。
   const crash = analyzeRuntimeLog([S(0, "server.start"), W(100, "page.crash", { name: "TypeError", msg: "Cannot read properties of undefined/null" })], []);
   assert.deepEqual(crash.incidents.map((i) => i.cause), ["page_error"]);
   assert.ok(crash.incidents[0]!.evidence.some((line) => line.includes("Cannot read properties of undefined/null")));
@@ -352,6 +362,10 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.deepEqual(reload.incidents.map((i) => i.cause), ["reload"]);
   assert.match(reload.incidents[0]!.summary, /整页刷新/);
   assert.equal(analyzeRuntimeLog([W(100, "page.boot", { nav: "navigate" })], []).incidents.length, 0, "正常打开页面不算");
+  // 浏览器刷新附近有一次服务重启：只附在证据里、标明按时间对上，原因还是刷新。
+  const refreshedNearRestart = analyzeRuntimeLog([...twoStarts, W(103, "page.boot", { nav: "reload", tab: "t", load: "l2", prev: "l1" })], [sigterm(99, "a")]);
+  assert.deepEqual(refreshedNearRestart.incidents.map((i) => i.cause), ["reload"]);
+  assert.ok(refreshedNearRestart.incidents[0]!.evidence[0]!.startsWith("（按时间对上）这之前 3.0 秒，服务重启了一次"), JSON.stringify(refreshedNearRestart.incidents[0]!.evidence));
 
   // 同一次载入的「主动重载」和接着载进来的那一页（prev 指着它）是同一次。
   const retried = analyzeRuntimeLog([
@@ -360,7 +374,7 @@ function serverLines(): Array<Record<string, unknown>> {
   ], []);
   assert.deepEqual(retried.incidents.map((i) => i.summary), ["页面整页重载：在加载失败提示上点了刷新"]);
 
-  // 第 2 轮审查实测：同一个标签页隔几秒刷新三次、两个标签页各出一次事——每一次都要在。
+  // 同一个标签页隔几秒刷新三次、两个标签页各出一次事——每一次都要在。
   const thrice = analyzeRuntimeLog([1, 2, 3].map((n) => W(100 + n * 4, "page.boot", { nav: "reload", tab: "t1", load: `l${n}`, prev: `l${n - 1}` })), []);
   assert.equal(thrice.incidents.length, 3, "不同的载入从不合并");
   const legacy = analyzeRuntimeLog([100, 110, 120].map((s) => W(s, "page.boot", { nav: "reload", tab: "t1" })), []);
@@ -381,37 +395,24 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.equal(analyzeRuntimeLog([boundary, W(130, "page.boot", { nav: "reload", tab: "t1", load: "l9", prev: "l8" })], []).incidents[0]!.cause, "reload",
     "别的载入里的报错不拿来解释这一次");
 
-  // 壳撤页到页面载回来是一次；同一时刻浏览器标签页里的崩溃是另一次。
+  // 桌面壳里的页面由壳来数：壳里载回来的那一页（哪怕是 reload 进来的）不另算；同一时刻浏览器标签页里的崩溃是另一次。
   const shellAndTab = analyzeRuntimeLog([
     M(100, "page.takedown", { probe: "unreachable", streak: 3 }),
     W(105, "page.crash", { tab: "tb", load: "lb", name: "TypeError", shell: "browser" }),
     M(108, "page.takedown", { probe: "down", via: "navigation" }),
-    W(120, "page.boot", { tab: "tm", load: "m2", prev: "m1", nav: "navigate", shell: "mac", shellPid: 9 }),
+    W(120, "page.boot", { tab: "tm", load: "m2", prev: "m1", nav: "reload", shell: "mac" }),
+    M(121, "page.presented"),
   ], []);
   assert.deepEqual(shellAndTab.incidents.map((i) => i.cause), ["unknown", "page_error"], JSON.stringify(shellAndTab.incidents.map((i) => i.summary)));
-  // 进程自己写下的退出记录只说明它走到了哪一步：收到 SIGTERM、放掉了锁之后照样可能被强杀，不说成「它退出了」。
-  const stopped = analyzeRuntimeLog(twoStarts, [sigterm(99, "a")]).restarts[0]!.how;
-  assert.match(stopped, /收到 SIGTERM.*开始收尾，锁也放掉了；之后进程最终怎么结束的没有进程外的记录/);
-  assert.ok(!/SIGTERM 退出|自己退出了/.test(stopped), stopped);
-  const exited = analyzeRuntimeLog(twoStarts, [{ at: at(99), pid: 100, runId: "a", kind: "exit", code: 0 }]).restarts[0]!.how;
-  assert.match(exited, /自己走到了退出（退出码 0），锁也放掉了；之后进程最终怎么结束的没有进程外的记录/);
 
-  // 读取窗口之前那次启动是上下文：窗口里第一次重启靠它认上一轮，它自己不进结果。
-  const windowed = analyzeRuntimeLog([S(-8 * 86_400, "server.start", { run: "old", pid: 100 }), S(100, "server.start", { run: "new", pid: 200 })], [], T);
-  assert.deepEqual(windowed.restarts.map((r) => r.at), [at(100)], "窗口外那次启动不报，但这次重启认得出上一轮");
-  assert.match(windowed.restarts[0]!.how, /没有留下记录/);
-  assert.equal(windowed.incidents.length, 1);
-  assert.equal(windowed.counts.server, 1, "统计只算窗口里的");
-
-  // 第 3 轮审查：两份壳各出一次事、关掉重开再出事——按壳进程分开，谁的页面回来收谁的口。
+  // 两份壳各出一次事、关掉重开再出事——按壳进程分开，各自显示出来了才收口。
   const independentShells = analyzeRuntimeLog([
     M(100, "page.takedown", { pid: 10, probe: "down", via: "guard" }),
     M(105, "webcontent.terminated", { pid: 20 }),
-    W(110, "page.boot", { tab: "x", load: "x2", prev: "x1", nav: "navigate", shell: "mac", shellPid: 10 }),
-    W(112, "page.boot", { tab: "y", load: "y2", prev: "y1", nav: "reload", shell: "mac", shellPid: 20 }),
+    M(110, "page.presented", { pid: 10 }),
+    M(112, "page.presented", { pid: 20 }),
   ], []);
   assert.deepEqual(independentShells.incidents.map((i) => i.cause), ["refused_connection", "webcontent"], JSON.stringify(independentShells.incidents.map((i) => i.summary)));
-  assert.ok(independentShells.incidents.every((i) => i.timeline.filter((r) => r.ev === "page.boot").length >= 1));
   const relaunched = analyzeRuntimeLog([
     M(100, "page.reload", { pid: 10, reason: "user" }),
     M(101, "app.quit", { pid: 10 }),
@@ -419,19 +420,15 @@ function serverLines(): Array<Record<string, unknown>> {
     M(125, "webcontent.terminated", { pid: 20 }),
   ], []);
   assert.deepEqual(relaunched.incidents.map((i) => i.cause), ["reload", "webcontent"], "关掉重开之后的是新的一次");
-  // 页面没带壳进程号（老版本壳）：不拿它收壳的口，各自成一次。
-  const unknownShell = analyzeRuntimeLog([
-    M(100, "page.takedown", { probe: "unreachable", streak: 3 }),
-    W(110, "page.boot", { tab: "z", load: "z2", prev: "z1", nav: "reload", shell: "mac" }),
-  ], []);
-  assert.equal(unknownShell.incidents.length, 2);
-  // 壳自己记下页面显示出来了，也收口：之后再撤页是新的一次。
   const presented = analyzeRuntimeLog([
     M(100, "page.takedown", { probe: "unreachable", streak: 3 }),
     M(110, "page.presented"),
     M(200, "page.takedown", { probe: "down" }),
   ], []);
-  assert.equal(presented.incidents.length, 2);
+  assert.equal(presented.incidents.length, 2, "显示出来之后再撤页是新的一次");
+  // 撤页之后在离线提示上点了重新载入：原因是撤页，不是那一下点击。
+  const takedownThenUser = analyzeRuntimeLog([M(100, "page.takedown", { probe: "down" }), M(130, "page.reload", { reason: "user" })], []);
+  assert.deepEqual(takedownThenUser.incidents.map((i) => i.cause), ["refused_connection"]);
 
   // 用户已经看见的失败都要成一次：没载出来、载进来了没显示出来。
   const loadFailed = analyzeRuntimeLog([M(100, "page.load_failed", { domain: "NSURLErrorDomain", code: -1004 })], []);
@@ -444,15 +441,16 @@ function serverLines(): Array<Record<string, unknown>> {
     M(100, "page.load_failed", { domain: "NSURLErrorDomain", code: -1001 }),
   ], []);
   assert.deepEqual(loadFailedInStall.incidents.map((i) => i.cause), ["stall"], "没载出来也拿服务那一侧解释");
+  assert.ok(loadFailedInStall.incidents[0]!.evidence.some((line) => line.startsWith("（按时间对上）服务主线程卡了")), JSON.stringify(loadFailedInStall.incidents[0]!.evidence));
 
-  // 壳报的新服务进程号对上了，但那份服务是很久以前起的（进程号复用）：不算同一次重启。
+  // 壳发现实例号变了：重启是壳自己看见的；服务那一侧的启动记录离得远（进程号复用、日志对不上）就不附。
   const reused = analyzeRuntimeLog([
     S(0, "server.start", { run: "a", pid: 100 }),
     S(100, "server.start", { run: "b", pid: 101 }),
     M(100 + 7200, "page.reload", { reason: "instance_changed", serverPid: 101 }),
   ], [sigterm(99, "a")]);
-  assert.equal(reused.incidents.length, 2, JSON.stringify(reused.incidents.map((i) => i.summary)));
-  assert.match(reused.incidents[1]!.evidence.join("\n"), /没有那份新服务的启动记录/);
+  assert.deepEqual(reused.incidents.map((i) => i.cause), ["restart"], JSON.stringify(reused.incidents.map((i) => i.summary)));
+  assert.ok(!reused.incidents[0]!.evidence.some((line) => line.includes("SIGTERM")), "两小时前的那次重启不附在这一次上");
 }
 
 // ── 5. 读目录、导出包 ────────────────────────────────────────────────────

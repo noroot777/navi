@@ -1,82 +1,30 @@
 // 栈帧出处（`CodeLocations`，见 @navi/shared/runtime-log 的 verifyFrames）：位置是不是磁盘上真有的 navi 代码，
-// 这一帧叫什么名字。
+// 这一帧能不能带名字。
 //
-// **名字从可信的一侧读出来，不回显上报的那一份**（第 3 轮审查：旧版核对「这个词在代码文件里出现过」，
-// 注释、界面文案里的 `OpenAI` 就带了出去）：
-//   · navi 自己的代码文件：从那一行往上找包住它的函数声明（`function f(`、`const f = (…) =>`、方法 `f(…) {`），
-//     大括号配对确认它真的包住这一行。读出来的是代码文本里的声明名，跟运行时这个函数被叫成什么无关；
-//     找不到（匿名回调、压缩过的产物）就只留位置；
-//   · Node 内置模块：只认它公开导出的名字，封闭集合；内部模块、依赖包不给名字。
+// **日志里不存函数名**，只存核对过的代码位置（文件:行[:列]），拿到日志的人对着代码看那一行就知道是哪个函数。
+// 唯一带名字的是 Node 内置模块的公开导出（`execFileSync node:child_process`）：那是一份封闭名单，跟错误名一样。
+// 前三轮审查一路证明「上报的名字可信」都没收住——文件存在不够、词在代码里出现过不够（注释、界面文案里什么词都有），
+// 从源码按行推所在函数又会张冠李戴；名字本来就是可以被运行时改写、被页面随便填的东西，所以干脆不收。
 //
 // 两套代码根：服务端 `server/ shared/ mcp/` 底下的文件、Node 内置、依赖包；页面是 web 产物（`web/dist/…`）
 // 和开发时 vite 直接给的源码（`web/src/…`）。只在出了卡顿 / 报错要记栈时用，不在热路径上。
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { builtinModules, createRequire } from "node:module";
 import { join, normalize, sep } from "node:path";
 import type { CodeLocations } from "@navi/shared/runtime-log";
 import { CODE_DIR } from "../paths.js";
 
-/** 读进来的代码文件上限：再大的不是 navi 的代码。 */
+/** 再大的不是 navi 的代码。 */
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
-const MAX_CACHED = 64;
-/** 往上最多找这么多行；一行超过这么长的（压缩产物）不读名字。 */
-const SCAN_LINES = 80;
-const MAX_LINE = 400;
 
-const files = new Map<string, string[] | null>();
-
-function linesOf(file: string): string[] | null {
-  if (files.has(file)) return files.get(file)!;
-  let lines: string[] | null = null;
+function isCodeFile(file: string): boolean {
   try {
-    if (statSync(file).size <= MAX_FILE_BYTES) lines = readFileSync(file, "utf8").split("\n");
+    const stat = statSync(file);
+    return stat.isFile() && stat.size <= MAX_FILE_BYTES;
   } catch {
-    lines = null;
+    return false;
   }
-  if (files.size >= MAX_CACHED) files.delete(files.keys().next().value!);
-  files.set(file, lines);
-  return lines;
-}
-
-const NOT_NAMES = new Set(["if", "for", "while", "switch", "catch", "with", "return", "function", "else", "do", "try", "await", "typeof"]);
-const DECLARATIONS = [
-  /\bfunction\s*\*?\s+([A-Za-z_$][\w$]*)\s*[<(]/,
-  /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]+)?=>|[A-Za-z_$][\w$]*\s*=>)/,
-  /^\s*(?:(?:public|private|protected|static|async|override|get|set)\s+)*([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\([^)]*\)\s*(?::[^{]+)?\{/,
-];
-
-function declaredName(text: string): string | null {
-  for (const pattern of DECLARATIONS) {
-    const name = pattern.exec(text)?.[1];
-    if (name && !NOT_NAMES.has(name)) return name;
-  }
-  return null;
-}
-
-const count = (text: string, char: string) => text.split(char).length - 1;
-
-/** 包住第 `line` 行（1 起）的函数声明名。 */
-function enclosingFunction(file: string, line: number | null): string | null {
-  const lines = line ? linesOf(file) : null;
-  if (!lines || !line || line > lines.length) return null;
-  const own = lines[line - 1]!;
-  if (own.length > MAX_LINE) return null;
-  const same = declaredName(own);
-  if (same) return same;
-  // 往上走：大括号净开着（`{` 比 `}` 多）的那一行才包住目标行。
-  let depth = 0;
-  for (let i = line - 2; i >= 0 && i >= line - 1 - SCAN_LINES; i -= 1) {
-    const text = lines[i]!;
-    if (text.length > MAX_LINE) return null;
-    depth += count(text, "}") - count(text, "{");
-    if (depth < 0) {
-      const name = declaredName(text);
-      if (name) return name;
-      depth = 0;
-    }
-  }
-  return null;
 }
 
 /** `rel` 落在 `root` 底下的这几个子目录之一，返回绝对路径；跳出去的（`..`）不认。 */
@@ -122,35 +70,27 @@ export const serverCodeLocations: CodeLocations = {
       return target !== null && existsSync(target);
     }
     const target = serverFile(file);
-    return target !== null && linesOf(target) !== null;
+    return target !== null && isCodeFile(target);
   },
-  nameAt(file, line, reported) {
-    if (file.startsWith("node:")) return builtinName(file, reported);
-    const target = file.startsWith("node_modules/") ? null : serverFile(file);
-    return target ? enclosingFunction(target, line) : null;
+  nameAt(file, _line, reported) {
+    return file.startsWith("node:") ? builtinName(file, reported) : null;
   },
 };
 
 const WEB_DIR = join(CODE_DIR, "web");
 
 /** 产物里的 `assets/index-abc.js`；开发服务直接给源码时是 `src/lib/x.ts`。 */
-function webFile(file: string): { target: string; source: boolean } | null {
-  const built = inside(join(WEB_DIR, "dist"), ["assets"], file);
-  if (built) return { target: built, source: false };
-  const source = inside(WEB_DIR, ["src"], file);
-  return source ? { target: source, source: true } : null;
+function webFile(file: string): string | null {
+  return inside(join(WEB_DIR, "dist"), ["assets"], file) ?? inside(WEB_DIR, ["src"], file);
 }
 
 export const webCodeLocations: CodeLocations = {
   exists(file) {
-    const found = webFile(file);
-    return found !== null && linesOf(found.target) !== null;
+    const target = webFile(file);
+    return target !== null && isCodeFile(target);
   },
-  // 打包产物压成了一行，读不出名字；只有开发时的源码能按行找。
-  nameAt(file, line) {
-    const found = webFile(file);
-    return found?.source ? enclosingFunction(found.target, line) : null;
-  },
+  // 页面报上来的名字一个都不收（页面没有 Node 内置模块）。
+  nameAt: () => null,
 };
 
 /** 页面生成的标识换成摘要：只拿来判断「是不是同一个」，原值不落盘。 */
