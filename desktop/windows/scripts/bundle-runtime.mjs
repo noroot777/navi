@@ -13,14 +13,15 @@
 //   server/{package.json,dist}  mcp/{package.json,dist}  web/dist
 //   scripts/start-detached.mjs, scripts/runtime-store.mjs
 //   desktop/windows/launcher/       桌面壳的控制器（壳用自带 node 跑它，见 desktop/windows/shell/src/controller.rs），
-//   scripts/{platform,windows-restart,legacy-names}.mjs   它停服务时借用的那几份
+//   scripts/{platform,windows-restart,legacy-names,restart-freeze}.mjs   它停服务时借用的那几份
 //   .in-use, .handover.json, .runtime.json   代码锁文件与内容清单（清单 format 2，见 desktop/shared/runtime-store.mjs）
 //
 // 用的时候先发布到 %LOCALAPPDATA%\Navi\runtimes\<sha256>\ 再从那里跑（layout.mjs、smoke-runtime.mjs）。
 //
 // 环境变量：NAVI_WIN_SKIP_BUILD=1 跳过 `npm run build`；NAVI_WIN_CACHE=<目录> 换缓存位置（缺省 desktop/windows/build/cache）。
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readEnv } from "../../../scripts/env.mjs";
@@ -37,7 +38,13 @@ const NODE_SHA256 = "e2edda75bfb089654705cf65a13b58933bfd5f57148e8ebda916f58a247
 // 余量按 MAX_PATH（260）算大约 150；超过的话安装器、资源管理器这些不走长路径的工具会出问题。
 const MAX_RELATIVE_PATH = 150;
 // 只有 Windows 运行时带的：桌面壳的控制器，和它 import 的仓库脚本（照仓库里的相对位置放，import 不用改）。
-const SHELL_COPIES = ["desktop/windows/launcher", "scripts/platform.mjs", "scripts/windows-restart.mjs", "scripts/legacy-names.mjs"];
+const SHELL_COPIES = [
+  "desktop/windows/launcher",
+  "scripts/platform.mjs",
+  "scripts/windows-restart.mjs",
+  "scripts/legacy-names.mjs",
+  "scripts/restart-freeze.mjs",
+];
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CACHE = resolve(readEnv(process.env, "NAVI_WIN_CACHE") || join(HERE, "..", "build", "cache"));
@@ -84,6 +91,7 @@ if (collisions.length) die(`有只差大小写的路径，NTFS 上会撞在一�
 const longest = longestPath(APP);
 if (longest.length > MAX_RELATIVE_PATH) die(`包内路径太长（${longest.length} > ${MAX_RELATIVE_PATH}）：${longest}`);
 verifyForwarder();
+verifyLauncher();
 const manifest = sealRuntime(APP, { platform: "win32" });
 say(`✓ Windows x64 自带运行时 ${NODE_VERSION}：${native.length} 个原生文件全是 x64 PE，没有链接，@navi/shared 转发 ${forwarded} 个子路径，最长路径 ${longest.length}`);
 say(`  ${APP}`);
@@ -114,6 +122,31 @@ function longestPath(root, prefix = "") {
 
 function readSync(root, prefix) {
   return readdirSync(join(root, prefix), { withFileTypes: true });
+}
+
+// 从组装后的目录启动实际入口，没拷进去的间接 import 也会出错。stdin 立即关闭，探活只指向本机的端口 0。
+function verifyLauncher() {
+  const scratch = mkdtempSync(join(tmpdir(), "navi-win-launcher-"));
+  let check;
+  try {
+    const entry = join(APP, "desktop/windows/launcher/controller-main.mjs");
+    check = spawnSync(process.execPath, [entry], {
+      cwd: APP,
+      env: {
+        ...process.env,
+        LOCALAPPDATA: scratch,
+        NAVI_DATA_DIR: join(scratch, "data"),
+        NAVI_URL: "http://127.0.0.1:0",
+        NAVI_WIN_SHELL: "",
+      },
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15_000,
+    });
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+  if (check.status !== 0) die(`Windows 启动器加载失败\n${check.error?.message ?? ""}${check.stderr}`);
 }
 
 // 转发包每个子路径导出的名字，必须和直接加载 shared 源码一模一样（`export *` 不带 default，有人加了默认导出这里会红）。
