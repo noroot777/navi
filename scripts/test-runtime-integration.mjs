@@ -216,7 +216,7 @@ await import(process.env.FIXTURE_ROOT+'/agent-fixture.mjs');`);
     const mainRepo = dirname(realpathSync(common));
     const cache = join(mainRepo, "desktop/macos/build/cache");
     const sparkle = await ensureSparkle(cache);
-    const sources = ["NaviConfig", "NaviHealth", "DatabaseBackup", "LegacyIdentity", "LoginService", "RestartImpact", "ServerControl", "ServerLauncher", "ServerStartLock", "UpdateGate", "Updater", "RuntimeRecovery", "BundleRuntimeUse"];
+    const sources = ["NaviConfig", "NaviHealth", "RuntimeLog", "DatabaseBackup", "LegacyIdentity", "LoginService", "RestartImpact", "ServerControl", "ServerLauncher", "ServerStartLock", "UpdateGate", "Updater", "RuntimeRecovery", "BundleRuntimeUse"];
     await run("swiftc", ["-swift-version", "5", "-F", sparkle, "-framework", "Sparkle", "-Xlinker", "-rpath", "-Xlinker", sparkle,
       ...sources.map((name) => join(mac, `Sources/${name}.swift`)), join(mac, "Tests/RuntimeIntegration/main.swift"), "-o", binary]);
     const runtime = join(installed, "Contents/Resources/app");

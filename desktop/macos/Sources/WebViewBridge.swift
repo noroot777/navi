@@ -81,6 +81,7 @@ extension BrowserWindowController: WKNavigationDelegate, WKUIDelegate, WKDownloa
 
   /// web 进程被系统回收后页面会变成一片白，原地重载即可。
   func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+    RuntimeLog.record("webcontent.terminated")
     loadHome()
   }
 
@@ -89,6 +90,7 @@ extension BrowserWindowController: WKNavigationDelegate, WKUIDelegate, WKDownloa
     // 页面自己发起新导航把上一次顶掉，或改走下载，都不是连不上。
     if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled { return }
     if nsError.domain == "WebKitErrorDomain" && nsError.code == 102 { return }
+    RuntimeLog.record("page.load_failed", ["domain": nsError.domain, "code": nsError.code])
     showOffline(error)
   }
 

@@ -112,7 +112,7 @@ setInterval(() => fs.writeFileSync(${JSON.stringify(activity)}, fs.readFileSync(
 
     const mac = join(root, "desktop/macos");
     await runTestProcess("swiftc", ["-swift-version", "5",
-      ...["NaviConfig", "NaviHealth", "DataImport", "DatabaseBackup", "LegacyIdentity", "LoginService", "RestartImpact", "ServerControl", "ServerLauncher", "ServerStartLock", "UpdateGate", "RuntimeRecovery", "BundleRuntimeUse"]
+      ...["NaviConfig", "NaviHealth", "RuntimeLog", "DataImport", "DatabaseBackup", "LegacyIdentity", "LoginService", "RestartImpact", "ServerControl", "ServerLauncher", "ServerStartLock", "UpdateGate", "RuntimeRecovery", "BundleRuntimeUse"]
         .map((name) => join(mac, `Sources/${name}.swift`)),
       join(mac, "Tests/Runtime/main.swift"), "-o", binary], { cwd: root, encoding: "utf8", timeout: 120_000 });
     const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(NAVI|ASH|HARNESS)_/.test(name)));

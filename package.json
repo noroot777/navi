@@ -39,6 +39,8 @@
     "stop": "node scripts/stop.mjs",
     "upgrade": "node scripts/upgrade.mjs",
     "rename-db": "node scripts/rename-db.mjs",
+    "//diagnose": "读运行日志，说清每一次窗口闪一下 / 服务重启是谁出了事。不给路径看本机数据目录；mac app 的数据在 ~/Library/Application Support/dev.navi.mac；用户发来的导出包直接给文件。--days N、--timeline、--json。",
+    "diagnose": "tsx server/src/runtime-log/cli.ts",
     "setup": "node scripts/setup.mjs",
     "check:workspaces": "node scripts/workspace-check.mjs",
     "package": "node scripts/package.mjs",

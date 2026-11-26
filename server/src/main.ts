@@ -1,9 +1,8 @@
 import { readEnv } from "@navi/shared/env-names";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
-import { existsSync, statSync, createReadStream, readdirSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { Readable } from "node:stream";
 import { join, extname, normalize, sep } from "node:path";
 import type { Context } from "hono";
 // 单例锁由 startup-lock.ts 在本模块（及它静态引到的、会开库的模块）加载之前拿好。
@@ -12,12 +11,11 @@ import { inspectPortCommand, inspectProcessSync, killPidsCommand, listenerPidsSy
 // 纯粹读一个环境变量，不碰 DB，所以可以静态 import（其余会打开库的模块一律等拿到锁之后）。
 import { stampHumanActionToken } from "./auth/human-action-token.js";
 import { IS_PREVIEW_INSTANCE } from "./preview-instance.js";
-import { LOCAL_ONLY, LOCAL_ONLY_HOSTNAME, SINGLE_ONLY, SINGLE_ONLY_REFUSAL } from "./local-only.js";
-import { CODE_DIR, DATA_DIR, REPO_DIR } from "./paths.js";
+import { DESKTOP_APP, LOCAL_ONLY, LOCAL_ONLY_HOSTNAME, SINGLE_ONLY, SINGLE_ONLY_REFUSAL } from "./local-only.js";
+import { CODE_DIR } from "./paths.js";
 import { recordListeningPort } from "./listening-port.js";
 import { guardMonitorHook } from "./monitor-hook-failsafe.js";
 import { mountPreviewProxy, attachPreviewUpgrades } from "./preview-proxy.js";
-import { instanceBinding } from "./instance-binding.js";
 import { listenWindowPort } from "./window-port.js";
 import { responseCompression } from "./response-compression.js";
 import { mountPreviewOpenRoutes } from "./preview-access.js";
@@ -25,6 +23,13 @@ import { runtimeHandoverGate } from "./runtime-handover-gate.js";
 import { startRuntimeGateway } from "./runtime-channel-gateway.js";
 import { runtimeAgentChannel } from "./runtime-agent-channels.js";
 import { markRuntimeAdoption } from "./runtime-recovery.js";
+import { mountReviewVideos } from "./review-videos.js";
+import { INSTANCE_ID, instanceBinding } from "./instance-binding.js";
+import { liveLockToken, previousResidualLockPublic } from "./singleton.js";
+import { runIdOfToken } from "./exit-ledger.js";
+import { runtimeLogHttp } from "./runtime-log/http.js";
+import { startRuntimeWatch } from "./runtime-log/watch.js";
+import { logProcessError, logServerStart, logStartupFailure } from "./runtime-log/process-events.js";
 
 let activeServer: ReturnType<typeof serve> | null = null;
 let startupComplete = false;
@@ -36,10 +41,12 @@ let startupExitInProgress = false;
 process.on("unhandledRejection", (e) => {
   if (!startupComplete) exitAfterStartupFailure("unhandled rejection during startup", e);
   console.error("[navi] unhandledRejection:", e);
+  logProcessError("rejection", e);
 });
 process.on("uncaughtException", (e) => {
   if (!startupComplete) exitAfterStartupFailure("uncaught exception during startup", e);
   console.error("[navi] uncaughtException:", e);
+  logProcessError("uncaught", e);
 });
 
 function exitAfterStartupFailure(message: string, error?: unknown): never {
@@ -47,6 +54,7 @@ function exitAfterStartupFailure(message: string, error?: unknown): never {
     startupExitInProgress = true;
     console.error(`[navi] Refusing to start: ${message}`);
     if (error) console.error(error);
+    logStartupFailure(message, error);
 
     // The scheduler starts only after listen succeeds. If starting it throws
     // after creating its interval, process.exit below still removes that timer.
@@ -396,6 +404,8 @@ async function initializeServer() {
 }
 
 const app = new Hono();
+// 运行日志记「此刻在处理哪些请求」，要在任何一道闸之前挂上，被闸挡下的请求也算在内（runtime-log/http.ts）。
+app.use("/api/*", runtimeLogHttp());
 // 最先一道：请求点名要的是另一份 navi（端口换过人）就什么都不执行，预览代理、静态页面一起
 // （为什么非得在服务端做见 instance-binding.ts）。
 app.use("*", instanceBinding());
@@ -444,72 +454,7 @@ app.all("/api/*", (c) =>
       `多半是服务端跑的代码比前端旧:重新 npm run build 并重启 Navi 再试。`,
   }, 404));
 
-// ── 待审视频预览(Tailscale 旁路)─────────────────────────────────────────────
-// 待审 mp4 软链到仓库根的 review/ 下,手机经 Tailscale 直接开
-// http://<tailnet-ip>:4317/review/current/ 审核,不必另起第二个服务。必须注册在下方
-// catch-all "/*" 之前,否则被 SPA 兜底截走。SPA 那条 readFile 把整文件读进内存、不支持
-// Range;视频大且要拖动进度,所以这里单独用 createReadStream 流式 + 解析 Range 返回 206。
-// createReadStream 跟随软链,所以 review 目录放软链即可,无需拷贝原片。
-// 根目录默认跟随 navi 仓库(review/ 在仓库根下,迁机器也不失效);代码不在仓库里(独立 app,
-// bundle 只读、放不进软链)时落到数据目录下。可用 NAVI_REVIEW_ROOT 覆盖。
-const REVIEW_ROOT = normalize(readEnv(process.env, "NAVI_REVIEW_ROOT") ?? join(REPO_DIR ?? DATA_DIR, "review"));
-app.get("/review", (c) => c.redirect("/review/"));
-app.get("/review/*", async (c) => {
-  const rel = decodeURIComponent(new URL(c.req.url).pathname).replace(/^\/review\/?/, "");
-  const target = normalize(join(REVIEW_ROOT, rel));
-  // 防路径穿越:解析后必须仍落在 ROOT 内(软链的"目标"可以在 ROOT 外——那正是本方案的关键)。
-  // 分隔符走 `sep`:`normalize` 在 Windows 上还的是反斜杠,拼 `/` 比前缀恒为假,整个
-  // /review/ 会全线 404(不是拒绝越界,是连界内的也进不去)。
-  if (target !== REVIEW_ROOT && !target.startsWith(REVIEW_ROOT + sep)) return c.notFound();
-  if (!existsSync(target)) return c.notFound();
-  const st = statSync(target); // 跟随软链
-
-  // 目录 → 极简清单页,手机点开就能播。
-  if (st.isDirectory()) {
-    const base = "/review/" + (rel ? rel.replace(/\/+$/, "") + "/" : "");
-    const items = readdirSync(target)
-      .filter((n) => n.toLowerCase().endsWith(".mp4"))
-      .sort()
-      .map((n) => {
-        const href = base + encodeURIComponent(n);
-        return `<li><a href="${href}">${n}</a><video controls preload="metadata" src="${href}"></video></li>`;
-      })
-      .join("\n");
-    return c.html(
-      `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">` +
-        `<title>待审视频</title><style>body{font:16px/1.5 -apple-system,system-ui,sans-serif;margin:1rem;background:#111;color:#eee}` +
-        `h2{font-size:1.1rem}ul{padding:0}li{list-style:none;margin:0 0 2rem}a{color:#6cf;word-break:break-all}` +
-        `video{display:block;width:100%;max-width:760px;margin:.5rem 0;border-radius:8px;background:#000}</style>` +
-        `<h2>待审视频 ${rel || "/"}</h2><ul>${items || "<li>(暂无 mp4)</li>"}</ul>`,
-    );
-  }
-
-  // 文件:只放行 mp4,支持 Range 拖动。
-  if (extname(target).toLowerCase() !== ".mp4") return c.notFound();
-  const size = st.size;
-  const range = c.req.header("range");
-  if (range) {
-    const m = /bytes=(\d*)-(\d*)/.exec(range);
-    const start = m && m[1] ? Number(m[1]) : 0;
-    const end = m && m[2] ? Number(m[2]) : size - 1;
-    if (start >= size || end >= size || start > end) {
-      return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${size}` } });
-    }
-    return new Response(Readable.toWeb(createReadStream(target, { start, end })) as any, {
-      status: 206,
-      headers: {
-        "Content-Type": "video/mp4",
-        "Accept-Ranges": "bytes",
-        "Content-Range": `bytes ${start}-${end}/${size}`,
-        "Content-Length": String(end - start + 1),
-      },
-    });
-  }
-  return new Response(Readable.toWeb(createReadStream(target)) as any, {
-    status: 200,
-    headers: { "Content-Type": "video/mp4", "Accept-Ranges": "bytes", "Content-Length": String(size) },
-  });
-});
+mountReviewVideos(app);
 
 // Serve the built SPA in production. The path is resolved relative to this module
 // (works regardless of cwd). API/review/mobile routes above remain higher-priority
@@ -678,6 +623,15 @@ activeServer = serve({ fetch: app.fetch, port, ...(LOCAL_ONLY ? { hostname: LOCA
     }
   }
   startupComplete = true;
+  const residual = previousResidualLockPublic();
+  const token = liveLockToken();
+  logServerStart({
+    instance: INSTANCE_ID, runId: token ? runIdOfToken(token) : null, port: info.port,
+    desktop: DESKTOP_APP, localOnly: LOCAL_ONLY, preview: IS_PREVIEW_INSTANCE,
+    previous: residual && { evidence: residual.evidence, silentMs: residual.silentMs,
+      kind: residual.observedIntent?.kind, signal: residual.observedIntent?.signal },
+  });
+  startRuntimeWatch();
   console.log(`[navi] server on http://${LOCAL_ONLY ? LOCAL_ONLY_HOSTNAME : "localhost"}:${info.port}${LOCAL_ONLY ? "（本机自用模式）" : ""}`);
 });
 

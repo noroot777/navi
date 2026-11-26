@@ -18,6 +18,16 @@ final class ServerLauncher {
     /// 端口被别的 navi / 别的程序占着。带着说给用户听的那段话：是谁、怎么办。
     case occupied(String)
     case failed(String)
+
+    /// 运行日志里的名字（不带说明原文）。
+    var logName: String {
+      switch self {
+      case .ready: return "ready"
+      case .needsSetup: return "needs_setup"
+      case .occupied: return "occupied"
+      case .failed: return "failed"
+      }
+    }
   }
 
   static let shared = ServerLauncher()
@@ -108,6 +118,7 @@ final class ServerLauncher {
       // 进程一起来就记下 pid：这个启动器等不到它应答（被退掉、超时）也不要紧，之后谁看到它应答
       // 都能认出是它、替它确认（见 settle）。
       ServerRecord.write(pid: Int(pid), version: version)
+      RuntimeLog.record("server.spawn", ["serverPid": Int(pid), "version": version])
       let outcome = waitReady(pid: pid, timeout: timeout)
       if case .failed(let startupFailure) = outcome, kill(pid, 0) != 0, errno == ESRCH {
         do {

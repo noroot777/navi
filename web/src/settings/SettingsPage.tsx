@@ -8,6 +8,7 @@ import {
   ChatTeardropDots,
   FolderSimple,
   PlugsConnected,
+  Pulse,
   Robot,
   MagnifyingGlass,
   SlidersHorizontal,
@@ -31,6 +32,7 @@ import { ProvidersSettings } from "./ProvidersSettings.tsx";
 import { UsersSettings } from "./UsersSettings.tsx";
 import { WorkflowsSettings } from "./WorkflowsSettings.tsx";
 import { ReviewerProfilesSettings } from "./ReviewerProfilesSettings.tsx";
+import { RuntimeLogSettings } from "./RuntimeLogSettings.tsx";
 import { useAuth } from "../auth/authContext.ts";
 import {
   PROJECT_NAV,
@@ -64,6 +66,7 @@ const NAV_ICONS: Record<SettingsSection, ComponentType<{ size?: number; "aria-hi
   account: UserCircle,
   defaults: SlidersHorizontal,
   feishu: ChatTeardropDots,
+  "runtime-log": Pulse,
 };
 
 // 内容**横着长**的那几节要更宽的栏。880px 那档是为「一行一个设置项」的竖排表单定的，
@@ -169,7 +172,9 @@ export function SettingsPage({
   const isInstanceAdmin = state.user?.role === "admin";
   const visible = (items: readonly NavItem[]) =>
     items.filter((item) =>
-      item.requires === "multiAdmin" ? isMulti && isInstanceAdmin : item.requires === "multi" ? isMulti : true,
+      item.requires === "multiAdmin" ? isMulti && isInstanceAdmin
+        : item.requires === "admin" ? !isMulti || isInstanceAdmin
+          : item.requires === "multi" ? isMulti : true,
     );
   useSettingsAnchor(anchor, section, onAnchorSettled ?? noop);
 
@@ -204,6 +209,7 @@ export function SettingsPage({
           {section === "account" && <AccountSettings notify={notify} />}
           {section === "defaults" && <DefaultsSettings notify={notify} onOpen={onSection} />}
           {section === "feishu" && <FeishuSettings notify={notify} onOpen={onSection} />}
+          {section === "runtime-log" && <RuntimeLogSettings notify={notify} />}
           {section === "project" && project && (
             <ProjectSettingsPanel
               project={project}

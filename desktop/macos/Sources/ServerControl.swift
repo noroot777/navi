@@ -120,7 +120,7 @@ enum ServerShutdown {
       // 没人在听了。评估过的那个进程要是还在（正在自己退出），等它退干净。
       guard case .ours(let pid) = target else { return .stopped(nil) }
       return waitGone(pid, timeout: timeout)
-    case .unreachable(let why):
+    case .unreachable(let why, _):
       return .changed("服务这会儿没有答复（\(why)）")
     case .notNavi(let what):
       return .changed("端口上的应答不像 Navi（\(what)）")

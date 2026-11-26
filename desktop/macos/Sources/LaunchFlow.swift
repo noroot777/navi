@@ -38,13 +38,16 @@ extension BrowserWindowController {
     }
     pendingStartingScreen?.cancel()
     let starting = DispatchWorkItem { [weak self] in
+      RuntimeLog.record("cover.show", ["kind": "starting"])
       self?.offlineView.show(title: "正在启动 Navi", detail: "就绪后自动回到工作区。", busy: true)
     }
     pendingStartingScreen = starting
     if !quietly { DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: starting) }
     let generation = connectionGeneration
+    let asked = Date()
     ServerLauncher.shared.ensureRunning { [weak self] outcome in
       starting.cancel()
+      RuntimeLog.record("server.ensure", ["outcome": outcome.logName, "ms": Int(Date().timeIntervalSince(asked) * 1000)])
       guard let self, self.connectionGeneration == generation else { return }
       self.present(outcome)
     }

@@ -1,5 +1,6 @@
 import { Component, useEffect, type ReactNode } from "react";
 import { AppStateScreen } from "./AppStateScreen.tsx";
+import { reportPageCrash, reportPageReload } from "../lib/runtimeLog.ts";
 
 // React 只有类组件能当错误边界。渲染里抛出的错误一路没人接,React 会卸载整棵树,页面只剩
 // body 底色、连一句报错都没有 —— 懒加载分块拉取失败就是这样把整个工作台弄没的。
@@ -11,6 +12,10 @@ export class ErrorBoundary extends Component<Props, State> {
 
   static getDerivedStateFromError(error: unknown): State {
     return { error: error instanceof Error ? error : new Error(String(error)) };
+  }
+
+  componentDidCatch(error: unknown) {
+    reportPageCrash(error);
   }
 
   render() {
@@ -37,7 +42,7 @@ export function AppCrash({ error }: { error: Error }) {
   }, []);
   return (
     <AppStateScreen className="app-crash" title="页面没有正常显示" alert
-      actions={<button type="button" className="ui-button ui-button--primary" onClick={() => window.location.reload()}>重新载入</button>}>
+      actions={<button type="button" className="ui-button ui-button--primary" onClick={() => { reportPageReload("error-screen"); window.location.reload(); }}>重新载入</button>}>
       <details>
         <summary>错误详情</summary>
         <pre>{error.message}</pre>

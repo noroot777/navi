@@ -37,6 +37,7 @@ import { mountPreviewRoutes } from "./preview-routes.js";
 import { mountTaskRuntimeRoutes } from "./task-runtime-routes.js";
 import { mountPreviewAssistRoutes } from "./preview-assist-routes.js";
 import { mountPageAnnotationRoutes } from "./page-annotation-routes.js";
+import { mountRuntimeLogRoutes } from "./runtime-log/routes.js";
 import { parseAppSettingsPatch } from "./app-settings.js";
 import { hostInfo } from "./platform.js";
 import { secretsEqual } from "./openai-converter/common.js";
@@ -102,6 +103,7 @@ mountProjectRoutes(api);
 mountProjectCloneRoutes(api);
 mountUploadRoutes(api);
 mountPageAnnotationRoutes(api);
+mountRuntimeLogRoutes(api);
 mountHostNaviMcpRoutes(api);
 
 // ── health ───────────────────────────────────────────────────────────────

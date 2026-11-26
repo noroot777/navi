@@ -1,0 +1,79 @@
+import Foundation
+
+/// 壳这一侧的运行日志：窗口什么时候、为什么撤下页面或重载页面，什么时候起过服务、结果如何。
+///
+/// 写在数据根的 `logs/diagnostics/mac.jsonl`，跟服务端那份（server.jsonl）同一个目录、同一种格式
+/// （@navi/shared/runtime-log），`npm run diagnose` 把两份对齐，才说得清「闪一下」那一刻服务那边在干什么。
+/// 设置 →「运行日志」导出的包里也带着这一份。
+///
+/// 只记运行状况：事件名、原因的枚举、错误码、进程号、版本号。不记 URL（路由里有任务号和文件名）、
+/// 不记系统给的错误原文（里面可能带地址）。写入是尽力而为：放在串行队列上，写不进去就算了。
+enum RuntimeLog {
+  private static let queue = DispatchQueue(label: "dev.navi.runtime-log", qos: .utility)
+  private static let rotateBytes: UInt64 = 2 * 1024 * 1024
+  private static var writes = 0
+
+  static var directory: URL { NaviConfig.logURL.appendingPathComponent("diagnostics", isDirectory: true) }
+  static var fileURL: URL { directory.appendingPathComponent("mac.jsonl") }
+
+  private static let iso: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+  }()
+
+  /// 记一条。`fields` 只放数字、布尔和代码里写死的短串。`wait`：等它落盘再返回（app 正在退出时用）。
+  static func record(_ event: String, _ fields: [String: Any] = [:], wait: Bool = false) {
+    // 连别处的 navi 时数据根不是这台机器上那份服务的，壳自己的事也就不往那里记。
+    guard NaviConfig.isLocal else { return }
+    let at = Date()
+    let write = {
+      var line: [String: Any] = fields
+      line["at"] = iso.string(from: at)
+      line["src"] = "mac"
+      line["pid"] = Int(getpid())
+      line["ev"] = event
+      guard JSONSerialization.isValidJSONObject(line),
+            let data = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]) else { return }
+      append(data)
+    }
+    if wait { queue.sync(execute: write) } else { queue.async(execute: write) }
+  }
+
+  private static func append(_ data: Data) {
+    let manager = FileManager.default
+    do {
+      try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+      writes += 1
+      if writes % 100 == 1, let size = (try? manager.attributesOfItem(atPath: fileURL.path))?[.size] as? UInt64, size > rotateBytes {
+        // 只改名不重写，同 server 那一侧：别的 app 进程（另开的一份）可能正往同一个文件追加。
+        let previous = fileURL.appendingPathExtension("1")
+        try? manager.removeItem(at: previous)
+        try? manager.moveItem(at: fileURL, to: previous)
+      }
+      if !manager.fileExists(atPath: fileURL.path) {
+        manager.createFile(atPath: fileURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+      }
+      let handle = try FileHandle(forWritingTo: fileURL)
+      defer { try? handle.close() }
+      try handle.seekToEnd()
+      // 前后各带换行：上一条写到半行就断了时，这一条照样自成一行。
+      var framed = Data("\n".utf8)
+      framed.append(data)
+      framed.append(Data("\n".utf8))
+      try handle.write(contentsOf: framed)
+    } catch {
+      // 日志写不进去不影响窗口本身。
+    }
+  }
+
+  /// 探活结果压成日志字段：哪一类、错误码 / HTTP 状态码。不带说明原文。
+  static func fields(of probe: NaviProbe) -> [String: Any] {
+    switch probe {
+    case .down: return ["probe": "down"]
+    case .unreachable(_, let code): return ["probe": "unreachable", "code": code]
+    case .notNavi(let what): return ["probe": "not_navi", "status": what.hasPrefix("HTTP ") ? String(what.dropFirst(5)) : "?"]
+    case .navi(let instance): return ["probe": instance.isOurs ? "ours" : "not_ours", "serverPid": instance.pid ?? -1]
+    }
+  }
+}

@@ -5,6 +5,7 @@ import {
 import { ApiError, json, request } from "./apiClient.ts";
 import { subscribeConnection, subscribeEvents } from "./events.ts";
 import { safeStorage } from "./safeStorage.ts";
+import { reportPageReload } from "./runtimeLog.ts";
 import { createOutbox, type OutboxEntry } from "./taskReadOutbox.ts";
 
 // 「看过哪些任务」的那一份记录：真值在服务端（按人存，server/src/task-reads.ts），这里是它在本页的样子。
@@ -110,7 +111,9 @@ function identityChanged() {
   if (leaving) return;
   leaving = true;
   stopSync?.();
-  if (typeof window !== "undefined") window.location.reload();
+  if (typeof window === "undefined") return;
+  reportPageReload("identity");
+  window.location.reload();
 }
 
 /**

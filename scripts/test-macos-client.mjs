@@ -42,7 +42,7 @@ symlinkSync(process.execPath, join(runtime, "node/bin/node"));
 copyFileSync(join(root, "scripts/start-detached.mjs"), join(runtime, "scripts/start-detached.mjs"));
 
 const build = spawnSync("swiftc", ["-swift-version", "5",
-  ...["NaviConfig", "NaviHealth", "DataImport", "DatabaseBackup", "DownloadTransaction", "ServerControl", "ServerStartLock", "ServerLauncher",
+  ...["NaviConfig", "NaviHealth", "RuntimeLog", "DataImport", "DatabaseBackup", "DownloadTransaction", "ServerControl", "ServerStartLock", "ServerLauncher",
     "WindowChrome", "NaviWebView", "BrowserWindowController", "WebViewBridge", "ComputerPreviewBridge", "ComputerPreviewStream", "LaunchFlow", "OfflineView", "FirstRunView", "NaviPalette", "HostMcpSetup", "UpdateGate", "RestartImpact",
     "LegacyIdentity", "LoginService", "DeepLink", "BundleRuntimeUse", "RuntimeRecovery"]
     .map((name) => join(root, `desktop/macos/Sources/${name}.swift`)),

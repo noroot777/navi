@@ -260,7 +260,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     if let pending = handoff {
       guard pending.document == documentSerial else { return }
       handoff = nil
-      if offlineView.revision == pending.screen { offlineView.isHidden = true }
+      if offlineView.revision == pending.screen {
+        offlineView.isHidden = true
+        RuntimeLog.record("cover.hide")
+      }
     }
     if offlineView.isHidden { documentPresentation = .presented }
   }
@@ -274,6 +277,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
   private func pageDidNotPresent(_ reason: String) {
     guard handoff != nil else { return }
+    RuntimeLog.record("page.not_presented", ["why": reason.contains("脚本") ? "script" : "timeout"])
     offlineView.show(title: "页面没有显示出来", detail: "\(reason)\n可以重试；要先看看页面现在的样子也行。", actions: [
       OfflineView.Action(title: "仍然显示页面") { [weak self] in
         self?.handoff = nil
@@ -336,12 +340,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if case .unreachable = probe {
           // 服务忙时连续几秒答不出探活，一个超时不能证明端口换了人。
           self.unreachableProbes += 1
+          RuntimeLog.record("probe.miss", RuntimeLog.fields(of: probe).merging(["streak": self.unreachableProbes]) { a, _ in a })
           if self.unreachableProbes < 3 { return }
         }
-        guard let instance = NaviHealth.ours(probe) else { return self.instanceLost() }
+        guard let instance = NaviHealth.ours(probe) else {
+          RuntimeLog.record("page.takedown", RuntimeLog.fields(of: probe).merging(["via": "guard", "streak": self.unreachableProbes]) { a, _ in a })
+          return self.instanceLost()
+        }
         self.unreachableProbes = 0
         // 还是自己那份，但服务重起过（实例号换了）：页面手上的旧实例号会被拒，换上新的重载一遍。
         if instance.id != self.boundInstance {
+          RuntimeLog.record("page.reload", ["reason": "instance_changed", "serverPid": instance.pid ?? -1,
+                                            "inst": String((instance.id ?? "").prefix(8))])
           self.bind(instance) { current in
             if current, self.guardTimer === timer { self.webView.reload() }
           }
@@ -351,7 +361,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   }
 
   func navigationProbeFailed(_ probe: NaviProbe, target: URL) {
-    guard case .unreachable(let reason) = probe else { return instanceLost() }
+    RuntimeLog.record("page.takedown", RuntimeLog.fields(of: probe).merging(["via": "navigation"]) { a, _ in a })
+    guard case .unreachable(let reason, _) = probe else { return instanceLost() }
     if hasPresentedPage { return }
     resetPageConnection()
     resumeURL = target
@@ -383,6 +394,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   /// 办完的那一方会叫 loadHome。
   func showInstalling(_ note: String,
                       detail: String = "完成后自动回到工作区。") {
+    RuntimeLog.record("cover.show", ["kind": "maintenance"])
     resetPageConnection()
     offlineView.show(title: note, detail: detail, busy: true)
   }
@@ -416,6 +428,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   // MARK: 菜单动作
 
   @objc func reloadPage(_ sender: Any?) {
+    RuntimeLog.record("page.reload", ["reason": "user"])
     if offlineView.isHidden { webView.reload() } else { loadHome() }
   }
 
