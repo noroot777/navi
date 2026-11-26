@@ -355,12 +355,18 @@ export const tasks = sqliteTable("tasks", {
   // 后发送」的消息记下登记那一刻的值,完成就是「它变大了」—— 事件与状态同一笔,崩溃漏不掉,
   // 迟到的钩子也分不清新旧(见 pending-after.ts)。
   doneSeq: integer("done_seq").notNull().default(0),
+  // 团队调度台：名下共享执行者落过几次真完成（成员的 done_seq 加一的同一笔里跟着加一，status.ts）。只增不减：
+  // 成员删掉、新加、换工作区都不动它 —— 团队「这一版成果」的代次靠它，不靠此刻的成员名单（系统通知）。
+  teamDoneSeq: integer("team_done_seq").notNull().default(0),
   // 这一轮是 CLI 原生命令（`/compact`）：整条消息由 CLI 本地执行，不进模型 —— 既不是
   // 任务的执行，也不是一轮验证。结算钩子（派验证 / 收验证轮 / 推工作流）必须整段跳过，
   // 否则「压一下上下文」会被记成一轮验证跑完，还白吃一轮配额。开跑时写，结算后清空；
   // 落库而不只放内存，理由同上一条（结算可能发生在另一个进程里）。
   nativeTurn: integer("native_turn", { mode: "boolean" }).notNull().default(false),
   goalTurn: integer("goal_turn", { mode: "boolean" }).notNull().default(false),
+  // 持续目标这一轮正常退出却没交卷、停下来等人 /goal resume 的那一刻（settle-status.ts），跟 paused 同一笔写；
+  // 之后任何一次落位都清掉它。系统通知拿它当「停住等你续跑」这件事的身份。
+  goalStoppedAt: text("goal_stopped_at"),
   cliState: text("cli_state"),
   // 统一验收合并的结构化落账：目标分支 + 合并前后它的 commit。合并后基线审查（对
   // base@before..after 派新任务）靠它，时间线文本反解不可靠。无合并动作（in_place /

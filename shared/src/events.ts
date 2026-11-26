@@ -159,6 +159,16 @@ export type TurnTraceEvent = { kind: "tool" | "thinking" | "notice"; label: stri
  */
 export type TurnImageRef = { path?: string; source: string; ref?: number; pos?: number; lost?: boolean };
 
+/**
+ * 系统通知是哪一种时刻。前六种就是「此刻要人做哪件事」（task-attention.ts HumanTurnKind）；后面是事后的结局：
+ * 这一轮中断了但任务没落失败（续聊挂了，原来的结果还在）、被停下（停止、分组暂停）、持续目标没完成就停住等续跑、
+ * 验收落章、验收前置命令没过、审查通过 / 没通过（不在等验收时才单说）。一口气来了好几件由客户端合成一条（web/src/lib/noticeBatch.ts），服务端不合：
+ * 合了就带不上每一件是哪个任务，过滤器没法按收件人逐件核可见性。
+ */
+export type TaskNotifyKind =
+  | "question" | "failed" | "dispute" | "duet_gate" | "verify_failed" | "accept"
+  | "interrupted" | "stopped" | "goal_stopped" | "accepted" | "gate_failed" | "review_passed" | "review_failed";
+
 // SSE envelope pushed to the web client.
 export type ServerEvent =
   // 服务冻着（准备重启 / 换运行时）的时候不起新回合、新终端；null = 解冻了。
@@ -184,6 +194,20 @@ export type ServerEvent =
   // 设备、飞书内置浏览器）按它重拉 `/task-reads`，侧栏那几颗绿点跟着熄。ownerUserId = 那个人
   // （自用模式 null），event-filter 只推给他本人。
   | { type: "task.reads"; ownerUserId: string | null }
+  // 该弹一条系统通知了（server/src/system-notify.ts 判、措辞也在那里定）：客户端照着弹，不再自己判。
+  // ownerUserId = 任务主人，多人模式下 event-filter 只推给他（还要他看得见这个任务）。
+  // key 是这件事的身份：同一件事几个页面各收到一份时，系统按它只留一条。
+  | {
+      type: "task.notify";
+      taskId: string;
+      projectId: string;
+      ownerUserId: string | null;
+      kind: TaskNotifyKind;
+      key: string;
+      title: string;
+      subtitle: string;
+      body: string;
+    }
   | { type: "task.title"; taskId: string; title: string; updatedAt: string }
   // 提问态变化（§Team）：agent 调 ask_question 提问、或答复把它清空。task.status
   // 只带状态字段，question 不跟着走 —— 少了这条事件，卡片要等下次全量拉取才出现/

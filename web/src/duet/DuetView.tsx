@@ -50,6 +50,7 @@ import { buildDuetHandoffBody, duetHandoffTaskInput, latestDuetGate, type Handof
 import { isOpenDuetGate, runCreatedHandoffFollowUps } from "./handoffPolicy.ts";
 import { latestActiveDuetTurn, type DuetTurn } from "./duetState.ts";
 import { useDuet } from "./useDuet.ts";
+import { useViewingTask } from "../lib/taskViewing.ts";
 
 function timeMs(value?: string | null): number {
   const parsed = value ? Date.parse(value) : NaN;
@@ -173,6 +174,7 @@ export function DuetView({
   onSelectTask: (task: TaskListItem) => void;
   notify: (message: string) => void;
 }) {
+  useViewingTask(task.id);
   const config = normalizeDuetConfig(task.duet);
   const readOnly = taskInteractionAvailability(task) === "archived";
   // 议题里的附件块要还原成缩略图，不能把「[用户附带的文件…] - /abs/path」念给用户看。

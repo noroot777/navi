@@ -3,7 +3,8 @@
 //
 // 和页面的约定照 mac 的 WindowChrome：页面写在 <html data-window-size="setup|work"> 上的那一屏要多大的窗、脚本没载成，
 // 由 PAGE_SCRIPT 经 `page_report` 交回来（页面内换了地址也报）；不认这套约定的文档（没有 navi-window-chrome 那行 meta）读完 <head> 报 titlebar。
-// 页面那一份能调的只有 `page_report`：它的权限在载页面时按窗口专用端口现加（ensure_page_capability），本地那一屏的按钮它碰不到。
+// 页面那一份能调的只有 `page_report` 和 `page_notify`（弹系统通知，src/notify.rs）：权限在载页面时按窗口专用端口现加
+// （ensure_page_capability），本地那一屏的按钮它碰不到。
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -32,6 +33,8 @@ const PAGE_SCRIPT: &str = r#"(() => {
   if (location.hostname === "tauri.localhost" || window.__naviShellReport) return;
   window.__naviShellReport = true;
   const post = (kind) => { try { window.__TAURI_INTERNALS__.invoke("page_report", { kind }); } catch {} };
+  // 系统通知的入口（web/src/lib/systemNotify.ts 认它；mac 壳那边是 webkit.messageHandlers.naviNotify）。
+  window.__naviNotify = (notice) => { try { window.__TAURI_INTERNALS__.invoke("page_notify", { notice }); } catch {} };
   // WebView2 在文档刚建出来时就跑这段，那一刻 <html> 还没有（documentElement 是 null）：监听挂在 document 上、
   // 带 subtree，<html> 晚到也收得到；文档读完时再补报一次当前值，防它在监听生效之前就写好了。
   // 告诉页面它装在 Windows 的壳里（同 mac 壳写 "mac"）：首启的小窗里两栏卡片铺满整扇窗（web/src/styles/window-shell.css）。
@@ -198,7 +201,7 @@ pub fn load(app: &AppHandle, shell: &Arc<Shell>, url: &str, instance: Option<&st
   let _ = window.navigate(target);
 }
 
-/// 页面那一份能调 `page_report`，而且只能调它：按来源（窗口专用端口）现加一条权限。
+/// 页面那一份能调 `page_report`、`page_notify`，而且只能调这两条：按来源（窗口专用端口）现加一条权限。
 fn ensure_page_capability(app: &AppHandle, shell: &Arc<Shell>, origin: &str) {
   let mut page = shell.page.lock().unwrap();
   if !page.granted.insert(origin.to_string()) {
@@ -207,7 +210,8 @@ fn ensure_page_capability(app: &AppHandle, shell: &Arc<Shell>, origin: &str) {
   let capability = tauri::ipc::CapabilityBuilder::new(format!("page-{}", page.granted.len()))
     .remote(format!("{origin}/*"))
     .window("main")
-    .permission("allow-page-report");
+    .permission("allow-page-report")
+    .permission("allow-page-notify");
   let _ = app.add_capability(capability);
 }
 
@@ -317,7 +321,7 @@ pub fn dialog(app: &AppHandle, message: &Value) -> i64 {
   }
 }
 
-// ── 页面与本地那一屏调的三条命令 ────────────────────────────────────────────
+// ── 页面与本地那一屏调的几条命令 ────────────────────────────────────────────
 
 #[tauri::command]
 pub fn shell_screen(app: AppHandle) -> Value {
@@ -333,5 +337,12 @@ pub fn shell_action(app: AppHandle, id: String) {
 pub fn page_report(app: AppHandle, kind: String) {
   if kind.len() <= 8192 {
     controller::state(&app).send(json!({ "type": "report", "kind": kind }));
+  }
+}
+
+#[tauri::command]
+pub fn page_notify(app: AppHandle, notice: Value) {
+  if let Some(notice) = crate::notify::Notice::parse(&notice) {
+    crate::notify::show(&app, notice);
   }
 }

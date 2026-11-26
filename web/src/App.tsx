@@ -2,6 +2,7 @@ import { AuthGate } from "./auth/AuthGate.tsx";
 import { ExecutorGateProvider } from "./task-detail/ExecutorGate.tsx";
 import { PreviewBadge } from "./components/PreviewBadge.tsx";
 import { ServiceFreezeNotice } from "./components/ServiceFreezeNotice.tsx";
+import { SystemNotifications } from "./components/SystemNotifications.tsx";
 import { DraftProvider } from "./lib/DraftStore.tsx";
 import { WorkspaceShell } from "./workspace/WorkspaceShell.tsx";
 import { normalizedWorkspaceUrl } from "./workspace/workspaceHistory.ts";
@@ -26,6 +27,7 @@ export function App() {
       </DraftProvider>
       <PreviewBadge />
       <ServiceFreezeNotice />
+      <SystemNotifications />
     </AuthGate>
   );
 }

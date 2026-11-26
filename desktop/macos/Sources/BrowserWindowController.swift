@@ -12,6 +12,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   var downloads: [ObjectIdentifier: DownloadTransaction] = [:]
   private var chrome: WindowChrome?
   var computerPreview: ComputerPreviewBridge?
+  private var notifications: SystemNotificationBridge?
   private var observations: [NSKeyValueObservation] = []
   private var healthTimer: Timer?
   private var guardTimer: Timer?
@@ -70,6 +71,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     window.delegate = self
     computerPreview = ComputerPreviewBridge(webView: webView, origin: NaviConfig.windowURL, local: NaviConfig.isLocal)
+    notifications = SystemNotificationBridge(webView: webView)
     window.contentView = makeContent()
     // 内容铺到窗口顶，红绿灯浮在页面上（见 WindowChrome）。窗口底色仍跟页面的 theme-color 走，
     // 页面还没画出来的那一瞬和占位页都是同一个底色。

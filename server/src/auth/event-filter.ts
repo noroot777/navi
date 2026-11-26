@@ -64,11 +64,13 @@ export function makeEventFilter(actor: Actor): {
 } {
   let visible: Set<string> | null = null; // null = 不设限
   let unrestricted = true;
+  let multiUser = false;
   let stopped = false;
 
   const refresh = async () => {
     if (stopped) return;
-    if (!(await isMultiUser())) {
+    multiUser = await isMultiUser();
+    if (!multiUser) {
       unrestricted = true;
       visible = null;
       return;
@@ -86,6 +88,8 @@ export function makeEventFilter(actor: Actor): {
       // 挂在人身上的事件：只推给他本人。排在 unrestricted 之前 —— 实例管理员看得见所有项目，
       // 却不该被别人的已读记录叫去重拉一遍自己那份。
       if (ev.type === "task.reads") return ev.ownerUserId === ownerIdOf(actor);
+      // 系统通知只弹给任务主人（多人模式），主人也得看得见这个任务（下面按任务照常核）。别人的任务看得见也不弹。
+      if (ev.type === "task.notify" && multiUser && ev.ownerUserId !== ownerIdOf(actor)) return false;
       if (unrestricted) return true;
       // 挂在项目上、不挂在任务上的事件：直接按项目可见性判。
       if (ev.type === "project.updated") return !!visible?.has(ev.projectId);
@@ -93,6 +97,9 @@ export function makeEventFilter(actor: Actor): {
       if (ev.type === "task.actions.stale.all") return true;
       // 「服务正在准备重启」：说的是整份服务，不带任何任务。
       if (ev.type === "service.freeze") return true;
+      // 系统通知自带项目（服务端判的），直接按它核，不走下面的归属缓存：缓存没命中时那一条会被丢掉，别的事件下一条
+      // 就补上了，通知却是一次性的 —— 服务端已经记了账，不会再推（重启后收拾出来的中断就是这样丢的）。
+      if (ev.type === "task.notify") return !!visible?.has(ev.projectId);
       const taskId = taskIdOf(ev);
       // 认不出归属的事件一律**不推**。宁可漏一条无害的广播,也好过默认放行 ——
       // 将来新增一种事件时,忘了在这里登记的后果是「少显示了点东西」而不是越权。

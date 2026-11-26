@@ -17,6 +17,7 @@ import { monitorHoldPatch } from "./queue-monitor-hold.js";
 import { holdOwedPatch } from "./dispatch-hold-owed.js";
 import { heldFollowUpPatch } from "./follow-up-held.js";
 import { afterStatusLanded, stageQueueAdvance } from "./turn-release.js";
+import { isSharedTeamWorker } from "./task-result-version.js";
 
 const TERMINAL: TaskStatus[] = ["done", "failed", "canceled"];
 
@@ -50,6 +51,8 @@ export type SetTaskStatusOptions = {
    * 用户手动标完成)。非 done 时忽略。
    */
   completion?: boolean;
+  /** 这一笔 paused 是持续目标正常退出却没交卷、停下来等人续跑(settle-status.ts):跟状态同一笔记下那一刻。 */
+  goalStopped?: boolean;
   /**
    * 由所有权层包住实际数据库提交,失去所有权时返回 false。
    * 数据库驱动可能等待写门,同步谓词不能覆盖这个窗口。队列占位通过共用认领链,
@@ -174,6 +177,9 @@ async function writeTaskStatus(
     // 只认调用方声明的完成(`completion`):放回原 done 不是新的一次完成。
     if (status === "done" && opts?.completion) patch.doneSeq = sql`${tasks.doneSeq} + 1`;
   }
+  patch.goalStoppedAt = status === "paused" && opts?.goalStopped ? updatedAt : null;
+  // 共享执行者的一次完成也是团队的一次完成:跟成员的 done_seq 同一个事务给调度台的 team_done_seq 加一。
+  const teamCompletion = status === "done" && opts?.completion && cur?.parentId && isSharedTeamWorker(cur) ? cur.parentId : null;
   if (status !== "running") {
     // 回合内的身份随回合结束作废。**`direction_epoch` 不在此列,那不是漏写**:它正是为了
     // 补上这三列归零之后留下的那条分不清的边 —— 「现在空着」原本同时意味着「我清掉的那一轮
@@ -202,6 +208,10 @@ async function writeTaskStatus(
   const { written, advanceQueueId } = advance || opts?.alsoInTx
     ? await db.transaction(async (tx) => {
       const written = await tx.update(tasks).set(patch).where(where).returning({ id: tasks.id });
+      if (written.length && teamCompletion) {
+        await tx.update(tasks).set({ teamDoneSeq: sql`${tasks.teamDoneSeq} + 1` })
+          .where(and(eq(tasks.id, teamCompletion), eq(tasks.mode, "team")));
+      }
       if (written.length) await opts?.alsoInTx?.(tx);
       return { written, advanceQueueId: written.length && advance ? await stageQueueAdvance(tx, taskId) : null };
     })
