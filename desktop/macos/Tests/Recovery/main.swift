@@ -262,7 +262,7 @@ if proceeded && environment["START_FAILED_MIGRATION"] == "1" {
     }
   }
 }
-if proceeded && (environment["ROLLBACK"] == "1" || environment["ADOPTED_ROLLBACK"] == "1") {
+if proceeded && (environment["ROLLBACK"] == "1" || environment["ADOPTED_ROLLBACK"] == "1" || environment["HELD_ROLLBACK_PID"] != nil) {
   var database: OpaquePointer?
   precondition(sqlite3_open(NaviConfig.dataURL.appendingPathComponent("navi.db").path, &database) == SQLITE_OK)
   precondition(sqlite3_exec(database, "create table failed_migration (id text)", nil, nil, nil) == SQLITE_OK)
@@ -273,6 +273,12 @@ if proceeded && (environment["ROLLBACK"] == "1" || environment["ADOPTED_ROLLBACK
     try JSONEncoder().encode(record).write(to: RuntimeRecovery.url, options: .atomic)
     do { _ = try RuntimeRecovery.restoreBeforeAdoption(); fatalError("restored adopted data") }
     catch { emit("REFUSED_ADOPTED \(error)") }
+  } else if let held = environment["HELD_ROLLBACK_PID"] {
+    // 换库那一刻还有活着的进程握着库锁（测试给的那个）：不往它底下换。
+    let lock = ["version": 1, "pid": Int(held)!, "processStartedAtMs": Double(environment["HELD_ROLLBACK_STARTED"]!)!] as [String: Any]
+    try JSONSerialization.data(withJSONObject: lock).write(to: NaviConfig.dataURL.appendingPathComponent("navi.db.navi.lock"))
+    do { _ = try RuntimeRecovery.restoreBeforeAdoption(); fatalError("restored under a live lock holder") }
+    catch { emit("REFUSED_HELD \(error)") }
   } else { emit("RESTORED \(try RuntimeRecovery.restoreBeforeAdoption()!.path)") }
 }
 if bundleLock >= 0 { close(bundleLock) }

@@ -102,8 +102,10 @@ struct ServerRecord: Codable {
   ///
   /// 记下的「是哪份库」是这一刻数据根里那份，所以先要证明它就是这个进程开着的那份：它此刻还握着这份库的单实例锁
   /// （server 开库之前就拿锁，一直握到退出；app 起的服务都写锁）。它已经退了、握锁的是别人，这一眼就说明不了眼前
-  /// 这份库 —— 不管记录里记的是「那时没有库」、没记、还是同一份 —— 一律不记。导入、回退换库都要求没人握着锁，
-  /// 所以握着锁的进程开着的不会是换上来之前的那份。
+  /// 这份库 —— 不管记录里记的是「那时没有库」、没记、还是同一份 —— 一律不记。
+  /// 从查锁到落账都在服务记录锁里，换库的两处（导入发布 DataImport.publish、回退换回迁移前的库
+  /// RuntimeRecovery.restoreBeforeAdoption）也在这把锁里换、换之前在锁里重查没人握着库锁：查过锁之后库换不上来，
+  /// 换上来之后握着锁的也不会是换之前就开着别的库的那个进程。锁的顺序一律是启动锁 → 服务记录锁。
   @discardableResult
   static func confirmServing(pid: Int?, codeDir: String? = nil, observedAt: Date, launchedHere: Bool = false) -> Bool {
     guard let pid, pid > 1 else { return false }
@@ -112,11 +114,11 @@ struct ServerRecord: Codable {
         RuntimeLog.record("server.confirm_deferred", ["serverPid": pid, "step": "database"])
         return false
       }
+      let database = DatabaseFile.identity(in: NaviConfig.dataURL)
       guard let record = read() else {
         RuntimeRecovery.confirmed(codeDir: codeDir)
         return true
       }
-      let database = DatabaseFile.identity(in: NaviConfig.dataURL)
       let confirmed: ServerRecord
       // 那时没有库（"none"）：库就是它建的（它握着眼前这份库的锁，见上）。
       if let attempt = record.attempt, attempt.database == "none" || !DatabaseFile.contradicts(attempt.database, database),
@@ -166,7 +168,7 @@ struct ServerRecord: Codable {
         throw SQLiteFile.Failure("拿不到服务记录锁（\(String(cString: strerror(errno)))）")
       }
       guard Date() < deadline else {
-        throw SQLiteFile.Failure("服务记录锁（\(lockURL.path)）被另一处占着 \(Int(timeout)) 秒没放，这一次没记账。")
+        throw SQLiteFile.Failure("服务记录锁（\(lockURL.path)）被另一处占着 \(Int(timeout)) 秒没放，这一次没做。")
       }
       Thread.sleep(forTimeInterval: 0.05)
     }

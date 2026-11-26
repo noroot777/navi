@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -389,7 +389,20 @@ server.listen(0,'127.0.0.1',()=>writeFileSync(${JSON.stringify(ready)},JSON.stri
       database.close();
       assert.equal(existsSync(join(data, ".mac-runtime-recovery.json")), false);
     });
-    console.log("✓ failed migration restores the real database and previous runtime from the recorded recovery point");
+    await scenario({ incompatible: true }, async ({ run, data }) => {
+      const sleeper = spawn(process.execPath, ["-e", "setTimeout(()=>{},60000)"], { stdio: "ignore" });
+      try {
+        const output = await run(0, { HELD_ROLLBACK_PID: String(sleeper.pid), HELD_ROLLBACK_STARTED: String(Date.now()) });
+        assert.match(output, new RegExp(`REFUSED_HELD .*服务进程 ${sleeper.pid} 开着库`), output);
+        const database = new DatabaseSync(join(data, "navi.db"));
+        assert.ok(database.prepare("select name from sqlite_master where name='failed_migration'").get(), "the database is not swapped");
+        database.close();
+        assert.equal(existsSync(join(data, ".mac-runtime-recovery.json")), true, "and the recovery is still on record");
+      } finally {
+        sleeper.kill("SIGKILL");
+      }
+    });
+    console.log("✓ failed migration restores the real database and previous runtime from the recorded recovery point, never under a live lock holder");
 
     for (const [mode, expected, extra] of [["update", 0, {}], ["quit", 0, {}], ["update", 1, { HOLD_BUNDLE_LOCK: "1" }]]) {
       await scenario({}, async ({ run, pid, recorded }) => {

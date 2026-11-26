@@ -586,6 +586,41 @@ console.log(JSON.stringify({held:{tasks:2,schedules:1},relocated:3}));`);
   fromStopped.close();
   assert.deepEqual(readdirSync(source).sort(), stoppedBefore, "reading a stopped source leaves no -shm behind");
 
+  // 确认在服务正攥着服务记录锁（查库锁到记下「是哪份库」那一段）：发布等它放开才换库，插不进那一段。
+  const recordTarget = join(temporary, "data-record-locked");
+  mkdirSync(recordTarget);
+  const recordEntered = join(temporary, "record-lock-entered");
+  const recordHolder = launch("/usr/bin/lockf", ["-k", join(recordTarget, ".mac-server.json.lock"), process.execPath, "-e",
+    `require('node:fs').writeFileSync(${JSON.stringify(recordEntered)},String(process.pid));setTimeout(()=>{},60000)`]);
+  await until(() => existsSync(recordEntered), "record lock fixture did not acquire lock");
+  const recordHolderPid = Number(readFileSync(recordEntered, "utf8"));
+  fixturePids.add(recordHolderPid);
+  rmSync(toolSeen, { force: true });
+  const waitingImport = launch(binary, ["import", source, "20"], { ...env, NAVI_DATA_DIR: recordTarget });
+  await until(() => existsSync(toolSeen), "import did not reach the publish step");
+  await delay(1500);
+  assert.equal(existsSync(join(recordTarget, "navi.db")), false, "publishing waits while a confirmation holds the record lock");
+  process.kill(recordHolderPid, "SIGTERM");
+  await recordHolder.done;
+  fixturePids.delete(recordHolderPid);
+  result = await waitingImport.done;
+  assert.equal(result.status, 0, result.output);
+  assert.equal(existsSync(join(recordTarget, "navi.db")), true, "and publishes once it is released");
+
+  // 还有活着的服务握着数据根的库锁（它的库被挪走了）：不往它底下换上另一份库。
+  const heldTarget = join(temporary, "data-lock-held");
+  mkdirSync(heldTarget);
+  const lockOwner = spawn(process.execPath, ["-e", "setTimeout(()=>{},60000)"], { stdio: "ignore" });
+  fixturePids.add(lockOwner.pid);
+  // 启动时刻差 10 秒以内都认（LockHolder），刚 spawn 完的此刻就够准。
+  writeFileSync(join(heldTarget, "navi.db.navi.lock"), JSON.stringify({ version: 1, pid: lockOwner.pid, processStartedAtMs: Date.now(), token: "held" }));
+  result = await launch(binary, ["import", source], { ...env, NAVI_DATA_DIR: heldTarget }).done;
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, new RegExp(`还有一份 Navi 服务（进程 ${lockOwner.pid}）开着`), result.output);
+  assert.equal(existsSync(join(heldTarget, "navi.db")), false);
+  lockOwner.kill("SIGKILL");
+  fixturePids.delete(lockOwner.pid);
+
   result = await launch(binary, ["import", source], { ...env, NAVI_DATA_DIR: source }).done;
   assert.match(result.output, /app 自己的数据目录/);
   result = await launch(binary, ["import-inspect", source], { ...env, NAVI_DATA_DIR: join(source, "nested") }).done;

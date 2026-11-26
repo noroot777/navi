@@ -69,8 +69,14 @@ enum RuntimeRecovery {
       defer { try? FileManager.default.removeItem(at: stage) }
       try SQLiteFile.snapshot(from: URL(fileURLWithPath: backup), to: stage)
       try SQLiteFile.snapshot(from: database, to: database.appendingPathExtension("failed-" + UUID().uuidString))
-      guard rename(stage.path, database.path) == 0 else { throw SQLiteFile.Failure("无法发布恢复后的数据库") }
-      for suffix in ["-wal", "-shm", "-journal"] { try? FileManager.default.removeItem(atPath: database.path + suffix) }
+      // 换库在服务记录锁里、换之前重查没人握着库锁（见 ServerRecord.confirmServing）。
+      try ServerRecord.locked {
+        if let holder = DatabaseFile.liveHolder(in: NaviConfig.dataURL) {
+          throw SQLiteFile.Failure("还有服务进程 \(holder.pid) 开着库，未自动覆盖数据库；迁移前恢复点仍保留。")
+        }
+        guard rename(stage.path, database.path) == 0 else { throw SQLiteFile.Failure("无法发布恢复后的数据库") }
+        for suffix in ["-wal", "-shm", "-journal"] { try? FileManager.default.removeItem(atPath: database.path + suffix) }
+      }
     }
     let previous = URL(fileURLWithPath: record.previous, isDirectory: true)
     let pause = Pause(previous: record.previous, version: record.server?.bundleVersion ?? "unknown", reason: reason)
