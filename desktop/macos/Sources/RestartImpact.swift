@@ -37,7 +37,10 @@ struct RestartImpact: Decodable {
   let shutdown: Shutdown?
 
   /// 同一个任务两类都占时只算一次（interrupted 优先：它说的后果更重）。
-  var disrupted: [ImpactItem] {
+  var disrupted: [ImpactItem] { disrupted(includingShutdown: true) }
+
+  /// `includingShutdown` 为假：随服务关掉的资源不算（装更新另有自己的资源闸；冻结快照里却总带着它们）。
+  func disrupted(includingShutdown: Bool) -> [ImpactItem] {
     var seen = Set<String>()
     var out: [ImpactItem] = []
     for item in interrupted where seen.insert(item.id).inserted {
@@ -46,7 +49,7 @@ struct RestartImpact: Decodable {
     for item in mcpDisrupted where seen.insert(item.id).inserted {
       out.append((item.id, item.title, "手里握着 Navi MCP，服务重启那会儿交卷可能失败"))
     }
-    for resource in shutdown?.resources ?? [] {
+    for resource in includingShutdown ? shutdown?.resources ?? [] : [] {
       out.append(("\(resource.kind):\(resource.id)", resource.label ?? resource.kind, "会随服务一起关掉"))
     }
     return out
@@ -291,9 +294,9 @@ enum RestartFreeze {
     case refused(String)
   }
 
-  /// 只在后台队列上调。
-  static func acquire() -> Outcome {
-    let now = RestartImpactProbe.assessDetailedSync(includingShutdown: true)
+  /// 只在后台队列上调。`includingShutdown` 要跟用户同意过的那份口径一致（见 RestartImpact.disrupted）。
+  static func acquire(includingShutdown: Bool = true) -> Outcome {
+    let now = RestartImpactProbe.assessDetailedSync(includingShutdown: includingShutdown)
     guard case .ours(let pid) = now.verdict.target, now.freezable, let instance = now.instance else {
       return .unfrozen(now.verdict, freezable: now.freezable)
     }
@@ -312,32 +315,48 @@ enum RestartFreeze {
       release(lease)
       return .unfrozen(.unknown("冻结时端口上换了一份服务，或者快照看不懂"), freezable: true)
     }
-    return .frozen(lease, verdict(of: impact, pid: pid))
+    return .frozen(lease, verdict(of: impact, pid: pid, includingShutdown: includingShutdown))
   }
 
-  private static func verdict(of impact: RestartImpact, pid: Int) -> ImpactVerdict {
-    let items = impact.disrupted
+  private static func verdict(of impact: RestartImpact, pid: Int, includingShutdown: Bool) -> ImpactVerdict {
+    let items = impact.disrupted(includingShutdown: includingShutdown)
     return items.isEmpty ? .clear(.ours(pid: pid)) : .disrupts(.ours(pid: pid), items)
   }
 
-  /// 下刀前续一次期：冻结还在、此刻的名单也没比 `agreed`（用户点头的那份）多出谁，就是 nil；否则交回原因。
-  /// 名单会多是因为已经在跑的 agent 中途拉起 navi MCP 这件事服务端冻不住（见 server/src/restart-freeze.ts）。
-  static func renew(_ lease: Lease, agreed: ImpactVerdict) -> String? {
+  enum Check {
+    case valid
+    /// 此刻的名单比用户同意过的多出了谁：带着此刻那份（拿去重新问）和一句原因。
+    case widened(ImpactVerdict, String)
+    /// 冻结失效了、续期没答上来、此刻的名单没给出来。
+    case invalid(String)
+  }
+
+  /// 下刀前续一次期，顺带拿此刻的名单跟 `agreed`（用户点头的那份）比。名单会多是因为已经在跑的 agent 中途拉起
+  /// navi MCP 这件事服务端冻不住（见 server/src/restart-freeze.ts）。
+  static func check(_ lease: Lease, agreed: ImpactVerdict, includingShutdown: Bool = true) -> Check {
     let reply = send(instance: lease.instance, body: ["renew": lease.token])
     guard reply.status == 200, reply.json?["valid"] as? Bool == true else {
-      return reply.status == 200 ? "冻结已经失效（到期了，或者被放掉了）" : "续期没有答复（服务端回 \(reply.status)）"
+      return .invalid(reply.status == 200 ? "冻结已经失效（到期了，或者被放掉了）" : "续期没有答复（服务端回 \(reply.status)）")
     }
-    guard case .ours(let pid) = agreed.target else { return nil }
+    guard case .ours(let pid) = agreed.target else { return .valid }
     guard let body = reply.json?["impact"], let data = try? JSONSerialization.data(withJSONObject: body),
           let impact = try? JSONDecoder().decode(RestartImpact.self, from: data) else {
-      return "续期答复里没有此刻的影响名单，核对不了"
+      return .invalid("续期答复里没有此刻的影响名单，核对不了")
     }
-    let now = verdict(of: impact, pid: pid)
-    guard agreed.widened(to: now), case .disrupts(_, let items) = now else { return nil }
+    let now = verdict(of: impact, pid: pid, includingShutdown: includingShutdown)
+    guard agreed.widened(to: now), case .disrupts(_, let items) = now else { return .valid }
     var known = Set<String>()
     if case .disrupts(_, let had) = agreed { for item in had { known.insert(item.id ?? item.title) } }
     let extra = items.filter { !known.contains($0.id ?? $0.title) }.map(\.title)
-    return "确认之后又多了会被打断的：\(extra.prefix(5).joined(separator: "、"))\(extra.count > 5 ? " 等 \(extra.count) 项" : "")"
+    return .widened(now, "确认之后又多了会被打断的：\(extra.prefix(5).joined(separator: "、"))\(extra.count > 5 ? " 等 \(extra.count) 项" : "")")
+  }
+
+  /// 同 `check`，只要一句原因：nil = 可以停。
+  static func renew(_ lease: Lease, agreed: ImpactVerdict) -> String? {
+    switch check(lease, agreed: agreed) {
+    case .valid: return nil
+    case .widened(_, let why), .invalid(let why): return why
+    }
   }
 
   static func release(_ lease: Lease) {

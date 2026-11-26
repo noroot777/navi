@@ -62,28 +62,57 @@ const env = {
   WAIT: "",
 };
 
-/** 起一个假 server:`/api/restart-impact` 回 impact(null = 收下请求永不作答),其余回 health。 */
-async function fakeServer(name, impact) {
+/**
+ * 起一个假 server:`/api/restart-impact` 回 impact(null = 收下请求永不作答),其余回 health。
+ * freeze 给了就认重启前冻结(判据里报 `restartFreeze: 1`),每次 POST /api/restart-freeze 记进 `<name>.freeze.log`:
+ *   clean  冻住、快照是空的;续期带回一个随服务关掉的终端
+ *   widen  冻住,快照里却多出一个还在起跑的
+ *   grow   快照是空的,续期带回的此刻名单里多了一个(冻结冻不住的那种)
+ *   busy   另一处正冻着(409)
+ */
+async function fakeServer(name, impact, freeze = null) {
   const script = join(TMP, `${name}.mjs`);
   const pidFile = join(TMP, `${name}.pid`);
-  writeFileSync(script, `import { writeFileSync } from "node:fs";
+  writeFileSync(script, `import { appendFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-const impact = ${JSON.stringify(impact)};
+const impact = ${JSON.stringify(impact && freeze ? { ...impact, restartFreeze: 1 } : impact)};
+const mode = ${JSON.stringify(freeze)};
+const empty = { survives: [], resumes: [], interrupted: [], mcpDisrupted: [] };
 createServer((req, res) => {
+  const send = (status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
   if (req.url?.startsWith("/api/restart-impact")) {
     if (impact === null) return;
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify(impact));
+    return send(200, impact);
+  }
+  if (mode && req.url === "/api/restart-freeze" && req.method === "POST") {
+    let text = "";
+    req.on("data", (chunk) => { text += chunk; });
+    req.on("end", () => {
+      const body = JSON.parse(text || "{}");
+      const what = body.release ? "release" : body.renew ? "renew" : "acquire";
+      appendFileSync(${JSON.stringify(join(TMP, `${name}.freeze.log`))}, what + "\\n");
+      if (what === "release") return send(200, { protocol: 1, released: true });
+      if (what === "renew") {
+        const late = mode === "grow" ? [{ id: "mid", title: "冻结之后才冒出来的任务", reason: "进程已经不在了" }] : [];
+        const resources = mode === "clean" ? [{ kind: "terminal", id: "t1", label: "终端 zsh" }] : [];
+        return send(200, { protocol: 1, valid: true, expiresInMs: 30000, impact: { ...empty, interrupted: late, shutdown: { version: 1, resources } } });
+      }
+      if (mode === "busy") return send(409, { protocol: 1, error: "正在切换新版服务" });
+      const interrupted = mode === "widen" ? [{ id: "late", title: "冻结时才看到的任务", reason: "正在起跑,还没交给重启后接得回的进程" }] : [];
+      send(200, { protocol: 1, lease: "lease-" + mode, instance: "i", pid: process.pid, revision: 1, expiresInMs: 30000,
+        impact: { ...empty, interrupted, shutdown: { version: 1, resources: [] } } });
+    });
     return;
   }
-  res.writeHead(200, { "content-type": "application/json" });
-  res.end(JSON.stringify({ ok: true, pid: process.pid }));
+  send(200, { ok: true, pid: process.pid });
 }).listen(${PORT}, "127.0.0.1", () => writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)));
 `);
   const fixture = spawnTestFixture(process.execPath, [script], { stdio: "ignore" });
   for (let i = 0; i < 50 && !existsSync(pidFile); i++) await sleep(100);
   assert.ok(existsSync(pidFile), `${name}: 假 server 没起来`);
-  return { fixture, pid: Number(readFileSync(pidFile, "utf8").trim()) };
+  const freezeLog = join(TMP, `${name}.freeze.log`);
+  const freezeCalls = () => (existsSync(freezeLog) ? readFileSync(freezeLog, "utf8").split("\n").filter(Boolean).join(",") : "");
+  return { fixture, pid: Number(readFileSync(pidFile, "utf8").trim()), freezeCalls };
 }
 
 const stop = (args, expected, extraEnv = {}) => runTestProcess(process.execPath, [STOP, ...args], {
@@ -106,8 +135,36 @@ await withTestResources(async () => {
     for (let i = 0; i < 25 && isPidAlive(plain.pid); i++) await sleep(40);
     assert.ok(!isPidAlive(plain.pid), `报了已停止,进程却还在\n${out}`);
     assert.ok(await quiet(), `报了已停止,端口却还被占着\n${out}`);
+    assert.match(out, /没有重启前冻结/, `老服务不认冻结时要如实说问完到停下之间新起的任务不在名单上\n${out}`);
   }, [() => plain.fixture.dispose()]);
   console.log("✓ 没在跑时报无需停止; 在跑时停干净且端口安静才报成功");
+
+  // 重启前冻结(server/src/restart-freeze.ts):过了闸先冻结,凭冻结之下的快照再判,下刀前续期核对。
+  for (const [mode, line, calls] of [
+    ["widen", /停止会打断 1 个任务[\s\S]*冻结时才看到的任务/, "acquire,release"],
+    ["grow", /冻结之后又多了 1 个会被挡下的任务[\s\S]*冻结之后才冒出来的任务/, "acquire,renew,release"],
+    ["busy", /冻结不了接活\(正在切换新版服务\)/, "acquire"],
+  ]) {
+    const server = await fakeServer(`freeze-${mode}`, EMPTY, mode);
+    await withTestResources(async () => {
+      const out = await stop([], 2);
+      assert.match(out, line, out);
+      assert.equal(server.freezeCalls(), calls, `${mode}: 冻结调用不对(中止时要放掉冻结,冻不了就只问那一次)\n${out}`);
+      assert.ok(isPidAlive(server.pid), `${mode}: 中止时不许动它\n${out}`);
+      assert.doesNotMatch(out, /已停止|没有重启前冻结/, out);
+    }, [() => server.fixture.dispose()]);
+  }
+  const clean = await fakeServer("freeze-clean", EMPTY, "clean");
+  await withTestResources(async () => {
+    const out = await stop([], 0);
+    assert.match(out, /已停止/, out);
+    assert.equal(clean.freezeCalls(), "acquire,renew", `冻结 → 下刀前续期,停成了不再放\n${out}`);
+    assert.match(out, /会随服务一起关掉 1 个:终端 zsh/, out);
+    assert.doesNotMatch(out, /没有重启前冻结/, out);
+    for (let i = 0; i < 25 && isPidAlive(clean.pid); i++) await sleep(40);
+    assert.ok(!isPidAlive(clean.pid) && await quiet(), out);
+  }, [() => clean.fixture.dispose()]);
+  console.log("✓ 重启前冻结:快照或续期时多出来的拦住并放掉冻结、冻结被占就中止、干净的续期后停;老服务如实退回");
 
   // 会打断任务:默认中止、不动它;--force 照停。
   const busy = await fakeServer("busy", { ...EMPTY, interrupted: [{ title: "接管不了的任务", reason: "测试" }] });

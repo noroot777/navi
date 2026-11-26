@@ -1,6 +1,7 @@
 // test-upgrade.mjs 的现场:一个裸远端、一份「开发者」检出(往远端推新版本)、一份「用户」检出(在它上面跑升级)。
 // 代码是真脚本(scripts/ 原样拷一份,升级命令本身就在里面)加一个假 server 和假 npm:
-//  - 假 server 真监听、真回 /api/health 与 /api/restart-impact,像真服务那样写单例锁(v1 只写改名之前那把
+//  - 假 server 真监听、真回 /api/health 与 /api/restart-impact(数据目录里有 freeze.json 就也认重启前冻结,照其中的 mode 答、
+//    每次调用记进 freeze.log),像真服务那样写单例锁(v1 只写改名之前那把
 //    `.ash.lock`、也只认 ash.db;之后的版本两把都写、优先开 navi.db),对着改名路标和改名账本拒绝启动。
 //  - 假 npm 只记被怎么调;`run build` 真跑仓库里的 build.mjs(仓库根有 BUILD_FAIL 就失败)。
 import { execFileSync } from "node:child_process";
@@ -74,7 +75,7 @@ writeFileSync("web/dist/assets/app.js", "");
 
 /** 假 server。version 是它报出来的版本号;legacy = 改名之前的那一代。 */
 function serverSource(version, legacy) {
-  return `import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+  return `import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -94,10 +95,32 @@ if (marker(db)) { console.error("file is not a database: " + db); process.exit(1
 const locks = (${legacy} ? [".ash.lock"] : [".navi.lock", ".ash.lock"]).map((s) => db + s);
 for (const l of locks) writeFileSync(l, JSON.stringify({ pid: process.pid, port, token: "t" }));
 const impact = join(dataDir, "impact.json");
+const freeze = join(dataDir, "freeze.json");
+const empty = { survives: [], resumes: [], interrupted: [], mcpDisrupted: [] };
 createServer((req, res) => {
+  if (req.url === "/api/restart-freeze" && req.method === "POST" && existsSync(freeze)) {
+    let text = "";
+    req.on("data", (chunk) => { text += chunk; });
+    req.on("end", () => {
+      const body = JSON.parse(text || "{}");
+      const what = body.release ? "release" : body.renew ? "renew" : "acquire";
+      appendFileSync(join(dataDir, "freeze.log"), what + "\\n");
+      const { mode } = JSON.parse(readFileSync(freeze, "utf8"));
+      const reply = (status, data) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify({ protocol: 1, ...data })); };
+      if (what === "release") return reply(200, { released: true });
+      if (what === "renew") {
+        const late = mode === "grow" ? [{ id: "mid", title: "冻结之后才冒出来的任务" }] : [];
+        return reply(200, { valid: true, expiresInMs: 30000, impact: { ...empty, survives: late, shutdown: { version: 1, resources: [] } } });
+      }
+      if (mode === "busy") return reply(409, { error: "正在切换新版服务" });
+      const survives = mode === "widen" ? [{ id: "late", title: "冻结时才看到的任务" }] : [];
+      reply(200, { lease: "lease", instance: "i", pid: process.pid, revision: 1, expiresInMs: 30000, impact: { ...empty, survives, shutdown: { version: 1, resources: [] } } });
+    });
+    return;
+  }
   res.writeHead(200, { "content-type": "application/json" });
   if (req.url.startsWith("/api/restart-impact")) {
-    return res.end(existsSync(impact) ? readFileSync(impact, "utf8") : '{"survives":[],"resumes":[],"interrupted":[],"mcpDisrupted":[]}');
+    return res.end(existsSync(impact) ? readFileSync(impact, "utf8") : JSON.stringify(empty));
   }
   res.end(JSON.stringify({ ok: true, pid: process.pid, version: VERSION, db, instance: { codeDir: repo, dataDir }, upgradeToken: process.env.NAVI_UPGRADE_LOCK_TOKEN ?? null }));
 }).listen(port, "127.0.0.1", () => console.log("listening " + port + " " + VERSION));
