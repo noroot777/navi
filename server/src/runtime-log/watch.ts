@@ -13,7 +13,7 @@
 // 睡了多久，记成 `system.sleep`。
 import { monitorEventLoopDelay, PerformanceObserver } from "node:perf_hooks";
 import { getHeapStatistics } from "node:v8";
-import { inflightSnapshot, takeServedCount } from "./http.js";
+import { requestsDuring, takeServedCount } from "./http.js";
 import { runtimeLog } from "./journal.js";
 import { noteStall, samplerTick } from "./sampler.js";
 
@@ -89,7 +89,7 @@ function watchLoop(): void {
           gcMs: gcWithin(mono - monoGap, mono),
           rssMB: mb(memory.rss),
           heapMB: mb(memory.heapUsed),
-          inflight: inflightSnapshot(),
+          inflight: requestsDuring(mono - blocked, mono),
         });
         noteStall({ n, startPerf: mono - blocked, endPerf: mono, ms: blocked });
       }

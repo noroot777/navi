@@ -52,12 +52,23 @@ function since<T extends { at: string }>(items: T[], sinceMs: number | null): T[
 const EXIT_MARGIN_MS = 86_400_000;
 const exitsSince = (sinceMs: number | null) => (sinceMs === null ? null : sinceMs - EXIT_MARGIN_MS);
 
+/**
+ * 窗口里的记录，外加窗口之前**最后一次服务启动**当上下文：窗口里第一次重启要靠它认上一轮是谁（第 3 轮审查：
+ * 上一轮起在七天之前时，先按日期裁掉它，这次重启就被当成认不出上一轮）。分析端只按窗口筛结果。
+ */
+function withContext(records: RuntimeLogRecord[], sinceMs: number | null): RuntimeLogRecord[] {
+  const sorted = [...records].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  if (sinceMs === null) return sorted;
+  const before = sorted.filter((r) => Date.parse(r.at) < sinceMs && r.src === "server" && r.ev === "server.start").at(-1);
+  return [...(before ? [before] : []), ...sorted.filter((r) => Date.parse(r.at) >= sinceMs)];
+}
+
 export function readRuntimeLogDir(dir: string, sinceMs: number | null = null): RuntimeLogRecord[] {
   const records: RuntimeLogRecord[] = [];
   for (const name of LOG_FILES) {
     records.push(...readFile(join(dir, `${name}.1`)), ...readFile(join(dir, name)));
   }
-  return since(records, sinceMs).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  return withContext(records, sinceMs);
 }
 
 function toSummary(record: ExitRecord): ExitSummary {
@@ -110,7 +121,7 @@ export function loadRuntimeLogPath(path: string, sinceMs: number | null = null):
   const bundle = JSON.parse(readFileSync(path, "utf8")) as RuntimeLogBundle;
   if (bundle?.format !== RUNTIME_LOG_BUNDLE_FORMAT) throw new Error(`${path} 不是 Navi 运行日志导出包`);
   return {
-    records: since(bundle.records, sinceMs).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)),
+    records: withContext(bundle.records, sinceMs),
     exits: since(bundle.exits as ExitSummary[], exitsSince(sinceMs)),
     host: bundle.host,
   };

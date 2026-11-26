@@ -6,7 +6,9 @@
 //   2. **它是怎么没的**（证据）：只有记录能说到的那一步才说。按证据强弱：
 //      · 残留——这次启动看见上一轮的锁还在（`previous`），或者退出账本给那一轮记了残留：它没收完尾就没了。
 //        同时还有退出意向（收到了信号、开始退出）就是「进了退出流程没走完」，残留压过意向，不说成正常停；
-//      · 那一轮自己写下的退出记录：收到哪个信号 / 退出码多少；
+//      · 那一轮自己写下的退出记录：只说明它**走到了哪一步**（收到了哪个信号、走到了退出码多少的那一步），
+//        锁也放掉了。它是进程自己写的，写完之后照样可能被强杀（第 3 轮审查实测：SIGTERM 收尾放完锁、
+//        退出前一刻 SIGKILL，旧版说成了「收到 SIGTERM 退出」）——最终怎么结束的，进程外没有记录就不下结论；
 //      · 什么都没有：**就说不知道**。身份只能证明「是哪一轮」，证明不了它删过锁、走过退出流程——账本被清理、
 //        锁被截坏、记录超出读取范围，都会是这个样子（第 2 轮审查实测：SIGKILL 之后截坏锁，旧版说成了正常删锁）。
 // 一条上一轮的线索都没有就不算重启，但也不说成「全新启动」：可能只是更早的日志已经不在了。
@@ -18,8 +20,12 @@ export type RestartVerdict = {
   how: string;
   /** 上一轮是怎么认出来的：锁里 / 日志里的身份、按时间推测、没有任何线索。 */
   basis: "identity" | "time" | "none";
-  /** 记录能证明的结局；`unknown` = 没有记录能说明。 */
-  ending: "signal" | "exit" | "unfinished" | "vanished" | "unknown";
+  /**
+   * 记录能证明到哪一步：`stop_requested` 收到停止信号并放掉了锁、`exiting` 自己走到了退出并放掉了锁（两者都只是
+   * 进程自己记下的步骤，不是最终结局）；`unfinished` 进了退出流程但锁还留着；`vanished` 什么都没留下就没了；
+   * `unknown` 没有记录能说明。
+   */
+  ending: "stop_requested" | "exiting" | "unfinished" | "vanished" | "unknown";
 };
 
 const t = (record: { at: string }) => Date.parse(record.at);
@@ -38,11 +44,16 @@ function unfinished(intent: { kind?: string; signal?: string } | null, silentMs:
   return { how: `上一份服务没留下任何退出记录就没了${silent}——被强杀（kill -9）、系统内存不够被结束，或原生崩溃`, ending: "vanished" };
 }
 
+/** 进程自己记下、锁也放掉了：说它走到了哪一步，最终结局留空。 */
 function finished(exit: ExitSummary): Ending {
+  const after = "，锁也放掉了；之后进程最终怎么结束的没有进程外的记录";
   if (exit.kind === "signal") {
-    return { how: `上一份服务收到 ${exit.signal} 退出（运行了 ${secs(Number(exit.uptimeMs ?? 0))}）——有人让它停的：升级、npm run restart、装更新或关机`, ending: "signal" };
+    return {
+      how: `上一份服务收到 ${exit.signal}（运行了 ${secs(Number(exit.uptimeMs ?? 0))}）开始收尾${after}——这个信号是有人让它停：升级、npm run restart、装更新或关机`,
+      ending: "stop_requested",
+    };
   }
-  return { how: `上一份服务自己退出了（退出码 ${exit.code ?? "?"}）`, ending: "exit" };
+  return { how: `上一份服务自己走到了退出（退出码 ${exit.code ?? "?"}）${after}`, ending: "exiting" };
 }
 
 /** 一条账本记录说明的结局。残留记录自己带着「当时看没看到退出意向」。 */

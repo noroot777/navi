@@ -9,12 +9,13 @@
 // 「白名单」指的是**取值本身**来自固定集合或能核对出处，不是「长得像安全的」：
 //   · 报错原文只输出下面那张固定模板表里的一句；错误名、错误码、系统调用名、HTTP 方法只认名单；
 //   · 路由只认服务端注册过的路由模板；
-//   · 栈帧的位置要是磁盘上真有的 navi 代码文件，函数名要在它指向的那份代码文件里真的出现过
-//     （`verifyFrames`）——代码文件里没有的名字只能是运行时拼出来的，可能来自数据；
+//   · 栈帧的位置要是磁盘上真有的 navi 代码文件；函数名不取上报的那一份，由那个代码位置推出来
+//     （`verifyFrames`）——上报的名字可以是运行时拼出来的，可能来自数据；
 //   · 页面生成的标识（标签页、这一次载入）服务端收下时换成摘要，页面塞什么都只剩一串散列。
 // 前两轮审查实测过按形状认的版本会漏：原生 `JSON.parse` 报错把数据的字段名带在引号里；
 // `/tasks/abc123/page/token123/customer` 这样的动态段长得像路由常量；`CustomerAcquisitionBudget` 长得
-// 像函数名、旁边的文件也真的存在；`ERR_CUSTOMER_ACQUISITION` 长得像 Node 的错误码。
+// 像函数名、旁边的文件也真的存在；`OpenAI` 在打包产物的界面文案里出现过；`ERR_CUSTOMER_ACQUISITION`
+// 长得像 Node 的错误码。
 
 export type RuntimeLogSource = "server" | "web" | "mac" | "win";
 
@@ -153,30 +154,39 @@ export function scrubMethod(method: unknown): string {
 
 /**
  * 调用栈的一帧压成「函数名 位置」的**候选**，位置只留代码里的相对位置：
- *   · navi 自己的代码 → 相对代码根的路径:行号（`server/dist/reattach.js:120`、`assets/index-abc.js:1`）
+ *   · navi 自己的代码 → 相对代码根的路径:行号（`server/dist/reattach.js:120`）；页面的打包产物再带列号
+ *     （`assets/index-abc.js:1:900`，压缩过的产物只有一行，没有列号定位不了）
  *   · Node 内置 → `node:child_process`（内部模块一律 `node:internal`）
  *   · 依赖 → `node_modules/<包名>`
  *   · 其它（用户项目里的文件、eval、匿名）→ `<other>`
- * 候选只过了形状，**写进日志之前必须过 `verifyFrames`**：函数名是不是那份代码里的、文件是不是真的在。
+ * 候选只过了形状，**写进日志之前必须过 `verifyFrames`**：候选里的函数名不会原样留下。
  */
-export function scrubFrame(functionName: string | undefined, url: string | undefined, line: number | undefined, codeRoots: readonly string[]): string {
+export function scrubFrame(
+  functionName: string | undefined, url: string | undefined, line: number | undefined, codeRoots: readonly string[], column?: number,
+): string {
   const fn = functionName && /^[\w$.<> \[\]-]{1,80}$/.test(functionName) ? functionName : "<anon>";
-  return `${fn} ${scrubLocation(url, line, codeRoots)}`;
+  return `${fn} ${scrubLocation(url, line, codeRoots, column)}`;
 }
 
-/**
- * 核对栈帧出处：`file` 是帧上的位置去掉行号（`server/dist/x.js`、`assets/a.js`、`node:fs`、`node_modules/hono`），
- * `name` 为 null 时只问「这个代码位置在不在」，否则问「这个名字是不是那份代码里写着的」。
- * 服务端按磁盘上的代码回答（server/src/runtime-log/code-symbols.ts）。
- */
-export type CodeSymbols = (file: string, name: string | null) => boolean;
+/** 栈帧出处：服务端按磁盘上的代码回答（server/src/runtime-log/code-symbols.ts）。 */
+export type CodeLocations = {
+  /** 这个代码位置在不在：`server/dist/x.js`、`assets/a.js`、`node:fs`、`node_modules/hono`（位置去掉行列号）。 */
+  exists(file: string): boolean;
+  /**
+   * 这一帧该叫什么名字，**由可信的那一侧给出**：navi 代码文件从源码里读出那一行所在的函数（`reported` 不看）；
+   * Node 内置模块只认它公开导出的名字（封闭集合）。给不出就 null，这一帧只留位置。
+   */
+  nameAt(file: string, line: number | null, reported: string): string | null;
+};
 
 /**
- * 栈帧候选过出处核对：位置不在 → `<anon> <other>`；名字（`a.b.c` 的每一段）有一段不在那份代码里 → 换成 `<anon>`。
- * 这道核对管的是**名字的来源**：`{ [title]: () => {} }`、`Object.defineProperty(fn, "name", …)` 能把数据变成
- * 函数名，但变不进代码文件里。
+ * 栈帧候选过出处核对，输出「名字 位置」或只有「位置」：
+ *   · 位置不在 → `<other>`；
+ *   · 名字**不从上报的那一份里取**——上报的函数名可以是运行时拼出来的（`{ [title]: () => {} }`、
+ *     `Object.defineProperty(fn, "name", …)`），页面还能随便填；核对「这个词在代码文件里出现过」也不够，
+ *     注释、界面文案、字符串常量里什么词都有（第 3 轮审查实测 `OpenAI` 就这样带了出去）。
  */
-export function verifyFrames(frames: unknown, symbols: CodeSymbols, limit = 8): string[] {
+export function verifyFrames(frames: unknown, locations: CodeLocations, limit = 8): string[] {
   if (!Array.isArray(frames)) return [];
   const kept: string[] = [];
   for (const frame of frames.slice(0, limit)) {
@@ -185,30 +195,30 @@ export function verifyFrames(frames: unknown, symbols: CodeSymbols, limit = 8): 
     if (split <= 0) continue;
     const location = frame.slice(split + 1);
     if (location === "<native>" || location === "<other>") {
-      kept.push(`<anon> ${location}`);
+      kept.push(location);
       continue;
     }
-    const file = /^(.+?)(?::\d+)?$/.exec(location)![1]!;
-    if (!symbols(file, null)) {
-      kept.push("<anon> <other>");
+    const [, file, line] = /^(.+?)(?::(\d+))?(?::\d+)?$/.exec(location)!;
+    if (!locations.exists(file!)) {
+      kept.push("<other>");
       continue;
     }
-    const raw = frame.slice(0, split).replace(/^(?:async|new) /, "").replace(/ \[as [^\]]*\]$/, "");
-    const named = raw !== "<anon>" && raw.split(".").every((segment) =>
-      segment === "<anonymous>" || (/^[A-Za-z_$][\w$]{0,60}$/.test(segment) && symbols(file, segment)));
-    kept.push(`${named ? raw : "<anon>"} ${location}`);
+    const reported = frame.slice(0, split).replace(/^(?:async|new) /, "").replace(/ \[as [^\]]*\]$/, "");
+    const name = locations.nameAt(file!, line ? Number(line) : null, reported);
+    kept.push(name ? `${name} ${location}` : location);
   }
   return kept;
 }
 
-function scrubLocation(url: string | undefined, line: number | undefined, codeRoots: readonly string[]): string {
+function scrubLocation(url: string | undefined, line: number | undefined, codeRoots: readonly string[], column?: number): string {
   if (!url) return "<native>";
   if (url.startsWith("node:")) return url.startsWith("node:internal/") ? "node:internal" : url.split(/[?#]/)[0]!.slice(0, 60);
   // 页面那一侧的代码根是 origin（`http://localhost:4317`），同源的脚本按 origin 之后那段算。
   for (const root of codeRoots) {
     if (/^https?:\/\//.test(root) && url.startsWith(`${root}/`)) {
       const rel = url.slice(root.length + 1).split(/[?#]/)[0]!;
-      return /^[\w./@-]{1,160}$/.test(rel) ? `${rel}${typeof line === "number" ? `:${line}` : ""}` : "<other>";
+      if (!/^[\w./@-]{1,160}$/.test(rel)) return "<other>";
+      return `${rel}${typeof line === "number" ? `:${line}${typeof column === "number" ? `:${column}` : ""}` : ""}`;
     }
   }
   let path = url;
@@ -241,14 +251,14 @@ export function scrubStack(stack: unknown, codeRoots: readonly string[], limit =
   for (const raw of stack.split("\n")) {
     const line = raw.trim();
     // V8：`at fn (url:line:col)` / `at url:line:col`
-    let match = /^at (?:(.+?) \()?(.+?):(\d+):\d+\)?$/.exec(line);
+    let match = /^at (?:(.+?) \()?(.+?):(\d+):(\d+)\)?$/.exec(line);
     // JavaScriptCore / Firefox：`fn@url:line:col`
     if (!match) {
-      const jsc = /^(.*?)@(.+?):(\d+):\d+$/.exec(line);
-      if (jsc) match = [jsc[0], jsc[1] || undefined, jsc[2], jsc[3]] as unknown as RegExpExecArray;
+      const jsc = /^(.*?)@(.+?):(\d+):(\d+)$/.exec(line);
+      if (jsc) match = [jsc[0], jsc[1] || undefined, jsc[2], jsc[3], jsc[4]] as unknown as RegExpExecArray;
     }
     if (!match) continue;
-    frames.push(scrubFrame(match[1], match[2], Number(match[3]), codeRoots));
+    frames.push(scrubFrame(match[1], match[2], Number(match[3]), codeRoots, Number(match[4])));
     if (frames.length >= limit) break;
   }
   return frames;
@@ -276,9 +286,9 @@ function count(value: unknown, max = 86_400_000): number | undefined {
  */
 export function sanitizeWebEvent(
   input: unknown,
-  { symbols, digest }: {
-    /** 页面代码的出处核对（只认 web 产物里的文件和名字）。 */
-    symbols: CodeSymbols;
+  { locations, digest }: {
+    /** 页面代码的出处核对（只认 web 产物 / 源码里的文件）。 */
+    locations: CodeLocations;
     /** 页面生成的标识换成摘要：页面塞什么都只剩散列，同一个标识换出来的还是同一串（拿来对身份）。 */
     digest: (id: string) => string;
   },
@@ -303,6 +313,8 @@ export function sanitizeWebEvent(
       set("sincePrevMs", count(event.sincePrevMs));
       // 同一个标签页上一次载入的 load：把「那一次重载 / 崩溃」和「接着载进来的这一次」对成同一次。
       set("prev", id(event.prev));
+      // 页面所在的桌面壳进程（壳写在 UA 里）：壳那一侧的撤页 / 重载按它对到这一页，不按「同平台的下一页」。
+      set("shellPid", count(event.shellPid, 4_194_304));
       break;
     case "page.error":
     case "page.crash": {
@@ -310,7 +322,7 @@ export function sanitizeWebEvent(
       set("kind", pick(event.kind, ERROR_KINDS));
       set("name", name);
       set("msg", typeof event.msg === "string" && ERROR_TEMPLATE_TEXTS.has(event.msg) ? event.msg : undefined);
-      set("frames", verifyFrames(event.frames, symbols));
+      set("frames", verifyFrames(event.frames, locations));
       break;
     }
     case "page.reload":
@@ -328,7 +340,8 @@ export function sanitizeWebEvent(
 // ── 分析结果（server/src/runtime-log/analyze.ts 产出，设置页与 `npm run diagnose` 展示）──
 
 export type CauseKind =
-  | "sleep" | "restart" | "stall" | "webcontent" | "page_error" | "reload" | "not_ours" | "refused_connection" | "unknown";
+  | "sleep" | "restart" | "stall" | "webcontent" | "page_error" | "reload" | "load_failed" | "not_presented"
+  | "not_ours" | "refused_connection" | "unknown";
 
 export type Incident = {
   at: string;
@@ -364,6 +377,8 @@ export const CAUSE_LABELS: Record<CauseKind, string> = {
   webcontent: "网页进程被结束",
   page_error: "页面脚本出错",
   reload: "整页刷新",
+  load_failed: "页面没载出来",
+  not_presented: "页面没显示出来",
   not_ours: "端口被占",
   refused_connection: "连接被拒",
   unknown: "原因不明",

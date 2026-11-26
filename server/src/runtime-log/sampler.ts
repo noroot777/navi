@@ -13,7 +13,7 @@
 import { Session } from "node:inspector";
 import { scrubFrame, verifyFrames } from "@navi/shared/runtime-log";
 import { CODE_DIR } from "../paths.js";
-import { serverCodeSymbols } from "./code-symbols.js";
+import { serverCodeLocations } from "./code-symbols.js";
 import { runtimeLog } from "./journal.js";
 
 /** 卡顿超过这么久才武装采样器。 */
@@ -120,7 +120,8 @@ function summarize(profile: Profile, stopPerf: number, stall: StallWindow): void
   const fromUs = stall.startPerf * 1000 - offsetUs;
   const toUs = stall.endPerf * 1000 - offsetUs;
   const counts = new Map<string, { frames: string[]; count: number }>();
-  // 同一个节点在几百个样本里反复出现：每个节点只核对一次出处。
+  // 同一个节点在几百个样本里反复出现：每个节点只核对一次出处。名字按行号从代码文件里读（verifyFrames），
+  // 生产跑的是 server/dist 的 JS，行号就是那份文件的；开发时 tsx 直接跑 TS，采样器给的是转译后的行号，读不准就只留位置。
   const verified = new Map<number, string>();
   let total = 0;
   let t = profile.startTime;
@@ -155,7 +156,7 @@ function stackOf(id: number, nodes: Map<number, ProfileNode>, parent: Map<number
     if (special) return [special];
     let frame = verified.get(current);
     if (frame === undefined) {
-      frame = verifyFrames([scrubFrame(functionName || "<anon>", url || undefined, url ? lineNumber + 1 : undefined, [CODE_DIR])], serverCodeSymbols)[0]!;
+      frame = verifyFrames([scrubFrame(functionName || "<anon>", url || undefined, url ? lineNumber + 1 : undefined, [CODE_DIR])], serverCodeLocations)[0]!;
       verified.set(current, frame);
     }
     frames.push(frame);

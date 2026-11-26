@@ -1,16 +1,17 @@
 // 运行日志回归：npm -w server run test:runtime-log
 //
 // 钉住四件事：
-//   1. 脱敏是白名单 —— 报错原文只换成固定说法（不按形状删字），路由记注册时的模板，页面报上来的
-//      栈帧要核对成 navi 自己的代码文件；业务报错原文、文件路径、任务号、页面多塞的字段一个都进不了日志；
-//   2. 落盘尽力而为且限流；
+//   1. 脱敏是白名单 —— 报错原文只换成固定说法（不按形状删字），路由记注册时的模板，栈帧的位置要核对成
+//      navi 自己的代码文件、名字由那个位置推出来（不回显上报的）；业务报错原文、文件路径、任务号、页面多塞的
+//      字段一个都进不了日志；
+//   2. 落盘尽力而为且限流，目录被清掉了会重建；
 //   3. 卡顿检测 + 采样器在真实卡顿里采得到调用栈（JS 忙算、同步子进程两种都要采到 —— 后者正是
 //      「服务卡住、窗口闪一下」最常见的样子，采不到这个功能就没有意义）；
 //   4. 分析把每一次撤页归到对的原因上；上一轮服务是谁按身份（runId）对，怎么没的只说证据说得到的，
 //      只靠时间对的明说是推测；任何一种「闪一下」的观察单独出现都要列出来，哪几条是同一次按载入 / 运行身份认。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,7 +24,7 @@ const { runtimeLog, runtimeLogDir } = await import("../src/runtime-log/journal.j
 const { describeError } = await import("../src/runtime-log/process-events.js");
 const { analyzeRuntimeLog } = await import("../src/runtime-log/analyze.js");
 const { renderRuntimeLogReport } = await import("../src/runtime-log/render.js");
-const { readRuntimeLogDir, loadDataDir, buildRuntimeLogBundle } = await import("../src/runtime-log/load.js");
+const { readRuntimeLogDir, loadDataDir, buildRuntimeLogBundle, loadRuntimeLogPath } = await import("../src/runtime-log/load.js");
 const { recordExit } = await import("../src/exit-ledger.js");
 const { CODE_DIR } = await import("../src/paths.js");
 
@@ -33,7 +34,7 @@ function serverLines(): Array<Record<string, unknown>> {
 
 // ── 1. 脱敏 ──────────────────────────────────────────────────────────────
 {
-  const { serverCodeSymbols, webCodeSymbols, digestPageId } = await import("../src/runtime-log/code-symbols.js");
+  const { serverCodeLocations, webCodeLocations, digestPageId } = await import("../src/runtime-log/code-symbols.js");
   const business = describeError(new Error("任务「发布季度财报」的 worktree 不存在"));
   assert.equal(business.name, "Error");
   assert.equal(business.msg, undefined, "业务报错的原文不能进日志");
@@ -72,31 +73,38 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.equal(described.msg, undefined);
   assert.ok(!JSON.stringify(described).includes("acme"), "系统调用报错里的路径不能进日志");
 
-  // 栈帧：位置要是真有的 navi 代码，名字要在那份代码文件里写着。
+  // 栈帧：位置要是真有的 navi 代码；名字由那个位置推出来，不取上报的那一份。
+  const journalLines = readFileSync(join(CODE_DIR, "server/src/runtime-log/journal.ts"), "utf8").split("\n");
+  const insideRuntimeLog = journalLines.findIndex((line) => line.startsWith("export function runtimeLog(")) + 3;
   const candidates = shared.scrubStack([
     "Error: boom",
-    `    at runtimeLog (file://${CODE_DIR}/server/src/runtime-log/journal.ts:94:7)`,
-    `    at CustomerAcquisitionBudget (file://${CODE_DIR}/server/src/runtime-log/journal.ts:94:7)`,
+    `    at runtimeLog (file://${CODE_DIR}/server/src/runtime-log/journal.ts:${insideRuntimeLog}:7)`,
+    `    at CustomerAcquisitionBudget (file://${CODE_DIR}/server/src/runtime-log/journal.ts:${insideRuntimeLog}:7)`,
+    `    at OpenAI (file://${CODE_DIR}/server/src/runtime-log/journal.ts:1:1)`,
     `    at continueTask (${CODE_DIR}/server/src/no-such-file.js:120:7)`,
     "    at Object.<anonymous> (/Users/someone/acme/build.js:3:1)",
     `    at run (${CODE_DIR}/node_modules/hono/dist/index.js:9:9)`,
     "    at execFileSync (node:child_process:900:3)",
+    "    at OpenAI (node:fs:12:3)",
     "    at spawnSync (node:internal/child_process:1100:20)",
-  ].join("\n"), [CODE_DIR]);
-  assert.deepEqual(candidates.slice(0, 2), ["runtimeLog server/src/runtime-log/journal.ts:94", "CustomerAcquisitionBudget server/src/runtime-log/journal.ts:94"]);
-  const verified = shared.verifyFrames(candidates, serverCodeSymbols);
-  assert.equal(verified[0], "runtimeLog server/src/runtime-log/journal.ts:94");
-  assert.equal(verified[1], "<anon> server/src/runtime-log/journal.ts:94", "代码文件里没有这个名字：名字抹掉、位置留着");
-  assert.equal(verified[2], "<anon> <other>", "不存在的文件不当代码位置");
-  assert.equal(verified[3], "<anon> <other>");
-  assert.ok(verified[4]!.startsWith("<anon> "), "依赖只认包在不在，不认名字");
-  assert.equal(verified[5], "execFileSync node:child_process", "Node 内置模块的公开导出");
-  assert.equal(verified[6], "<anon> node:internal");
-  assert.equal(serverCodeSymbols("server/../../../etc/hosts", null), false, "跳出代码目录的不认");
-  assert.equal(serverCodeSymbols("node:child_process", "CustomerAcquisitionBudget"), false);
+  ].join("\n"), [CODE_DIR], 12);
+  const at = `server/src/runtime-log/journal.ts:${insideRuntimeLog}`;
+  assert.deepEqual(candidates.slice(0, 2), [`runtimeLog ${at}`, `CustomerAcquisitionBudget ${at}`]);
+  const verified = shared.verifyFrames(candidates, serverCodeLocations, 12);
+  assert.equal(verified[0], `runtimeLog ${at}`, "名字是从代码里那一行所在的函数读出来的");
+  assert.equal(verified[1], `runtimeLog ${at}`, "上报的名字不管是什么，都换成代码里读出来的");
+  assert.equal(verified[2], "server/src/runtime-log/journal.ts:1", "那一行不在任何函数里：只留位置");
+  assert.equal(verified[3], "<other>", "不存在的文件不当代码位置");
+  assert.equal(verified[4], "<other>");
+  assert.ok(["node_modules/hono", "<other>"].includes(verified[5]!), `依赖不给名字：${verified[5]}`);
+  assert.equal(verified[6], "execFileSync node:child_process", "Node 内置模块的公开导出名");
+  assert.equal(verified[7], "node:fs", "不是那个模块公开导出的名字：只留位置");
+  assert.equal(verified[8], "node:internal");
+  assert.ok(!/CustomerAcquisitionBudget|OpenAI/.test(JSON.stringify(verified)));
+  assert.equal(serverCodeLocations.exists("server/../../../etc/hosts"), false, "跳出代码目录的不认");
 
-  // 真抛一次：名字是运行时拼出来的（来自数据）就进不了日志，代码里写着的名字照留。
-  // 这个名字在本文件里只能拼出来，不能整个写出来——否则它就真的「在代码里」了。
+  // 真抛一次：名字是运行时拼出来的（来自数据）就进不了日志；具名函数里的那一帧照样有名字。
+  // 这个名字在本文件里只能拼出来，不能整个写出来。
   const dataName = ["Quarterly", "Merger", "Plan"].join("");
   const dynamic = { [dataName]: () => { throw new TypeError("x is not a function"); } };
   function namedThrowerForRuntimeLogTest() { dynamic[dataName]!(); }
@@ -105,41 +113,50 @@ function serverLines(): Array<Record<string, unknown>> {
   const real = describeError(thrown);
   assert.ok(!JSON.stringify(real).includes(dataName), `运行时拼出来的函数名不能进日志：${JSON.stringify(real.frames)}`);
   assert.ok((real.frames as string[]).some((frame) => frame.startsWith("namedThrowerForRuntimeLogTest server/scripts/test-runtime-log.ts:")), JSON.stringify(real.frames));
-  assert.deepEqual(shared.scrubStack("f@http://localhost:4317/assets/index-abc.js:1:900", ["http://localhost:4317"]), ["f assets/index-abc.js:1"]);
+  assert.deepEqual(shared.scrubStack("f@http://localhost:4317/assets/index-abc.js:1:900", ["http://localhost:4317"]), ["f assets/index-abc.js:1:900"],
+    "页面产物带列号：压成一行的产物只有它能定位");
 
   // 页面报上来的：同一道核对，外加标识换成摘要。
-  const symbols = (file: string, name: string | null) => file === "assets/a.js" && (name === null || name === "f");
-  const options = { symbols, digest: digestPageId };
+  const locations = { exists: (file: string) => file === "assets/a.js", nameAt: () => null };
+  const options = { locations, digest: digestPageId };
   const web = shared.sanitizeWebEvent({
     ev: "page.error", kind: "error", name: "Error", msg: "保存「客户名单」失败", title: "机密", shell: "mac", tab: "abc123", load: "Customer42", ago: 1500,
-    frames: ["f assets/a.js:1", "CustomerAcquisitionBudget assets/a.js:1", "customerSecret assets/customerSecret.js:1", "acquisition <native>", "<img src=x> evil"],
+    frames: ["f assets/a.js:1:5", "OpenAI assets/a.js:1:9", "customerSecret assets/customerSecret.js:1", "acquisition <native>", "<img src=x> evil"],
   }, options);
   assert.deepEqual(web, {
     ev: "page.error", tab: digestPageId("abc123"), load: digestPageId("Customer42"), shell: "mac", ago: 1500, kind: "error", name: "Error",
-    frames: ["f assets/a.js:1", "<anon> assets/a.js:1", "<anon> <other>", "<anon> <native>", "<anon> <other>"],
-  }, "文件真在也不能带进别的名字；认不出的位置连名字一起抹掉");
-  assert.ok(!/abc123|Customer/.test(JSON.stringify(web)), "页面生成的标识只留摘要");
-  assert.equal(webCodeSymbols("src/lib/runtimeLog.ts", "reportPageCrash"), true, "开发时的页面源码按磁盘上的文件核对");
-  assert.equal(webCodeSymbols("src/lib/runtimeLog.ts", "CustomerAcquisitionBudget"), false);
-  assert.equal(webCodeSymbols("src/../../server/src/main.ts", null), false);
+    frames: ["assets/a.js:1:5", "assets/a.js:1:9", "<other>", "<native>", "<other>"],
+  }, "页面报的函数名一个都不留：文件真在、词在产物里出现过都不算");
+  assert.ok(!/abc123|Customer|OpenAI/.test(JSON.stringify(web)), "页面生成的标识只留摘要");
+  const runtimeLogSource = readFileSync(join(CODE_DIR, "web/src/lib/runtimeLog.ts"), "utf8").split("\n");
+  const insideReportPageCrash = runtimeLogSource.findIndex((line) => line.startsWith("export function reportPageCrash(")) + 2;
+  assert.equal(webCodeLocations.exists("src/lib/runtimeLog.ts"), true, "开发时的页面源码按磁盘上的文件核对");
+  assert.equal(webCodeLocations.nameAt("src/lib/runtimeLog.ts", insideReportPageCrash, "OpenAI"), "reportPageCrash", "源码里按行读出所在的函数");
+  assert.equal(webCodeLocations.exists("src/../../server/src/main.ts"), false);
   assert.equal(shared.sanitizeWebEvent({ ev: "page.crash", name: "TypeError", msg: "客户收购预算 500 万元" }, options)!.msg, undefined, "页面报的 msg 必须正好是固定说法里的一句");
   assert.equal(shared.sanitizeWebEvent({ ev: "page.crash", name: "TypeError", msg: "Cannot read properties of undefined/null" }, options)!.msg, "Cannot read properties of undefined/null");
   assert.equal(shared.sanitizeWebEvent({ ev: "task.content", text: "x" }, options), null, "名单外的事件不收");
-  assert.deepEqual(shared.sanitizeWebEvent({ ev: "page.boot", nav: "reload", sincePrevMs: 1200.4, hidden: false, extra: "x", prev: "l0" }, options),
-    { ev: "page.boot", nav: "reload", hidden: false, sincePrevMs: 1200 }, "多塞的字段、不像标识的标识都不收");
+  assert.deepEqual(shared.sanitizeWebEvent({ ev: "page.boot", nav: "reload", sincePrevMs: 1200.4, hidden: false, extra: "x", prev: "l0", shellPid: 4242 }, options),
+    { ev: "page.boot", nav: "reload", hidden: false, sincePrevMs: 1200, shellPid: 4242 }, "多塞的字段、不像标识的标识都不收");
 }
 
 // ── 1b. 慢请求和卡顿时在处理的请求记注册的路由模板，不是请求路径 ─────────
 {
   const { Hono } = await import("hono");
-  const { runtimeLogHttp, inflightSnapshot } = await import("../src/runtime-log/http.js");
+  const { runtimeLogHttp, requestsDuring } = await import("../src/runtime-log/http.js");
   const app = new Hono();
   app.use("/api/*", runtimeLogHttp());
   const api = new Hono();
-  let snapshot: ReturnType<typeof inflightSnapshot> = [];
+  let snapshot: ReturnType<typeof requestsDuring> = [];
   api.get("/tasks/:id/page/:token/:section/:what", async (c) => {
-    snapshot = inflightSnapshot();
+    snapshot = requestsDuring(0, performance.now());
     await new Promise((resolve) => setTimeout(resolve, 3100));
+    return c.json({ ok: true });
+  });
+  // 同步干完活就返回的请求：等定时器发现卡顿时它已经完成了，也得认得出是它。
+  api.post("/tasks/:id/blocking", (c) => {
+    const until = performance.now() + 60;
+    while (performance.now() < until) { /* 同步阻塞 */ }
     return c.json({ ok: true });
   });
   app.route("/api", api);
@@ -150,6 +167,12 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.equal(slow.length, 1);
   assert.equal(slow[0]!.route, "/api/tasks/:id/page/:token/:section/:what");
   assert.ok(!/abc123|token123|customer|acquisition|secret/.test(JSON.stringify(slow)), "请求路径里的任务号、片段、查询串都不进日志");
+  const before = performance.now();
+  await app.request("/api/tasks/abc123/blocking", { method: "POST" });
+  const blocked = requestsDuring(before, performance.now());
+  assert.deepEqual(blocked.map((entry) => [entry.method, entry.route, entry.done]), [["POST", "/api/tasks/:id/blocking", true]]);
+  assert.ok(blocked[0]!.ageMs >= 50);
+  assert.deepEqual(requestsDuring(performance.now() + 1, performance.now() + 2), [], "跟这段时间不重叠的不算");
   assert.equal(shared.routePattern("/api/tasks/<script>"), "?");
 }
 
@@ -160,6 +183,10 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.equal(flood.length, 30, "同一个事件每分钟最多 30 条");
   assert.equal(flood[0]!.src, "server");
   assert.equal(flood[0]!.pid, process.pid);
+  // 运行中日志目录被清掉：下一条照样写得进去。
+  rmSync(runtimeLogDir(), { recursive: true, force: true });
+  runtimeLog("test.after_cleanup");
+  assert.ok(serverLines().some((line) => line.ev === "test.after_cleanup"), "目录被删后要重建");
 }
 
 // ── 3. 真实卡顿里采到调用栈 ──────────────────────────────────────────────
@@ -196,12 +223,14 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.ok(!stacks.some((stack) => stack.n === armed!.n), "武装之前那次没有栈");
   const spunStack = stacks.find((stack) => stack.n === spun!.n);
   assert.ok(spunStack, "武装之后的卡顿要有栈");
-  assert.ok(spunStack.stacks[0]!.frames.some((frame) => frame.startsWith("spinTheLoopForRuntimeLogTest server/scripts/test-runtime-log.ts:")),
-    `忙算卡顿的栈要指到那个函数：${JSON.stringify(spunStack.stacks[0])}`);
+  // 名字由代码位置读出来（见第 1 节）。tsx 直接跑 TS 时采样器给的是转译后代码的行号，读不准名字，
+  // 所以这里只认位置；生产跑的是 server/dist 的 JS，行号就是那份文件的。
+  const inThisFile = (frame: string) => /(?:^| )server\/scripts\/test-runtime-log\.ts:\d+$/.test(frame);
+  assert.ok(spunStack.stacks[0]!.frames.some(inThisFile), `忙算卡顿的栈要指到这份代码：${JSON.stringify(spunStack.stacks[0])}`);
   const waitedStack = stacks.find((stack) => stack.n === waited!.n);
   assert.ok(waitedStack, "卡在同步子进程里也要采到栈");
-  assert.ok(waitedStack.stacks[0]!.frames.some((frame) => frame.startsWith("waitOnChildForRuntimeLogTest server/scripts/test-runtime-log.ts:")),
-    `同步子进程卡顿的栈要指到调用它的函数：${JSON.stringify(waitedStack.stacks[0])}`);
+  assert.ok(waitedStack.stacks[0]!.frames.includes("execFileSync node:child_process") && waitedStack.stacks[0]!.frames.some(inThisFile),
+    `同步子进程卡顿的栈要指到 execFileSync 和调用它的代码：${JSON.stringify(waitedStack.stacks[0])}`);
   assert.ok(!JSON.stringify(stacks).includes(root), "栈里不带数据目录");
 }
 
@@ -213,7 +242,7 @@ function serverLines(): Array<Record<string, unknown>> {
   const M = (ms: number, ev: string, fields: Record<string, unknown> = {}) => ({ at: at(ms), src: "mac" as const, pid: 9, ev, ...fields });
   // 窗口里的页面：每次载进来一页（load），带着上一页是哪个（prev）。
   let page = 0;
-  const boot = (ms: number, nav = "navigate") => ({ at: at(ms), src: "web" as const, pid: 100, ev: "page.boot", shell: "mac", tab: "tab1", nav, prev: `p${page}`, load: `p${++page}` });
+  const boot = (ms: number, nav = "navigate") => ({ at: at(ms), src: "web" as const, pid: 100, ev: "page.boot", shell: "mac", shellPid: 9, tab: "tab1", nav, prev: `p${page}`, load: `p${++page}` });
   const records = [
     S(0, "server.start", { inst: "aaaa", run: "run-a" }),
     // 卡顿：06:00 起卡 7 秒，窗口在第 5 秒撤页、又起了一份服务被挡回
@@ -357,9 +386,73 @@ function serverLines(): Array<Record<string, unknown>> {
     M(100, "page.takedown", { probe: "unreachable", streak: 3 }),
     W(105, "page.crash", { tab: "tb", load: "lb", name: "TypeError", shell: "browser" }),
     M(108, "page.takedown", { probe: "down", via: "navigation" }),
-    W(120, "page.boot", { tab: "tm", load: "m2", prev: "m1", nav: "navigate", shell: "mac" }),
+    W(120, "page.boot", { tab: "tm", load: "m2", prev: "m1", nav: "navigate", shell: "mac", shellPid: 9 }),
   ], []);
   assert.deepEqual(shellAndTab.incidents.map((i) => i.cause), ["unknown", "page_error"], JSON.stringify(shellAndTab.incidents.map((i) => i.summary)));
+  // 进程自己写下的退出记录只说明它走到了哪一步：收到 SIGTERM、放掉了锁之后照样可能被强杀，不说成「它退出了」。
+  const stopped = analyzeRuntimeLog(twoStarts, [sigterm(99, "a")]).restarts[0]!.how;
+  assert.match(stopped, /收到 SIGTERM.*开始收尾，锁也放掉了；之后进程最终怎么结束的没有进程外的记录/);
+  assert.ok(!/SIGTERM 退出|自己退出了/.test(stopped), stopped);
+  const exited = analyzeRuntimeLog(twoStarts, [{ at: at(99), pid: 100, runId: "a", kind: "exit", code: 0 }]).restarts[0]!.how;
+  assert.match(exited, /自己走到了退出（退出码 0），锁也放掉了；之后进程最终怎么结束的没有进程外的记录/);
+
+  // 读取窗口之前那次启动是上下文：窗口里第一次重启靠它认上一轮，它自己不进结果。
+  const windowed = analyzeRuntimeLog([S(-8 * 86_400, "server.start", { run: "old", pid: 100 }), S(100, "server.start", { run: "new", pid: 200 })], [], T);
+  assert.deepEqual(windowed.restarts.map((r) => r.at), [at(100)], "窗口外那次启动不报，但这次重启认得出上一轮");
+  assert.match(windowed.restarts[0]!.how, /没有留下记录/);
+  assert.equal(windowed.incidents.length, 1);
+  assert.equal(windowed.counts.server, 1, "统计只算窗口里的");
+
+  // 第 3 轮审查：两份壳各出一次事、关掉重开再出事——按壳进程分开，谁的页面回来收谁的口。
+  const independentShells = analyzeRuntimeLog([
+    M(100, "page.takedown", { pid: 10, probe: "down", via: "guard" }),
+    M(105, "webcontent.terminated", { pid: 20 }),
+    W(110, "page.boot", { tab: "x", load: "x2", prev: "x1", nav: "navigate", shell: "mac", shellPid: 10 }),
+    W(112, "page.boot", { tab: "y", load: "y2", prev: "y1", nav: "reload", shell: "mac", shellPid: 20 }),
+  ], []);
+  assert.deepEqual(independentShells.incidents.map((i) => i.cause), ["refused_connection", "webcontent"], JSON.stringify(independentShells.incidents.map((i) => i.summary)));
+  assert.ok(independentShells.incidents.every((i) => i.timeline.filter((r) => r.ev === "page.boot").length >= 1));
+  const relaunched = analyzeRuntimeLog([
+    M(100, "page.reload", { pid: 10, reason: "user" }),
+    M(101, "app.quit", { pid: 10 }),
+    M(120, "app.launch", { pid: 20 }),
+    M(125, "webcontent.terminated", { pid: 20 }),
+  ], []);
+  assert.deepEqual(relaunched.incidents.map((i) => i.cause), ["reload", "webcontent"], "关掉重开之后的是新的一次");
+  // 页面没带壳进程号（老版本壳）：不拿它收壳的口，各自成一次。
+  const unknownShell = analyzeRuntimeLog([
+    M(100, "page.takedown", { probe: "unreachable", streak: 3 }),
+    W(110, "page.boot", { tab: "z", load: "z2", prev: "z1", nav: "reload", shell: "mac" }),
+  ], []);
+  assert.equal(unknownShell.incidents.length, 2);
+  // 壳自己记下页面显示出来了，也收口：之后再撤页是新的一次。
+  const presented = analyzeRuntimeLog([
+    M(100, "page.takedown", { probe: "unreachable", streak: 3 }),
+    M(110, "page.presented"),
+    M(200, "page.takedown", { probe: "down" }),
+  ], []);
+  assert.equal(presented.incidents.length, 2);
+
+  // 用户已经看见的失败都要成一次：没载出来、载进来了没显示出来。
+  const loadFailed = analyzeRuntimeLog([M(100, "page.load_failed", { domain: "NSURLErrorDomain", code: -1004 })], []);
+  assert.deepEqual(loadFailed.incidents.map((i) => i.cause), ["load_failed"]);
+  assert.ok(loadFailed.incidents[0]!.evidence.some((line) => line.includes("NSURLErrorDomain -1004")));
+  const notPresented = analyzeRuntimeLog([M(100, "page.not_presented", { why: "timeout" })], []);
+  assert.deepEqual(notPresented.incidents.map((i) => i.cause), ["not_presented"]);
+  const loadFailedInStall = analyzeRuntimeLog([
+    S(104, "loop.stall", { n: 1, ms: 6000, from: at(98), cpuMs: 100 }),
+    M(100, "page.load_failed", { domain: "NSURLErrorDomain", code: -1001 }),
+  ], []);
+  assert.deepEqual(loadFailedInStall.incidents.map((i) => i.cause), ["stall"], "没载出来也拿服务那一侧解释");
+
+  // 壳报的新服务进程号对上了，但那份服务是很久以前起的（进程号复用）：不算同一次重启。
+  const reused = analyzeRuntimeLog([
+    S(0, "server.start", { run: "a", pid: 100 }),
+    S(100, "server.start", { run: "b", pid: 101 }),
+    M(100 + 7200, "page.reload", { reason: "instance_changed", serverPid: 101 }),
+  ], [sigterm(99, "a")]);
+  assert.equal(reused.incidents.length, 2, JSON.stringify(reused.incidents.map((i) => i.summary)));
+  assert.match(reused.incidents[1]!.evidence.join("\n"), /没有那份新服务的启动记录/);
 }
 
 // ── 5. 读目录、导出包 ────────────────────────────────────────────────────
@@ -373,6 +466,15 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.ok(!JSON.stringify(bundle).includes("--token=abc"), "退出账本的 note（可能带别的进程的命令行）不进导出包");
   assert.ok(!JSON.stringify(bundle).includes(root), "导出包里不带本机路径");
   assert.equal(readRuntimeLogDir(runtimeLogDir()).length, loaded.records.length);
+
+  // 按窗口读时，窗口前最后一次服务启动作为上下文带上，别的窗口外记录不带。
+  const day = 86_400_000;
+  const now = Date.now();
+  const record = (ago: number, ev: string) => ({ at: new Date(now - ago).toISOString(), src: "server", pid: 1, ev });
+  const file = join(root, "bundle.json");
+  writeFileSync(file, JSON.stringify({ ...bundle, records: [record(20 * day, "server.start"), record(10 * day, "server.start"), record(9 * day, "loop.stall"), record(3600_000, "server.start")] }));
+  const windowed = loadRuntimeLogPath(file, now - 7 * day);
+  assert.deepEqual(windowed.records.map((r) => [r.ev, Math.round((now - Date.parse(r.at)) / day)]), [["server.start", 10], ["server.start", 0]]);
 }
 
 rmSync(root, { recursive: true, force: true });

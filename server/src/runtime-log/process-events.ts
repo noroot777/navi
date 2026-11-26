@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { totalmem, uptime as osUptime } from "node:os";
 import { scrubErrorCode, scrubErrorMessage, scrubErrorName, scrubStack, scrubSyscall, verifyFrames } from "@navi/shared/runtime-log";
 import { CODE_DIR } from "../paths.js";
-import { serverCodeSymbols } from "./code-symbols.js";
+import { serverCodeLocations } from "./code-symbols.js";
 import { runtimeLog } from "./journal.js";
 
 /** 报错只留名单里的名字 / 错误码 / 系统调用、报错类别的固定说法和核对过出处的栈帧。 */
@@ -19,7 +19,7 @@ export function describeError(error: unknown): Record<string, unknown> {
     ...(code ? { code } : {}),
     ...(syscall ? { syscall } : {}),
     msg: scrubErrorMessage(name, error.message),
-    frames: verifyFrames(scrubStack(error.stack, [CODE_DIR]), serverCodeSymbols),
+    frames: verifyFrames(scrubStack(error.stack, [CODE_DIR]), serverCodeLocations),
   };
 }
 

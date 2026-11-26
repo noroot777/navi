@@ -7,7 +7,7 @@ import type { Hono } from "hono";
 import { sanitizeWebEvent } from "@navi/shared/runtime-log";
 import { instanceAdminOnly } from "../auth/context.js";
 import { analyzeRuntimeLog } from "./analyze.js";
-import { digestPageId, webCodeSymbols } from "./code-symbols.js";
+import { digestPageId, webCodeLocations } from "./code-symbols.js";
 import { runtimeLog, runtimeLogDir } from "./journal.js";
 import { buildRuntimeLogBundle, loadOwnRuntimeLog } from "./load.js";
 
@@ -26,7 +26,7 @@ export function mountRuntimeLogRoutes(api: Hono): void {
     const events = Array.isArray(body?.events) ? body.events.slice(0, MAX_EVENTS_PER_POST) : [];
     let kept = 0;
     for (const raw of events) {
-      const event = sanitizeWebEvent(raw, { symbols: webCodeSymbols, digest: digestPageId });
+      const event = sanitizeWebEvent(raw, { locations: webCodeLocations, digest: digestPageId });
       if (!event) continue;
       const { ev, ago, ...fields } = event;
       runtimeLog(String(ev), fields, "web", typeof ago === "number" ? ago : 0);
@@ -38,8 +38,9 @@ export function mountRuntimeLogRoutes(api: Hono): void {
   api.get("/runtime-log/report", async (c) => {
     const denied = await instanceAdminOnly(c, "运行日志");
     if (denied) return c.json(denied.body, denied.status);
-    const { records, exits } = loadOwnRuntimeLog(sinceDays(c.req.query("days"), 7));
-    return c.json({ dir: runtimeLogDir(), report: analyzeRuntimeLog(records, exits) });
+    const since = sinceDays(c.req.query("days"), 7);
+    const { records, exits } = loadOwnRuntimeLog(since);
+    return c.json({ dir: runtimeLogDir(), report: analyzeRuntimeLog(records, exits, since) });
   });
 
   api.get("/runtime-log/export", async (c) => {

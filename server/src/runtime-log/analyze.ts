@@ -37,7 +37,7 @@ function isCpuBound(stall: RuntimeLogRecord): boolean {
 
 /** 栈里第一帧 navi 自己的代码（叶子往根找）；没有就是叶子那一帧。 */
 function hotFrame(frames: string[]): string {
-  return frames.find((frame) => / (server|shared|mcp|web)\//.test(frame)) ?? frames[0] ?? "?";
+  return frames.find((frame) => /(?:^| )(?:server|shared|mcp|web)\//.test(frame)) ?? frames[0] ?? "?";
 }
 
 function describeStall(stall: RuntimeLogRecord, stacks: RuntimeLogRecord[]): string[] {
@@ -49,8 +49,10 @@ function describeStall(stall: RuntimeLogRecord, stacks: RuntimeLogRecord[]): str
   ];
   const gc = Number(stall.gcMs ?? 0);
   if (gc >= 200) lines.push(`其中垃圾回收占 ${secs(gc)}，当时堆 ${stall.heapMB} MB、常驻内存 ${stall.rssMB} MB`);
-  const inflight = Array.isArray(stall.inflight) ? (stall.inflight as Array<{ method: string; route: string; ageMs: number }>) : [];
-  if (inflight.length) lines.push(`卡住时在处理的请求：${inflight.map((r) => `${r.method} ${r.route}（已 ${secs(r.ageMs)}）`).join("、")}`);
+  const inflight = Array.isArray(stall.inflight) ? (stall.inflight as Array<{ method: string; route: string; ageMs: number; done?: boolean }>) : [];
+  if (inflight.length) {
+    lines.push(`卡住时在处理的请求：${inflight.map((r) => `${r.method} ${r.route}（${r.done ? `用了 ${secs(r.ageMs)}，已完成` : `已 ${secs(r.ageMs)}`}）`).join("、")}`);
+  }
   const stack = stacks.find((s) => s.pid === stall.pid && s.n === stall.n);
   if (stack && Array.isArray(stack.stacks)) {
     for (const entry of (stack.stacks as Array<{ pct: number; frames: string[] }>).slice(0, 2)) {
@@ -98,6 +100,13 @@ function describeTakedown(takedown: RuntimeLogRecord): string {
   return `窗口撤下页面：${what[probe] ?? probe}`;
 }
 
+/** 壳那一侧看见的「页面不在了」：撤页、没载出来、载进来了没显示出来。 */
+function describeShellFailure(failure: RuntimeLogRecord): string {
+  if (failure.ev === "page.takedown") return describeTakedown(failure);
+  if (failure.ev === "page.load_failed") return `窗口没载出页面，换成了离线提示（${failure.domain ?? "?"} ${failure.code ?? "?"}）`;
+  return `页面载进来了，但${failure.why === "script" ? "脚本没载成" : "等到超时也没显示出来"}，窗口换成了「页面没有显示出来」`;
+}
+
 const RELOAD_REASONS: Record<string, string> = {
   identity: "登录身份在别的标签页里变了", account: "账号设置里退出登录", "remote-access": "远程访问设置里退出登录",
   "error-screen": "在错误屏上点了重新载入", "load-failure": "在加载失败提示上点了刷新", reclaim: "放开回合占位后重新加载",
@@ -110,8 +119,9 @@ function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Inci
   const at = seen[0]!.at;
   const has = (ev: string, src?: (r: RuntimeLogRecord) => boolean) => seen.some((r) => r.ev === ev && (!src || src(r)));
   const evidence: string[] = [];
-  const takedown = seen.find((r) => isShell(r) && r.ev === "page.takedown");
-  if (takedown) evidence.push(describeTakedown(takedown));
+  const failures = seen.filter((r) => isShell(r) && (r.ev === "page.takedown" || r.ev === "page.load_failed" || r.ev === "page.not_presented"));
+  const takedown = failures[0];
+  for (const failure of failures.filter((f, i) => failures.findIndex((g) => g.ev === f.ev) === i)) evidence.push(describeShellFailure(failure));
   if (seen.some(isShell)) evidence.push(...refusedEvidence(all, start - 5_000, end + 60_000));
 
   // 同一次载入里报过的错（按载入身份认，不按时间）；没有载入标识的老记录只认这一次自己那几条。
@@ -150,7 +160,7 @@ function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Inci
     return { at, cause: "page_error", summary: "页面脚本出错，整页换成了错误屏", evidence };
   }
 
-  // 3. 撤页：拿服务那一侧的记录解释它。
+  // 3. 壳那一侧页面不在了：拿服务那一侧的记录解释它。
   if (takedown) {
     const sleep = within(all, start - 30_000, end + 5_000, (r) => r.ev === "system.sleep");
     if (sleep.length) {
@@ -171,10 +181,15 @@ function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Inci
       restartLines(true);
       return { at, cause: "restart", summary: "服务没了，随后重启", evidence };
     }
-    if (takedown.probe === "not_ours" || takedown.probe === "not_navi") {
+    const loadFailed = failures.find((f) => f.ev === "page.load_failed");
+    const notPresented = failures.find((f) => f.ev === "page.not_presented");
+    const probed = failures.find((f) => f.ev === "page.takedown");
+    if (!probed && loadFailed) return { at, cause: "load_failed", summary: "窗口载页面失败（网络层报错），服务端没有对应的卡顿或重启", evidence };
+    if (!probed && notPresented) return { at, cause: "not_presented", summary: "页面载进来了却没显示出来，服务端没有对应的卡顿或重启", evidence };
+    if (probed?.probe === "not_ours" || probed?.probe === "not_navi") {
       return { at, cause: "not_ours", summary: "端口上应答的不是自己那份服务（被别的 Navi 或别的程序占了）", evidence };
     }
-    if (takedown.probe === "down") {
+    if (probed?.probe === "down") {
       return { at, cause: "refused_connection", summary: "服务端口拒绝连接，但服务端没有重启记录", evidence };
     }
     const serverNearby = within(all, start - 15 * 60_000, end + 15 * 60_000, (r) => r.src === "server");
@@ -210,19 +225,25 @@ function median(values: number[]): number {
   return sorted[Math.floor(sorted.length / 2)]!;
 }
 
-export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummary[]): RuntimeLogReport {
-  const sorted = [...records].sort((a, b) => t(a) - t(b));
+/**
+ * `sinceMs`：只报这之后的。`records` 可以带着窗口之前的记录当上下文（load.ts 会带上窗口前最后一次服务启动）：
+ * 认上一轮、归并都在全量上做，结果再按窗口筛——先筛再认，窗口里第一次重启的上一轮就被裁掉了。
+ */
+export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummary[], sinceMs: number | null = null): RuntimeLogReport {
+  const all = [...records].sort((a, b) => t(a) - t(b));
+  const inWindow = (at: string) => sinceMs === null || Date.parse(at) >= sinceMs;
+  const sorted = all.filter((r) => inWindow(r.at));
   const counts: Record<string, number> = {};
   for (const record of sorted) counts[record.src] = (counts[record.src] ?? 0) + 1;
 
-  const restartMap = restartVerdicts(sorted, exits);
-  const incidents: Incident[] = groupOccurrences(sorted, restartMap).map((occurrence) => {
-    const verdict = classify(occurrence, { all: sorted, restarts: restartMap });
+  const restartMap = restartVerdicts(all, exits);
+  const incidents: Incident[] = groupOccurrences(all, restartMap).filter((occurrence) => inWindow(occurrence.seen[0]!.at)).map((occurrence) => {
+    const verdict = classify(occurrence, { all, restarts: restartMap });
     const from = t(occurrence.seen[0]!) - 20_000;
     const to = t(occurrence.seen.at(-1)!) + 10_000;
     // 别的标签页的页面事件不进这一次的时间线。
     const tabs = new Set(occurrence.seen.filter((r) => r.src === "web").map((r) => r.tab));
-    const timeline = within(sorted, from, to, (r) => r.ev !== "server.vitals" && (r.src !== "web" || !r.tab || tabs.size === 0 || tabs.has(r.tab))).slice(0, 40);
+    const timeline = within(all, from, to, (r) => r.ev !== "server.vitals" && (r.src !== "web" || !r.tab || tabs.size === 0 || tabs.has(r.tab))).slice(0, 40);
     return { ...verdict, timeline };
   });
   const causes: Partial<Record<CauseKind, number>> = {};
@@ -241,7 +262,7 @@ export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummar
     hot.set(frame, tally);
   }
 
-  const restarts = [...restartMap].filter(([, verdict]) => verdict.basis !== "none").map(([start, verdict]) => ({ at: start.at, how: verdict.how }));
+  const restarts = [...restartMap].filter(([start, verdict]) => verdict.basis !== "none" && inWindow(start.at)).map(([start, verdict]) => ({ at: start.at, how: verdict.how }));
 
   const errorTally = new Map<string, { src: string; name: string; count: number; last: string }>();
   for (const error of sorted.filter((r) => r.ev === "server.error" || r.ev === "page.error" || r.ev === "page.crash")) {

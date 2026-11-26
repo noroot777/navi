@@ -66,7 +66,7 @@ function admit(ev: string, now: number): number | null {
   return 0;
 }
 
-function append(record: RuntimeLogRecord): void {
+function append(record: RuntimeLogRecord, retry = true): void {
   const line = JSON.stringify(record);
   if (line.length > MAX_LINE) return;
   const file = logFile();
@@ -82,8 +82,12 @@ function append(record: RuntimeLogRecord): void {
     }
     // 前后各带换行：上一个进程写到半行就没了时，这一条照样自成一行（解析端跳空行和坏行）。
     appendFileSync(file, `\n${line}\n`, { mode: 0o600 });
-  } catch {
-    /* 日志写不进去不影响服务本身 */
+  } catch (error) {
+    // 目录被清理掉了（ENOENT）：重建一次再写，不然要到服务重启才重新记。别的失败就丢这一条。
+    if (retry && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      ensured = false;
+      append(record, false);
+    }
   }
 }
 

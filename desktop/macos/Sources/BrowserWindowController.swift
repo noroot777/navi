@@ -42,8 +42,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     let config = WKWebViewConfiguration()
     // 默认数据仓：cookie（多人模式的 ash_session）、localStorage（主题、草稿）跨启动保留。
     config.websiteDataStore = .default()
-    // 服务端和前端日后要按壳区分行为时有个抓手，不影响现有判断。
-    config.applicationNameForUserAgent = "Version/26.0 Safari/605.1.15 NaviMac/\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0")"
+    // 服务端和前端日后要按壳区分行为时有个抓手，不影响现有判断。`NaviPid/`：页面上报运行日志时带上这个壳进程号，
+    // 分析端才认得出「壳这边撤的页」和「页面那边载回来的一页」是不是同一个窗口（RuntimeLog.swift）。
+    config.applicationNameForUserAgent = "Version/26.0 Safari/605.1.15 NaviMac/\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0") NaviPid/\(getpid())"
     config.preferences.isElementFullscreenEnabled = true
 
     webView = NaviWebView(frame: .zero, configuration: config)
@@ -265,7 +266,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         RuntimeLog.record("cover.hide")
       }
     }
-    if offlineView.isHidden { documentPresentation = .presented }
+    if offlineView.isHidden {
+      documentPresentation = .presented
+      // 页面真的显示出来了：壳这一侧前面那次撤页 / 载入失败到这里收口。
+      RuntimeLog.record("page.presented")
+    }
   }
 
   /// 当前文档的脚本没载成（WindowChrome 报回来）：不再等它表态。

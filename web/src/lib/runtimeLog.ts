@@ -26,6 +26,8 @@ let errorsSent = 0;
 const seenErrors = new Set<string>();
 
 const shell = /\b(?:Navi|Ash)Mac\//.test(navigator.userAgent) ? "mac" : /\bNaviWin\//.test(navigator.userAgent) ? "win" : "browser";
+/** 桌面壳的进程号（壳写在 UA 里）：分析端拿它把这一页和壳记下的撤页 / 重载对成同一个窗口。 */
+const shellPid = Number(/\bNaviPid\/(\d+)/.exec(navigator.userAgent)?.[1]) || undefined;
 // 页面的代码位置按 origin 算相对路径（`assets/index-abc.js:1`）。
 const codeRoots = [location.origin];
 
@@ -135,7 +137,7 @@ function boot(): void {
   } catch {
     /* 拿不到存储就不报间隔和上一次载入 */
   }
-  queue({ ev: "page.boot", nav: navigation?.type, hidden: document.visibilityState === "hidden", sincePrevMs, prev });
+  queue({ ev: "page.boot", nav: navigation?.type, hidden: document.visibilityState === "hidden", sincePrevMs, prev, shellPid });
   window.addEventListener("error", (event) => reportError("page.error", "error", event.error));
   window.addEventListener("unhandledrejection", (event) => reportError("page.error", "rejection", event.reason));
   window.addEventListener("pagehide", () => {
