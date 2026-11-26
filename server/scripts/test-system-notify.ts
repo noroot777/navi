@@ -14,6 +14,7 @@
 // ⑨ 被停下推一条，不重复：落了 canceled 的、续聊被停放回原 done 的、失败任务上续聊被停的（不再说「中断了」）、
 //    分组暂停的；停完重新排上、还没开新回合，不再说一遍；
 // ⑩ 完成之后再派审：审查没通过推「审查没通过」；审着的时候完成的那一版，审查通过才推「审查通过，等你验收」；
+//    不在等验收的任务（暂停着）上派的审：最后没过推「审查没通过」，过了推「审查通过」，各一条；
 // ⑪ 团队调度台：回合挂了回到待命，不说「完成了」，说「这一轮中断了」；正常收口的回合才是新的一版；
 // ⑫ 多人模式：被移出项目的成员收不到那个项目里的通知（一条一条推，过滤器逐件核可见性）；有权限的成员，任务头一回
 //    经过过滤器（归属缓存是冷的，比如重启后收拾出来的中断）也照推。
@@ -295,6 +296,18 @@ try {
   assert.deepEqual(reviewPassed.map((notice) => notice.kind), ["accept"]);
   assert.equal(reviewPassed[0]!.body, "审查通过，等你验收");
   assert.deepEqual(await reconcile("t8"), [], "不重复");
+
+  for (const [id, status, kind, body] of [["t9", "stopped", "review_failed", "审查没通过"], ["t10", "passed", "review_passed", "审查通过"]] as const) {
+    await db.insert(tasks).values(task({ id, title: "暂停着派审", status: "paused", workflowMode: "free", mode: "single" }) as never);
+    await reconcile(id);
+    await db.insert(freeReviewRuns).values(review(`r-${id}`, id, "reviewing", false) as never);
+    assert.deepEqual(await reconcile(id), [], "审着：不推");
+    await db.update(freeReviewRuns).set({ status, finishedAt: at(), updatedAt: at() }).where(eq(freeReviewRuns.id, `r-${id}`));
+    const concluded = await reconcile(id);
+    assert.deepEqual(kinds(concluded), [[id, kind]], `暂停着的任务，审查最后 ${status}：推一条`);
+    assert.equal(concluded[0]!.body, body);
+    assert.deepEqual(await reconcile(id), [], "不重复");
+  }
 
   // ── ⑪ 团队调度台 ───────────────────────────────────────────────────────
   await db.insert(tasks).values(task({ id: "team", title: "团队", mode: "team", status: "idle" }) as never);

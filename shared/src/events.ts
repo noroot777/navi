@@ -162,12 +162,12 @@ export type TurnImageRef = { path?: string; source: string; ref?: number; pos?: 
 /**
  * 系统通知是哪一种时刻。前六种就是「此刻要人做哪件事」（task-attention.ts HumanTurnKind）；后面是事后的结局：
  * 这一轮中断了但任务没落失败（续聊挂了，原来的结果还在）、被停下（停止、分组暂停）、验收落章、验收前置命令没过、
- * 审查通过（不在等验收时才单说）。一口气来了好几件由客户端合成一条（web/src/lib/noticeBatch.ts），服务端不合：
+ * 审查通过 / 没通过（不在等验收时才单说）。一口气来了好几件由客户端合成一条（web/src/lib/noticeBatch.ts），服务端不合：
  * 合了就带不上每一件是哪个任务，过滤器没法按收件人逐件核可见性。
  */
 export type TaskNotifyKind =
   | "question" | "failed" | "dispute" | "duet_gate" | "verify_failed" | "accept"
-  | "interrupted" | "stopped" | "accepted" | "gate_failed" | "review_passed";
+  | "interrupted" | "stopped" | "accepted" | "gate_failed" | "review_passed" | "review_failed";
 
 // SSE envelope pushed to the web client.
 export type ServerEvent =

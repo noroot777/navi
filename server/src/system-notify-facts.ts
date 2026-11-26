@@ -18,7 +18,10 @@
 //   stop           被停下的那一次：认那个被停的回合自己（session_turns.outcome = stopped；续聊被停、原来的状态放回去，分组暂停，
 //                  调度台被停回到待命，跑着被停落 canceled 都是它）；没有被停的回合（排着就被取消了）才认 canceled 那一下的落位。
 //                  同一次停止只记一样，不重复说。
-//   result/gate/review  结局账，同 im/outcomes.ts。
+//   reviewed       最近一条工作区审查链的最终结论（通过 / 没通过，链收口了才有）。审查结论是它自己的事，不看任务此刻停在哪：
+//                  暂停着、失败着的任务上派的审，最后一轮没过也得说（第 5 轮审查 1）。此刻正等验收时由 accept 说（它的身份里
+//                  带着这个结论，措辞是「审查没通过，等你决定」），这里只记账，不说第二遍。
+//   result/gate/review  结局账，同 im/outcomes.ts。review 那一样只记账（候选查找 staleOutcomeTasks 按它对账），话由 reviewed 说。
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { TaskNotifyKind } from "@navi/shared";
 import { db } from "./db/index.js";
@@ -139,6 +142,14 @@ export async function entriesOf(view: TaskView, facts: Facts): Promise<Entry[]> 
   // 身份就从落位换成了回合，同一次停止说两遍。
   if (last?.outcome === "stopped") entries.push({ kind: "stop", value: `turn:${last.id}`, said: stopped });
   else if (task.status === "canceled") entries.push({ kind: "stop", value: `canceled:${task.endedAt ?? task.updatedAt}`, said: stopped });
+  // 审查链收口了：任务还在跑（收口之后马上又开了一轮）先不看，落定了再说
+  if (settled && facts.review?.finished) {
+    const passed = facts.review.status === "passed";
+    entries.push({
+      kind: "reviewed", value: `${facts.review.id}:${facts.review.status}`,
+      said: turn?.kind === "accept" ? null : passed ? { kind: "review_passed", body: "审查通过" } : { kind: "review_failed", body: "审查没通过" },
+    });
+  }
   for (const outcome of await outcomesOf(view)) entries.push({ kind: outcome.kind, value: outcome.value, said: outcomeWords(view, outcome) });
   return entries;
 }
@@ -160,6 +171,5 @@ function outcomeWords(view: TaskView, outcome: { kind: string; value: string; te
   if (!outcome.text) return null;
   if (outcome.kind === "result") return { kind: "accepted", body: acceptedLabel(view.task) };
   if (outcome.kind === "gate") return outcome.value.endsWith(":failed") ? { kind: "gate_failed", body: "验收前置命令没通过" } : null;
-  if (outcome.kind === "review") return { kind: "review_passed", body: "审查通过" };
   return null;
 }

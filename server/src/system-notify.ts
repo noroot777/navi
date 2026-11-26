@@ -146,6 +146,8 @@ export class SystemNotifier {
     for (let i = 0; i < ids.length; i += BATCH) {
       const batch = ids.slice(i, i + BATCH);
       const [views, facts] = await Promise.all([viewsOf(batch), factsOf(batch)]);
+      // 不在 Map 里 = 这一下看不清现状（im/attention.ts viewsOf）：什么都没记，算没对上
+      failed += batch.filter((taskId) => !views.has(taskId)).length;
       for (const [taskId, view] of views) {
         try {
           const fact = facts.get(taskId);
