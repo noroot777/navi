@@ -1,5 +1,5 @@
 // 系统通知：任务到了要人看一眼的时刻 —— 跑完等验收、验收落章、验证 / 验收前置命令没过、跑挂了（中断）、被停下、停下来
-// 等人拍板（提问、驳回待裁定、讨论闸口）—— 往 SSE 上推一条 task.notify，开着的客户端（mac app、Windows app、浏览器）各自
+// 等人拍板（提问、驳回待裁定、讨论闸口、持续目标没完成就停住）—— 往 SSE 上推一条 task.notify，开着的客户端（mac app、Windows app、浏览器）各自
 // 弹系统通知。什么时候弹、弹什么字都在这里定，客户端只管显示：几个客户端各判一遍，迟早一个弹一个不弹。
 //
 // 判据不另写一份：「此刻要人做哪件事」用飞书推送那一份（im/attention.ts），「验收了 / 门禁出结果了 / 审查通过了」用结局账
@@ -14,7 +14,7 @@
 // 此刻的样子记一遍底（baseline）。之后账上没有的任务就是新建的，它的头一眼就是它头一件事；启动收拾出来的中断、头几秒里
 // 跑完的，都是记底之后发生的，照常比、照常推。不靠水位、不靠这个进程收到过什么动静去猜「是不是新的」。
 // 记底按任务各记各的：有任务那一下读不清（讨论记录打不开），只把它记进 UNBASELINED，别的任务照常记完、照常推；它读得清
-// 了再补记 —— 补记那一下分不清的只记账不推，带着发生时刻、发生在记底之后的（审查结论、回合中断、被停）照推。不整份重记：
+// 了再补记 —— 补记那一下分不清的只记账不推，带着发生时刻、发生在记底之后的（审查结论、回合中断、被停、持续目标停住）照推。不整份重记：
 // 重记会把记底之后别的任务上真发生的事也当成历史。账的记法（FORMAT）变了等于没记过底，重记一遍。
 //
 // 全量对账（启动几秒后、之后定时）找候选：此刻可能要人管的状态，加上上次全量对账之后改过的任务、有回合收口的任务，
@@ -41,7 +41,7 @@ export const SINK = "navi:system-notify";
 const BASELINED = "system-notify-baselined";
 /** 账的记法：哪一样认什么身份。改了身份的写法就加一，启动时按没记过底重记，不然老写法的账一比全是「新的」。 */
 const FORMAT_KEY = "system-notify-format";
-const FORMAT = "2";
+const FORMAT = "3";
 /** 记底时没读清、还没补记的任务。 */
 const UNBASELINED = "system-notify-unbaselined";
 /** 上一次全量对账开始的时刻：这之后改过的任务下一次全量对账都带上。 */
@@ -202,7 +202,7 @@ export class SystemNotifier {
 
   /** 有事要人管、回合锁却还占着：这一轮还在结算，先不动，锁放开再对（同 im/reconcile.ts stillSettling）。 */
   private stillSettling(taskId: string, view: TaskView, entries: Entry[]): boolean {
-    const pending = (view.turn && view.turn.kind !== "duet_gate") || entries.some((entry) => entry.kind === "interrupt" || entry.kind === "stop");
+    const pending = (view.turn && view.turn.kind !== "duet_gate") || entries.some((entry) => entry.kind === "interrupt" || entry.kind === "stop" || entry.kind === "goal");
     if (!pending || !isTurnClaimed(taskId)) return false;
     if (!this.settling.has(taskId)) {
       this.settling.add(taskId);

@@ -3,9 +3,10 @@
 // 每一样都是一件事**自己的**身份，跟此刻是不是正好停在那一步无关，所以不在那一步时也照记：
 //   seen           见过这个任务（此刻没事要人管的任务账上也得有一行，之后它再有什么都不是历史）
 //   accept         这一版成果：完成过几次 + 停在哪一道「等我点头」+ 最近一次审查的结论。「完成过几次」只数真完成：
-//                  单飞、讨论是 tasks.done_seq（只有 completion 才加）；团队调度台是共享执行者各自的 done_seq 加上调度台
-//                  最近一个**正常收口**的回合 —— 不用 task-result-version.ts 的「最近一个回合的开始时刻」，那连挂掉、被停的
-//                  回合也算成新的一版（第 3 轮审查 1）。
+//                  单飞、讨论是 tasks.done_seq（只有 completion 才加）；团队调度台是 tasks.team_done_seq（共享执行者每真完成
+//                  一次跟着加一，status.ts）加上调度台最近一个**正常收口**的回合 —— 不用此刻成员各自的 done_seq 拼：删掉、新加
+//                  一个成员名单就变了，没人交付也成了新的一版；也不用 task-result-version.ts 的「最近一个回合的开始时刻」，
+//                  那连挂掉、被停的回合也算成新的一版（第 3 轮审查 1）。
 //                  只在此刻正等验收时说话（说法跟着审查结论走：完成了 / 审查通过 / 审查没通过），账也只在那时、或者头一回
 //                  见到这个任务时记：完成之后还要先验证、先审、托盘里的消息先送进去，那几步里身份已经是新的，等它真停到
 //                  等验收上才说，跟上一次说过的比。
@@ -15,6 +16,8 @@
 //   turn:<种类>    其余几种「下一步」（提问、失败、待裁定、讨论闸口）上次见到的是哪一回，代次同 im/attention.ts。
 //   interrupt      最近一个回合（单飞会话、团队调度台）挂了、任务却没落失败（续聊挂了，原来的结果还在；调度台挂了回到待命）：
 //                  那一回合。落了失败的由 turn:failed 说。
+//   goal           持续目标这一轮正常退出却没交卷、停下来等人续跑的那一次（tasks.goal_stopped_at，结算那一笔记下）。
+//                  检查点暂停、等哨兵、提问都不是它：那几种有人或者系统会把它叫起来，提问由 turn:question 说。
 //   stop           被停下的那一次：认那个被停的回合自己（session_turns.outcome = stopped；续聊被停、原来的状态放回去，分组暂停，
 //                  调度台被停回到待命，跑着被停落 canceled 都是它）；没有被停的回合（排着就被取消了）才认 canceled 那一下的落位。
 //                  同一次停止只记一样，不重复说。
@@ -35,7 +38,6 @@ import { outcomesOf } from "./im/outcomes.js";
 import { scrubTitle } from "./im/scrub.js";
 import { reviewChainVerdict } from "./free-review-outcome.js";
 import { humanGateOf, NO_GATE } from "./task-human-gate.js";
-import { isSharedTeamWorker } from "./task-result-version.js";
 
 export type Said = { kind: TaskNotifyKind; body: string };
 /**
@@ -57,6 +59,8 @@ export interface Facts {
   lastTurn: { id: string; outcome: string | null; endedAt: string | null } | null;
   /** 真完成过几次（见文件头 accept）。 */
   completions: string;
+  /** 持续目标停住等续跑的那一刻（见文件头 goal）。 */
+  goalStoppedAt: string | null;
 }
 
 /** 算「最近一个回合」时认的会话：任务自己干活的那条（审查者、讨论双方各自的会话不算）。 */
@@ -66,7 +70,8 @@ export async function factsOf(taskIds: string[]): Promise<Map<string, Facts>> {
   const out = new Map<string, Facts>();
   if (!taskIds.length) return out;
   const rows = await db.select({
-    id: tasks.id, mode: tasks.mode, parentId: tasks.parentId, doneSeq: tasks.doneSeq, verifyRounds: tasks.verifyRounds, humanGateId: tasks.humanGateId,
+    id: tasks.id, mode: tasks.mode, parentId: tasks.parentId, doneSeq: tasks.doneSeq, teamDoneSeq: tasks.teamDoneSeq,
+    verifyRounds: tasks.verifyRounds, humanGateId: tasks.humanGateId, goalStoppedAt: tasks.goalStoppedAt,
   }).from(tasks).where(inArray(tasks.id, taskIds));
   for (const row of rows) {
     const [turn, review, completions] = await Promise.all([
@@ -79,7 +84,7 @@ export async function factsOf(taskIds: string[]): Promise<Map<string, Facts>> {
       }).from(freeReviewRuns)
         .where(and(eq(freeReviewRuns.taskId, row.id), eq(freeReviewRuns.targetKind, "workspace")))
         .orderBy(desc(freeReviewRuns.createdAt)).limit(1),
-      row.mode === "team" && !row.parentId ? teamCompletions(row.id) : Promise.resolve(`done#${row.doneSeq}`),
+      row.mode === "team" && !row.parentId ? teamCompletions(row.id, row.teamDoneSeq) : Promise.resolve(`done#${row.doneSeq}`),
     ]);
     const latest = review.at(0);
     const verdict = latest ? reviewChainVerdict(latest) : null;
@@ -90,22 +95,19 @@ export async function factsOf(taskIds: string[]): Promise<Map<string, Facts>> {
       review: verdict ? { ...verdict, at: latest!.finishedAt ?? latest!.updatedAt } : null,
       lastTurn: turn.at(0) ?? null,
       completions,
+      goalStoppedAt: row.goalStoppedAt,
     });
   }
   return out;
 }
 
-/** 团队调度台真完成过几次：共享执行者各自完成过几次，加上调度台最近一个正常收口的回合。 */
-async function teamCompletions(leadId: string): Promise<string> {
-  const [crew, lead] = await Promise.all([
-    db.select({ id: tasks.id, doneSeq: tasks.doneSeq, useWorktree: tasks.useWorktree }).from(tasks).where(eq(tasks.parentId, leadId)),
-    db.select({ id: sessionTurns.id }).from(sessionTurns)
-      .innerJoin(sessions, and(eq(sessions.id, sessionTurns.sessionId), eq(sessions.role, "lead")))
-      .where(and(eq(sessionTurns.taskId, leadId), eq(sessionTurns.outcome, "completed")))
-      .orderBy(desc(sessionTurns.startedAt)).limit(1),
-  ]);
-  const shared = crew.filter(isSharedTeamWorker).map((worker) => `${worker.id}#${worker.doneSeq}`).sort();
-  return `team:${shared.join(",")}|lead:${lead.at(0)?.id ?? "-"}`;
+/** 团队调度台真完成过几次：共享执行者一共真完成过几次，加上调度台最近一个正常收口的回合。 */
+async function teamCompletions(leadId: string, crewDone: number): Promise<string> {
+  const lead = await db.select({ id: sessionTurns.id }).from(sessionTurns)
+    .innerJoin(sessions, and(eq(sessions.id, sessionTurns.sessionId), eq(sessions.role, "lead")))
+    .where(and(eq(sessionTurns.taskId, leadId), eq(sessionTurns.outcome, "completed")))
+    .orderBy(desc(sessionTurns.startedAt)).limit(1);
+  return `team#${crewDone}|lead:${lead.at(0)?.id ?? "-"}`;
 }
 
 /** 这一版成果的身份（见文件头 accept）。 */
@@ -150,6 +152,9 @@ export async function entriesOf(view: TaskView, facts: Facts): Promise<Entry[]> 
   const stopped = { kind: "stopped" as const, body: task.status === "paused" ? "已暂停" : "已停止" };
   // 认那个被停的回合；没有（排着就被取消了）才认 canceled 那一下的落位。先认落位的话，停完又重新排上、还没开新回合时
   // 身份就从落位换成了回合，同一次停止说两遍。
+  if (facts.goalStoppedAt && task.status === "paused" && !task.question) {
+    entries.push({ kind: "goal", value: facts.goalStoppedAt, at: facts.goalStoppedAt, said: { kind: "goal_stopped", body: "持续目标停了，等你续跑" } });
+  }
   if (last?.outcome === "stopped") entries.push({ kind: "stop", value: `turn:${last.id}`, said: stopped, at });
   else if (task.status === "canceled") entries.push({ kind: "stop", value: `canceled:${task.endedAt ?? task.updatedAt}`, said: stopped });
   if (facts.review) {

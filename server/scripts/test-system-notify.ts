@@ -18,10 +18,12 @@
 //    不在等验收的任务（暂停着）上派的审：最后没过推「审查没通过」，过了推「审查通过」，各一条；自动修复复审的链：
 //    转修复（收尾还没挂上续审、挂上之后）、续审在跑（finishedAt 还留着上一轮的）都不推，最后一轮没过才推，同一条链
 //    再审一轮又没过再推；等验收的任务在转修复那一下也不推「审查没通过，等你决定」；
-// ⑪ 团队调度台：回合挂了回到待命，不说「完成了」，说「这一轮中断了」；正常收口的回合才是新的一版；
+// ⑪ 团队调度台：回合挂了回到待命，不说「完成了」，说「这一轮中断了」；正常收口的回合才是新的一版；删掉、新加成员
+//    不是新的一版，共享执行者真完成了才是，开独立工作区的那些完成了不算；
 // ⑫ 多人模式：被移出项目的成员收不到那个项目里的通知（一条一条推，过滤器逐件核可见性）；有权限的成员，任务头一回
 //    经过过滤器（归属缓存是冷的，比如重启后收拾出来的中断）也照推；
-// ⑬ 重启：记过底不重记，记底之后的新事照推；账的记法变了按没记过底重记，老写法的账不当成新事。
+// ⑬ 重启：记过底不重记，记底之后的新事照推；账的记法变了按没记过底重记，老写法的账不当成新事；
+// ⑭ 持续目标没交卷就停住、等人续跑：推一条，不重复；重新跑起来再停住又是一回；检查点暂停不推。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -428,6 +430,41 @@ try {
   await leadTurn("completed");
   await setTaskStatus("team", "idle");
   assert.deepEqual(kinds(await reconcile("team")), [["team", "accept"]], "调度台正常收口：新的一版");
+  await db.delete(tasks).where(eq(tasks.id, "worker"));
+  assert.deepEqual(await reconcile("team"), [], "删掉一个成员：不是新的一版");
+  await db.insert(tasks).values(task({ id: "worker2", title: "新成员", parentId: "team", status: "backlog", useWorktree: false }) as never);
+  assert.deepEqual(await reconcile("team"), [], "新加一个还没开工的成员：不是新的一版");
+  await db.insert(tasks).values(task({ id: "worker3", title: "独立工作区成员", parentId: "team", status: "running", useWorktree: true }) as never);
+  await setTaskStatus("worker3", "done", { completion: true });
+  assert.deepEqual(await reconcile("team"), [], "开独立工作区的成员完成了：不算团队的一版");
+  await setTaskStatus("worker2", "running");
+  await setTaskStatus("worker2", "done", { completion: true });
+  assert.deepEqual(kinds(await reconcile("team")), [["team", "accept"]], "共享执行者真完成了：新的一版");
+  await db.update(tasks).set({ useWorktree: true }).where(eq(tasks.id, "worker3"));
+  await db.update(tasks).set({ useWorktree: false }).where(eq(tasks.id, "worker3"));
+  assert.deepEqual(await reconcile("team"), [], "成员换工作区：不是新的一版");
+
+  // ── ⑭ 持续目标停住 ─────────────────────────────────────────────────────
+  await db.insert(tasks).values(task({ id: "goal", title: "持续目标", status: "running", goalTurn: true }) as never);
+  await reconcile("goal");
+  await turnOf("goal", "completed");
+  assert.equal((await settleTaskStatus("goal", 0, null)).status, "paused");
+  const goalStopped = await reconcile("goal");
+  assert.deepEqual(kinds(goalStopped), [["goal", "goal_stopped"]], "没交卷就停住：推");
+  assert.equal(goalStopped[0]!.body, "持续目标停了，等你续跑");
+  assert.deepEqual(await reconcile("goal"), [], "不重复");
+  await setTaskStatus("goal", "running");
+  await set("goal", { goalTurn: true });
+  assert.deepEqual(await reconcile("goal"), [], "续跑起来：不推");
+  await sleep(5);
+  await turnOf("goal", "completed");
+  assert.equal((await settleTaskStatus("goal", 0, null)).status, "paused");
+  assert.deepEqual(kinds(await reconcile("goal")), [["goal", "goal_stopped"]], "又停住：是新的一回");
+  await db.insert(tasks).values(task({ id: "checkpoint", title: "检查点", status: "running", resumePrompt: "继续" }) as never);
+  await reconcile("checkpoint");
+  await turnOf("checkpoint", "completed");
+  assert.equal((await settleTaskStatus("checkpoint", 0, null)).status, "paused");
+  assert.deepEqual(await reconcile("checkpoint"), [], "检查点暂停：会被叫起来，不推");
 
   // ── ⑫ 多人模式：被移出项目的成员 ───────────────────────────────────────
   const { users } = await import("../src/db/schema.js");
