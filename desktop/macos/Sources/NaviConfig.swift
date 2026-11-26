@@ -217,6 +217,11 @@ enum DatabaseFile {
     return "\(info.st_dev)-\(info.st_ino)-\(info.st_birthtimespec.tv_sec).\(info.st_birthtimespec.tv_nsec)"
   }
 
+  /// 记下的库身份（`identity`）说的是不是眼前这份。没记（改这套记账之前写下的）按原样认。
+  static func isSame(_ recorded: String?, as current: String) -> Bool {
+    recorded == nil || recorded == current
+  }
+
   /// 这个数据目录用过没有：两代库名、改名账本，有一样就算 —— 认不准的情形交给服务起来时说清楚，不当成第一次用。
   static func isInitialized(_ dir: URL) -> Bool {
     [name, LegacyIdentity.databaseFile, renameJournal].contains { FileManager.default.fileExists(atPath: dir.appendingPathComponent($0).path) }
@@ -267,6 +272,9 @@ struct LockHolder: Equatable {
 
   /// 还是不是认过的那一个进程（没退、pid 没被复用）。
   var isAlive: Bool { Self.inspect(pid)?.startedAt == startedAt }
+
+  /// 内核记的这个进程的启动时刻；不在了是 nil。
+  static func startTime(of pid: Int32) -> Date? { inspect(pid)?.startedAt }
 
   /// 内核记的进程启动时刻和命令名；进程不在了（或只剩僵尸）是 nil。
   private static func inspect(_ pid: Int32) -> (startedAt: Date, command: String)? {
@@ -376,12 +384,15 @@ enum RuntimeStore {
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
     try process.run()
-    // 确认时它在服务记录那把锁里跑（ServerRecord.confirmServing）：卡住了不能把锁一直攥着。
-    let deadline = Date().addingTimeInterval(30)
-    while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
-    if process.isRunning {
+    // 确认时它在服务记录那把锁里跑（ServerRecord.confirmServing）：卡住了不能把锁一直攥着，收尾也不无限等它。
+    func exited(within seconds: TimeInterval) -> Bool {
+      let deadline = Date().addingTimeInterval(seconds)
+      while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+      return !process.isRunning
+    }
+    if !exited(within: 30) {
       process.terminate()
-      process.waitUntilExit()
+      if !exited(within: 3) { kill(process.processIdentifier, SIGKILL); _ = exited(within: 2) }
       throw SQLiteFile.Failure("切换运行时 30 秒没完成")
     }
     guard process.terminationStatus == 0 else { throw SQLiteFile.Failure("恢复运行时校验失败") }

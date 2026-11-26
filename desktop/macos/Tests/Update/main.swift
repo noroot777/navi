@@ -190,6 +190,12 @@ case "backups-same-second":
 
 case "pins":
   emit("PINS \(DatabaseBackup.recoveryPoints().map(\.lastPathComponent).joined(separator: ","))")
+  emit("PINS-HERE \(DatabaseBackup.recoveryPointsOfCurrentDatabase().map(\.lastPathComponent).joined(separator: ","))")
+
+case "attempt-marker":
+  // 记下「要起了」，进程号还没补上（补进程号那一下没记上就是这样）。
+  try! ServerRecord.writeAttempt()
+  emit("MARKED")
 
 case "confirm":
   ServerRecord.confirmServing(pid: Int(args[2])!, observedAt: Date())

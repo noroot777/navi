@@ -139,10 +139,15 @@ enum NaviHealth {
 enum ServedInstance {
   private static let lock = NSLock()
   private static var latest: NaviInstance?
+  private static var latestAskedAt = Date.distantPast
 
-  static func observe(_ instance: NaviInstance) {
+  /// `askedAt`：这一眼是什么时候发出去的。比已经记下的那一眼早（迟到的）就不盖它。
+  static func observe(_ instance: NaviInstance, askedAt: Date = Date()) {
     lock.lock()
-    latest = instance
+    if askedAt >= latestAskedAt {
+      latest = instance
+      latestAskedAt = askedAt
+    }
     lock.unlock()
   }
 
@@ -150,6 +155,7 @@ enum ServedInstance {
   static func forget() {
     lock.lock()
     latest = nil
+    latestAskedAt = Date()
     lock.unlock()
   }
 

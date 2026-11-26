@@ -10,7 +10,8 @@
 // 「停掉它」只停那一个、它缓过来就不停、不理 SIGTERM 时再给强制结束；起出来的那份没服务过就退了（被锁挡下 /
 // 自己没起来 / 等满时限之后才退）→ 在服务的那一份一字不动、旧版照样认得出，这一次只记成一次没成的尝试（留的底
 // 照常固定，这一版在同一份库上再起不重备；那时没有库、或者之后换了一份库 → 照常备份）；旧服务在尝试之后应答 → 它的恢复点作废；尝试之前的一眼迟到了才交来确认 → 什么都
-// 不改；闸在等着换掉旧服务时端口上已经是这一版起的那份 → 不再接管它。
+// 不改；别的库的恢复点不算这份库备过、也不当它的恢复入口；进程号没补上的尝试凭启动时刻认；闸在等着换掉旧服务时
+// 端口上已经是这一版起的那份 → 不再接管它。
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
@@ -139,6 +140,7 @@ const record = () => JSON.parse(readFileSync(recordFile, "utf8"));
 const attempt = () => { const { pid, bundleVersion } = record().attempt; return { pid, bundleVersion }; };
 const backups = () => (existsSync(join(data, "backups")) ? readdirSync(join(data, "backups")).filter((n) => n.endsWith(".db")) : []);
 const pins = async () => (await drive(["pins"])).out.match(/PINS (.*)/)[1].split(",").filter(Boolean);
+const pinsHere = async () => (await drive(["pins"])).out.match(/PINS-HERE (.*)/)[1].split(",").filter(Boolean);
 const staleness = async (pid) => (await drive(["staleness", String(pid)])).out.match(/STALE (.*)/)[1];
 const reset = () => {
   for (const name of [recordFile, lockFile, spawned]) rmSync(name, { force: true });
@@ -315,6 +317,53 @@ await withTestResources(async () => {
   result = await drive(["launch", "3"]);
   assert.equal(backups().length, 1, "and the same build retrying on that same database does not back it up again");
   console.log("PASS: an attempt made on no database or another database does not stand in for the database now in place");
+
+  // ── 导入的那份没起来，挪走后又换上另一份库：前一份的恢复点照样固定着，但不算这一份备过，也不当成它的恢复入口 ──
+  reset();
+  writeFileSync(newServerMode, "crash");
+  result = await drive(["launch", "3"]);
+  assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
+  const [backupOfA] = backups();
+  assert.ok(backupOfA, "fixture: the first database got its pre-migration backup");
+  const movedA = join(temporary, "a.db");
+  renameSync(join(data, "navi.db"), movedA);
+  const stagedB = join(temporary, "b.db");
+  const b = new DatabaseSync(stagedB);
+  b.exec("create table tasks (id text primary key); insert into tasks values ('b1')");
+  b.close();
+  renameSync(stagedB, join(data, "navi.db"));
+  result = await drive(["launch", "3"]);
+  assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
+  assert.equal(backups().length, 2, "the second database gets a backup of its own");
+  const backupOfB = backups().find((name) => name !== backupOfA);
+  assert.deepEqual((await pins()).sort(), [backupOfA, backupOfB].sort(), "the first database's point stays pinned");
+  assert.deepEqual(await pinsHere(), [backupOfB], "only the second database's point is offered for it");
+  const copyOfB = new DatabaseSync(join(data, "backups", backupOfB), { readOnly: true });
+  assert.equal(copyOfB.prepare("select id from tasks").get().id, "b1");
+  copyOfB.close();
+  rmSync(movedA);
+  console.log("PASS: recovery points belong to the database they were taken of: another database's point neither covers nor stands in for this one");
+
+  // ── 补进程号那一下没记上：之后谁看到这次尝试开始之后才起的那个进程应答，都认得出是它；更早就在的不算 ──
+  reset();
+  setHealth("ok");
+  holder = await startHolder({ lock: false });
+  await drive(["record", String(holder.pid), OLD]);
+  await drive(["attempt-marker"]);
+  result = await drive(["launch", "5"]);
+  assert.match(result.out, /LAUNCH ready/, result.out);
+  assert.equal(record().pid, holder.pid);
+  assert.equal(record().bundleVersion, OLD, "a process already running before the attempt is not taken for it");
+  await stop(holder);
+  await drive(["attempt-marker"]);
+  holder = await startHolder({ lock: false });
+  result = await drive(["launch", "5"]);
+  assert.match(result.out, /LAUNCH ready/, result.out);
+  assert.equal(record().pid, holder.pid, "the process started after the attempt is recognised without its pid on record");
+  assert.equal(record().bundleVersion, "dev");
+  assert.equal(record().attempt, undefined);
+  await stop(holder);
+  console.log("PASS: an attempt whose pid was never written is still reconciled by whoever sees its process answer");
 
   // ── 闸在等着换掉旧服务，端口上已经是这一版起的那份：不再接管、不停它 ──
   reset();
