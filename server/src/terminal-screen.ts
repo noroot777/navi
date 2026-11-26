@@ -1,5 +1,5 @@
 import type { Terminal } from "@xterm/headless";
-import type { ScreenLine, ScreenPresentation, TerminalScreenFrame, XtermScreenBuffer, XtermScreenLine } from "@navi/shared/terminal-screen";
+import type { ScreenLine, ScreenPresentation, TerminalInputModes, TerminalScreenFrame, TerminalScreenUpdate, XtermScreenBuffer, XtermScreenLine } from "@navi/shared/terminal-screen";
 import type { TerminalTheme } from "@navi/shared/terminal-themes";
 
 const SYNCHRONIZED_OUTPUT_MODE = 2026;
@@ -11,7 +11,14 @@ type ScreenCore = {
     normal: XtermScreenBuffer;
     onBufferActivate(listener: () => void): { dispose(): void };
   } };
-  coreService: { isCursorHidden: boolean; decPrivateModes: Record<string, boolean> };
+  coreService: { isCursorHidden: boolean; decPrivateModes: {
+    applicationCursorKeys: boolean;
+    applicationKeypad: boolean;
+    bracketedPasteMode: boolean;
+    synchronizedOutput: boolean;
+    cursorBlink?: boolean;
+    cursorStyle?: ScreenPresentation["cursorStyle"];
+  } };
   coreMouseService: { activeProtocol: string; activeEncoding: string };
   _oscLinkService: { getLinkData(linkId: number): { uri: string } | undefined };
 };
@@ -34,7 +41,7 @@ function encode(line: XtermScreenLine): ScreenLine {
   return result;
 }
 
-type Listener = (frame: TerminalScreenFrame) => void;
+type Listener = (update: TerminalScreenUpdate) => void;
 
 export function createTerminalScreen(
   terminal: Terminal,
@@ -43,6 +50,23 @@ export function createTerminalScreen(
 ) {
   const core = (terminal as unknown as { _core: ScreenCore })._core;
   const listeners = new Set<Listener>();
+  const readInput = (): TerminalInputModes => {
+    const { applicationCursorKeys, applicationKeypad, bracketedPasteMode } = core.coreService.decPrivateModes;
+    return {
+      applicationCursorKeys, applicationKeypad, bracketedPasteMode,
+      mouseProtocol: core.coreMouseService.activeProtocol, mouseEncoding: core.coreMouseService.activeEncoding,
+      hasScrollback: core._bufferService.buffer.hasScrollback,
+    };
+  };
+  let input = readInput();
+  let revision = 0;
+  const publish = (frame?: TerminalScreenFrame) => {
+    const next = readInput();
+    if (!frame && (Object.keys(next) as (keyof TerminalInputModes)[]).every((key) => next[key] === input[key])) return;
+    input = next;
+    const update = { revision: ++revision, input, frame };
+    for (const listener of listeners) listener(update);
+  };
   let previous: TerminalScreenFrame | undefined;
   let previousBuffer: XtermScreenBuffer | undefined;
   let previousList: XtermScreenBuffer["lines"] | undefined;
@@ -93,9 +117,8 @@ export function createTerminalScreen(
     const presentation: ScreenPresentation = {
       theme: palette(), colors: colors(), alternate,
       cursorX: buffer.x, cursorY: buffer.y, cursorHidden: core.coreService.isCursorHidden,
-      cursorBlink: terminal.options.cursorBlink ?? false, cursorStyle: terminal.options.cursorStyle ?? "block",
-      modes: { ...core.coreService.decPrivateModes },
-      mouseProtocol: core.coreMouseService.activeProtocol, mouseEncoding: core.coreMouseService.activeEncoding,
+      cursorBlink: core.coreService.decPrivateModes.cursorBlink ?? terminal.options.cursorBlink ?? false,
+      cursorStyle: core.coreService.decPrivateModes.cursorStyle ?? terminal.options.cursorStyle ?? "block",
     };
     const full = !previous || previousBuffer !== buffer || previousList !== buffer.lines || geometryChanged;
     const drop = full || alternate ? 0 : discarded - previous!.discarded;
@@ -123,7 +146,7 @@ export function createTerminalScreen(
     previousBuffer = buffer;
     previousList = buffer.lines;
     geometryChanged = false;
-    for (const listener of listeners) listener(frame);
+    publish(frame);
   }
 
   const syncStart = terminal.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
@@ -139,17 +162,19 @@ export function createTerminalScreen(
     commit();
   }
 
-  let finalFrame: TerminalScreenFrame | undefined;
-  const snapshot = () => {
-    if (finalFrame) return finalFrame;
+  type Snapshot = TerminalScreenUpdate & { frame: TerminalScreenFrame };
+  let finalSnapshot: Snapshot | undefined;
+  const snapshot = (): Snapshot => {
+    if (finalSnapshot) return finalSnapshot;
     if (!previous || timer) commit();
     const lines = cachedLines.map((line, row): [number, ScreenLine] => [row, line]);
-    return { ...previous!, full: true, drop: 0, lines, links: [...cachedLinks] };
+    return { revision, input, frame: { ...previous!, full: true, drop: 0, lines, links: [...cachedLinks] } };
   };
 
   const schedule = (resized = false) => {
     if (finished) return;
     geometryChanged ||= resized;
+    publish();
     if (isSynchronized()) return;
     clearTimeout(syncTimeout);
     syncTimeout = undefined;
@@ -168,7 +193,7 @@ export function createTerminalScreen(
       if (finished) return;
       exitCode = code;
       forceCommit();
-      finalFrame = snapshot();
+      finalSnapshot = snapshot();
       finished = true;
       trim?.dispose();
       activation.dispose();

@@ -203,8 +203,8 @@ async function runBrowser() {
         super(url, options);
         this.addEventListener("open", () => window.__terminalOpens.push(String(url)));
         this.addEventListener("message", (message) => {
-          const { seq, full, drop, base, length, lines } = JSON.parse(message.data);
-          window.__terminalFrames.push({ url: String(url), seq, full, drop, base, length, updates: lines.length });
+          const { revision, input, frame } = JSON.parse(message.data);
+          window.__terminalFrames.push({ url: String(url), revision, input, seq: frame?.seq, full: frame?.full, updates: frame?.lines.length });
           if (window.__terminalFrames.length > 12) window.__terminalFrames.shift();
         });
       }
@@ -436,23 +436,55 @@ async function runBrowser() {
     console.log("PASS: vi editing, silent history replay, live replies, multiline backspace and large Unicode paste");
 
     await input.focus();
+    const screenElement = viewport.locator(".xterm-screen");
+    await screenElement.hover({ position: { x: 42, y: 42 } });
+    await screenElement.evaluate((element) => {
+      window.__terminalWheel = [];
+      element.closest(".xterm").addEventListener("wheel", (event) => {
+        window.__terminalWheel.push({ delta: event.deltaY, mode: event.deltaMode, trusted: event.isTrusted });
+      }, { capture: true, once: true });
+    });
+    const beforeSyncInput = inputs.length;
+    const syncInput = () => inputs.slice(beforeSyncInput).filter((entry) => entry.sessionId === first).map((entry) => entry.data).join("");
     manager.write(first, projectId, [
-      "printf '\\033[2J\\033[H\\137VISIBLE_SYNC__\\033[?2026h\\033[2J\\033[H\\137PARTIAL_SYNC__\\033[6n'",
+      "save_tty=$(stty -g); stty raw -echo",
+      "printf '\\033[2J\\033[H\\137VISIBLE_SYNC__\\033[?2026h\\033[?1049h\\033[?9;1000;1002;1003l\\033[?1;2004h\\033[H\\137PARTIAL_SYNC__\\033[6n'",
       "IFS= read -rst 2 -d R reply && printf '\\r\\n\\137SYNC_QUERY_OK__'",
-      "read -r commit",
-      "printf '\\033[2J\\033[H\\137COMMITTED_SYNC__\\033[?2026l\\r\\n'",
+      "IFS= read -rst 2 -d Q keys",
+      "printf '\\033[?1000;1006h'",
+      "IFS= read -rst 2 -d Q pointer",
+      "stty \"$save_tty\"",
+      "printf '\\033[?1000;1006;1;2004l\\033[?1049l\\033[2J\\033[H\\137COMMITTED_SYNC__\\033[?2026l\\n'",
+      "printf '\\137SYNC_BYTES__%s\\n' \"$(printf '%s%s' \"$keys\" \"$pointer\" | od -An -v -tx1 | tr -d '[:space:]')\"",
     ].join("; ") + "\r");
     await waitFor(() => outputOf(first).includes("\r\n_SYNC_QUERY_OK__"), "query answered during synchronized output");
     await waitFor(() => viewport.innerText().then((text) => text.includes("_VISIBLE_SYNC__")), "last committed frame is visible");
-    await outlastPageTimers(page, 60);
+    const liveInputMode = () => page.evaluate(() => window.__terminalFrames.at(-1)?.input);
+    await waitFor(async () => {
+      const mode = await liveInputMode();
+      return mode?.applicationCursorKeys && mode.bracketedPasteMode && !mode.hasScrollback && mode.mouseProtocol === "NONE";
+    }, "current keyboard and alternate-screen scroll modes delivered before the new frame");
+    await page.keyboard.press("ArrowUp");
+    await page.mouse.wheel(0, 120);
+    await paste("alpha\nbeta");
+    const expectedKeys = "\x1bOA\x1bOB\x1b[200~alpha\rbeta\x1b[201~";
+    await waitFor(() => syncInput().endsWith("\x1b[201~"), "synchronized paste reaches the PTY");
+    assert.equal(syncInput(), expectedKeys, "arrow, alternate wheel and paste use live modes during a held redraw: "
+      + JSON.stringify(await page.evaluate(() => ({ wheel: window.__terminalWheel, updates: window.__terminalFrames.slice(-3) }))));
+    manager.write(first, projectId, "Q");
+    await waitFor(async () => (await liveInputMode())?.mouseEncoding === "SGR", "new mouse encoding delivered before commit");
+    await screenElement.click({ position: { x: 42, y: 42 } });
+    await waitFor(() => /\x1b\[<0;\d+;\d+m$/.test(syncInput()), "mouse release uses SGR encoding before commit");
+    assert.match(syncInput().slice(expectedKeys.length), /^\x1b\[<0;\d+;\d+M\x1b\[<0;\d+;\d+m$/);
     assert.match(await viewport.innerText(), /_VISIBLE_SYNC__/);
     assert.doesNotMatch(await viewport.innerText(), /_PARTIAL_SYNC__|_SYNC_QUERY_OK__/);
     await viewport.screenshot({ path: "/tmp/navi-terminal-sync-held.png" });
-    manager.write(first, projectId, "\r");
+    manager.write(first, projectId, "Q");
     await waitFor(() => viewport.innerText().then((text) => text.includes("_COMMITTED_SYNC__")), "completed frame is visible");
+    await waitFor(() => outputOf(first).includes("_SYNC_BYTES__" + Buffer.from(syncInput()).toString("hex")), "application received current-mode input bytes");
     assert.doesNotMatch(await viewport.innerText(), /_PARTIAL_SYNC__|_SYNC_QUERY_OK__/);
     await viewport.screenshot({ path: "/tmp/navi-terminal-sync-committed.png" });
-    console.log("PASS: synchronized redraw remains hidden while terminal queries still receive replies");
+    console.log("PASS: synchronized redraw holds the screen while queries, keys, paste, alternate wheel and SGR mouse stay live");
 
     for (const automatic of [false, true]) {
       const mode = automatic ? "RECONNECT" : "REOPEN";

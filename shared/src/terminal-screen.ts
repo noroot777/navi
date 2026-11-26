@@ -18,9 +18,15 @@ export type ScreenPresentation = {
   cursorHidden: boolean;
   cursorBlink: boolean;
   cursorStyle: "block" | "bar" | "underline";
-  modes: Record<string, boolean>;
+};
+
+export type TerminalInputModes = {
+  applicationCursorKeys: boolean;
+  applicationKeypad: boolean;
+  bracketedPasteMode: boolean;
   mouseProtocol: string;
   mouseEncoding: string;
+  hasScrollback: boolean;
 };
 
 export type TerminalScreenFrame = ScreenPresentation & {
@@ -38,6 +44,12 @@ export type TerminalScreenFrame = ScreenPresentation & {
   error?: true;
 };
 
+export type TerminalScreenUpdate = {
+  revision: number;
+  input: TerminalInputModes;
+  frame?: TerminalScreenFrame;
+};
+
 export type ScreenCellAttributes = { ext: number; urlId: number };
 export type XtermScreenLine = {
   _data: Uint32Array;
@@ -47,6 +59,7 @@ export type XtermScreenLine = {
 };
 
 export type XtermScreenBuffer = {
+  readonly hasScrollback: boolean;
   x: number;
   y: number;
   ybase: number;

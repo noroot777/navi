@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProjectView } from "@navi/shared";
-import { TERMINAL_SCROLLBACK, type TerminalScreenFrame } from "@navi/shared/terminal-screen";
+import { TERMINAL_SCROLLBACK, type TerminalScreenUpdate } from "@navi/shared/terminal-screen";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
@@ -72,7 +72,7 @@ function TerminalPane({
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const measureRef = useRef<(() => void) | null>(null);
-  const renderRef = useRef<ReturnType<typeof terminalScreenView> | null>(null);
+  const viewRef = useRef<ReturnType<typeof terminalScreenView> | null>(null);
   const frameReady = useRef(false);
   const lastSeqRef = useRef(0);
   const discardedRef = useRef(0);
@@ -119,7 +119,7 @@ function TerminalPane({
     lastSeqRef.current = 0;
     discardedRef.current = 0;
     frameReady.current = false;
-    renderRef.current = terminalScreenView(terminal);
+    viewRef.current = terminalScreenView(terminal);
 
     const showConnectionError = (reason: unknown) => {
       if (!alive) return;
@@ -219,7 +219,7 @@ function TerminalPane({
       input.dispose();
       terminal.dispose();
       terminalRef.current = null;
-      renderRef.current = null;
+      viewRef.current = null;
       measureRef.current = null;
       if (inputTimer !== null) window.clearTimeout(inputTimer);
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
@@ -243,24 +243,27 @@ function TerminalPane({
 
   useEffect(() => {
     if (!active || !establishedId) return;
-    const render = renderRef.current;
-    if (!render) return;
+    const view = viewRef.current;
+    if (!view) return;
     let alive = true;
     let ended = tabRef.current.status === "ended";
     let source: EventSource;
     const connect = () => {
       let initial = true;
+      frameReady.current = false;
       source = new EventSource(api.terminalScreenUrl(project.id, establishedId));
       source.onopen = () => { initial = true; };
       source.onmessage = (message) => {
         if (!alive) return;
-        const frame = JSON.parse(message.data) as TerminalScreenFrame;
-        if (!frame.full && (initial || frame.seq !== lastSeqRef.current + 1)) {
+        const { input, frame } = JSON.parse(message.data) as TerminalScreenUpdate;
+        if ((initial && !frame?.full) || (frame && !frame.full && frame.seq !== lastSeqRef.current + 1)) {
           source.close();
           connect();
           return;
         }
-        render(frame);
+        view.applyInput(input);
+        if (!frame) return;
+        view.render(frame);
         if (initial && lastSeqRef.current && frame.discarded > discardedRef.current) {
           notify("部分终端输出已超出保留范围");
         }
@@ -277,13 +280,15 @@ function TerminalPane({
         }
       };
       source.onerror = () => {
-        if (!alive || ended || tab.attachSessionId) return;
-        onMeta(tab.id, { status: "reconnecting" });
+        if (!alive) return;
+        frameReady.current = false;
+        if (!ended && !tab.attachSessionId) onMeta(tab.id, { status: "reconnecting" });
       };
     };
     connect();
     return () => {
       alive = false;
+      frameReady.current = false;
       source.close();
     };
   }, [active, establishedId, project.id, tab.id, tab.attachSessionId, onMeta, notify]);

@@ -1,10 +1,12 @@
 import type { ITheme, Terminal } from "@xterm/xterm";
-import type { TerminalScreenFrame, XtermScreenBuffer } from "@navi/shared/terminal-screen";
+import type { TerminalInputModes, TerminalScreenFrame, XtermScreenBuffer } from "@navi/shared/terminal-screen";
 import { terminalThemes } from "@navi/shared/terminal-themes";
 
 type ScreenCore = {
   _bufferService: { buffers: {
     active: XtermScreenBuffer;
+    normal: XtermScreenBuffer;
+    alt: XtermScreenBuffer;
     activateAltBuffer(): void;
     activateNormalBuffer(): void;
   }; isUserScrolling: boolean };
@@ -39,8 +41,20 @@ export function terminalScreenView(terminal: Terminal) {
   core._oscLinkService.getLinkData = (id) => links.get(id);
   let palette: string | undefined;
   let discarded = 0;
+  let hasInputScrollback = core._bufferService.buffers.active.hasScrollback;
+  for (const buffer of [core._bufferService.buffers.normal, core._bufferService.buffers.alt]) {
+    Object.defineProperty(buffer, "hasScrollback", { get: () => hasInputScrollback });
+  }
 
-  return (frame: TerminalScreenFrame) => {
+  const applyInput = (input: TerminalInputModes) => {
+    const { applicationCursorKeys, applicationKeypad, bracketedPasteMode, mouseProtocol, mouseEncoding, hasScrollback } = input;
+    hasInputScrollback = hasScrollback;
+    Object.assign(core.coreService.decPrivateModes, { applicationCursorKeys, applicationKeypad, bracketedPasteMode });
+    if (core.coreMouseService.activeEncoding !== mouseEncoding) core.coreMouseService.activeEncoding = mouseEncoding;
+    if (core.coreMouseService.activeProtocol !== mouseProtocol) core.coreMouseService.activeProtocol = mouseProtocol;
+  };
+
+  const render = (frame: TerminalScreenFrame) => {
     const old = core._bufferService.buffers.active;
     const previousTop = old.ydisp;
     const wasAtBottom = previousTop === old.ybase;
@@ -89,9 +103,6 @@ export function terminalScreenView(terminal: Terminal) {
     core._bufferService.isUserScrolling = buffer.ydisp < frame.base;
     core.coreService.isCursorHidden = frame.cursorHidden;
     core.coreService.isCursorInitialized = true;
-    Object.assign(core.coreService.decPrivateModes, frame.modes);
-    if (core.coreMouseService.activeProtocol !== frame.mouseProtocol) core.coreMouseService.activeProtocol = frame.mouseProtocol;
-    if (core.coreMouseService.activeEncoding !== frame.mouseEncoding) core.coreMouseService.activeEncoding = frame.mouseEncoding;
     terminal.options.cursorStyle = frame.cursorStyle;
     terminal.options.cursorBlink = frame.cursorBlink;
     const nextPalette = JSON.stringify([frame.theme, frame.colors]);
@@ -108,4 +119,5 @@ export function terminalScreenView(terminal: Terminal) {
     core._viewport.queueSync();
     terminal.refresh(0, terminal.rows - 1);
   };
+  return { applyInput, render };
 }
