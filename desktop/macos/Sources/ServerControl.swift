@@ -37,8 +37,10 @@ struct ServerRecord: Codable {
   }
 
   static let fileName = ".mac-server.json"
+  /// 读改写那把锁（`locked`）的文件，跟记录本身一样是 app 自己的（DataImport.appOwned）。
+  static let lockFileName = fileName + ".lock"
   static var url: URL { NaviConfig.dataURL.appendingPathComponent(fileName) }
-  private static var lockURL: URL { NaviConfig.dataURL.appendingPathComponent(fileName + ".lock") }
+  private static var lockURL: URL { NaviConfig.dataURL.appendingPathComponent(lockFileName) }
 
   let pid: Int
   let bundleVersion: String
@@ -105,13 +107,21 @@ struct ServerRecord: Codable {
     try locked { try save(record) }
   }
 
-  /// 服务记录和恢复点清单的读改写都在这把锁里（跨进程，同一进程里的几个线程也互斥）。不可重入。
-  static func locked<T>(_ body: () throws -> T) throws -> T {
+  /// 服务记录和恢复点清单的读改写都在这把锁里（跨进程，同一进程里的几个线程也互斥）。不可重入。锁里的活
+  /// 都很短（最长是切一次 current），等满 `timeout` 还拿不到就是持有者卡住了：抛错，不跟着它一起卡。
+  static func locked<T>(timeout: TimeInterval = 15, _ body: () throws -> T) throws -> T {
     let fd = open(lockURL.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
     guard fd >= 0 else { throw SQLiteFile.Failure("打不开服务记录锁（\(String(cString: strerror(errno)))）") }
     defer { close(fd) }
-    while flock(fd, LOCK_EX) != 0 {
-      guard errno == EINTR else { throw SQLiteFile.Failure("拿不到服务记录锁（\(String(cString: strerror(errno)))）") }
+    let deadline = Date().addingTimeInterval(timeout)
+    while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+      guard errno == EWOULDBLOCK || errno == EINTR else {
+        throw SQLiteFile.Failure("拿不到服务记录锁（\(String(cString: strerror(errno)))）")
+      }
+      guard Date() < deadline else {
+        throw SQLiteFile.Failure("服务记录锁（\(lockURL.path)）被另一处占着 \(Int(timeout)) 秒没放，这一次没记账。")
+      }
+      Thread.sleep(forTimeInterval: 0.05)
     }
     return try body()
   }

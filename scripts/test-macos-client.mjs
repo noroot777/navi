@@ -455,6 +455,7 @@ console.log(JSON.stringify({held:{tasks:2,schedules:1},relocated:3}));`);
   writeFileSync(join(source, `${OLD_DB}.identity.json`), '{"who":"source"}');
   writeFileSync(join(source, `${OLD_DB}.ash-online.123.json`), "{}");
   writeFileSync(join(source, ".mac-maintenance.json"), JSON.stringify({ pid: process.pid, note: "源那边在装更新", since: 0 }));
+  writeFileSync(join(source, ".mac-server.json.lock"), "the source app's record lock");
   // 源库开着、WAL 模式、最后几笔还在 WAL 里没落进主文件 —— 跟正在跑的那份 server 一样。
   const live = new DatabaseSync(join(source, OLD_DB));
   live.exec("pragma journal_mode = wal; pragma wal_autocheckpoint = 0;");
@@ -534,8 +535,11 @@ console.log(JSON.stringify({held:{tasks:2,schedules:1},relocated:3}));`);
   const dead = spawnSync(process.execPath, ["-e", "console.log(process.pid)"], { encoding: "utf8" });
   const abandoned = join(data, `.import-staging-${dead.stdout.trim()}-old`);
   mkdirSync(abandoned);
+  // 第一次全新开始没起来（库还没建）留下的服务记录锁：app 自己的东西，不挡导入。
+  writeFileSync(join(data, ".mac-server.json.lock"), "");
   result = await launch(binary, ["import", source], env).done;
   assert.equal(result.status, 0, result.output);
+  assert.equal(readFileSync(join(data, ".mac-server.json.lock"), "utf8"), "", "the app's own record lock stays, the source's is not carried over");
   assert.match(result.output, /held=schedules:1,tasks:2 relocated=3 skipped=1/, "what the import held and skipped is reported");
   assert.equal(readFileSync(join(data, "runs", "task-1", "transcript.jsonl"), "utf8"), "line\n");
   assert.ok(lstatSync(join(data, "runs", "task-1", "latest")).isSymbolicLink(), "a symlink is copied as a link");
