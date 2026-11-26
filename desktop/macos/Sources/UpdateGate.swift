@@ -145,7 +145,12 @@ final class UpdateGate {
     }
     switch phase {
     case .prepared: reply(true); return
-    case .preparing: quitReplies.append(reply); return
+    case .preparing:
+      quitReplies.append(reply)
+      // 这一下放行要是没成、退回等待（见 settle 的 .widened），走的还是退出确认那一套：取消回到等待、等完照样退。
+      self.whenDrained = whenDrained
+      resumeWaitingOnCancel = preparedFromWaiting
+      return
     default: break
     }
     if purpose == nil || RuntimeStore.destination != nil { purpose = .update(version: version) }
@@ -296,6 +301,12 @@ final class UpdateGate {
 
   /// 只有**确认**没人会被打断才自己放行；确认不了（服务一时没答复、答的不像 navi……）就接着等。
   private func startWaiting() {
+    // 转入长期等待之前，排着的退出请求必须有个答复（AppKit 在等 reply(toApplicationShouldTerminate:)，不答就一直卡在
+    // 退出中）：这次不退，排空后的退出意图另存成回调，等完照样退。
+    if !quitReplies.isEmpty {
+      if proceeds.isEmpty, let whenDrained { proceeds.append(whenDrained) }
+      answerQuit(false)
+    }
     phase = .waiting
     log(preservingRuntime ? "旧服务继续运行，每 \(Int(pollInterval)) 秒检查安全接管窗口"
       : "等会被打断的任务跑完，每 \(Int(pollInterval)) 秒再问一次")
@@ -513,7 +524,8 @@ final class UpdateGate {
       releaseHold()
       // 用户已经选了「等」：冻结之下仍有会被打断的（多半是即时评估看不到的那几个）就放开冻结接着等，不再弹同一个框；
       // 他从菜单主动重试时才重新问。
-      if preparedFromWaiting {
+      // 复核在途时用户要退出：不默默接着等，走退出确认（列出名单，等 / 现在 / 取消）。
+      if preparedFromWaiting && quitReplies.isEmpty {
         frozenWidenings += 1
         log("冻结之下仍有会被打断的任务，接着等")
         startWaiting()

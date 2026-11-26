@@ -318,14 +318,16 @@ export async function takeDown({ port, lockFile, log, force, wait, waitTimeout, 
     await letGo();
     if (wait) {
       // 普通判据看不到它们(只在冻结快照里),排空那一步会立刻放行:隔一会儿再冻,别空转着反复冻结整份服务。
+      // 隔的这一会儿也耗同一份上限:睡到截止就不再冻,不在超时之后又冻一次、碰巧空了就停下去。
+      if (!retried) say(`  ⏳ WAIT:冻结之下还有 ${held.length} 个会被挡下(正在起跑或正在操作工作区),过一会儿再试…`);
+      retried = true;
+      const left = deadline === null ? 5000 : deadline - Date.now();
+      if (left > 0) await sleep(Math.min(5000, left));
       if (deadline !== null && Date.now() >= deadline) {
         say(`  ✕ WAIT 超时(${waitTimeout}s),冻结之下仍有 ${held.length} 个会被挡下 —— 已中止,${gate.tail}`);
         for (const t of held.slice(0, 8)) say(`     · ${t.title}${t.reason ? ` —— ${t.reason}` : ""}`);
         return abort(3);
       }
-      if (!retried) say(`  ⏳ WAIT:冻结之下还有 ${held.length} 个会被挡下(正在起跑或正在操作工作区),过一会儿再试…`);
-      retried = true;
-      await sleep(5000);
     }
   }
   const safe = countOf(data, "survives");

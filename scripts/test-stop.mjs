@@ -157,9 +157,12 @@ await withTestResources(async () => {
   // --wait:冻结之下才看得到的(即时判据一直是空的)放开再等,隔一会儿再冻;等待上限管整次操作,不是每轮从头算。
   const sticky = await fakeServer("freeze-sticky", EMPTY, "widen");
   await withTestResources(async () => {
-    const out = await stop(["--wait"], 3, { WAIT_TIMEOUT: "1" });
-    assert.match(out, /WAIT 超时\(1s\),冻结之下仍有 1 个会被挡下[\s\S]*冻结时才看到的任务/, out);
-    assert.equal(sticky.freezeCalls(), "acquire,release,acquire,release", `每轮都放掉冻结、隔一会儿才再冻\n${out}`);
+    const started = Date.now();
+    const out = await stop(["--wait"], 3, { WAIT_TIMEOUT: "6" });
+    const took = Date.now() - started;
+    assert.match(out, /WAIT 超时\(6s\),冻结之下仍有 1 个会被挡下[\s\S]*冻结时才看到的任务/, out);
+    assert.equal(sticky.freezeCalls(), "acquire,release,acquire,release", `每轮都放掉冻结、隔一会儿才再冻,到了截止不再冻\n${out}`);
+    assert.ok(took < 9000, `等待上限 6s,却跑了 ${took}ms\n${out}`);
     assert.ok(isPidAlive(sticky.pid), out);
   }, [() => sticky.fixture.dispose()]);
   const clean = await fakeServer("freeze-clean", EMPTY, "clean");

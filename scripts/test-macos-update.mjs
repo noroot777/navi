@@ -97,6 +97,11 @@ async function startFake({ dataDir = data, stubborn = false } = {}) {
             if (mode === 'grow') impact.mcpDisrupted = [{ id: 'mid', title: '冻结之后拉起 MCP 的任务', pid: 9 }];
             return res.end(JSON.stringify({ protocol: 1, valid: true, expiresInMs: 30000, impact }));
           }
+          // 冻结那一下答得慢（快照要等还在起跑的落定）：复核在途时用户可能要退出。
+          if (mode === 'widen-slow') {
+            impact.interrupted = [{ id: 'late', title: '冻结时才看到的任务', reason: '正在起跑' }];
+            return setTimeout(() => res.end(JSON.stringify({ protocol: 1, lease: 'lease', instance: id, pid: process.pid, revision: 1, expiresInMs: 30000, impact })), 600);
+          }
           if (mode === 'busy') { res.statusCode = 409; return res.end(JSON.stringify({ protocol: 1, error: '正在切换新版服务' })); }
           res.end(JSON.stringify({ protocol: 1, lease: 'lease', instance: id, pid: process.pid, revision: 1, expiresInMs: 30000, impact }));
         });
@@ -278,8 +283,20 @@ try {
   assert.equal(freezeCalls(), "acquire,renew", result.out);
   await delay(100);
   assert.equal(alive(fake), false);
+
+  // 等待中复核在途时用户要退出：复核退回等待也得答复这次退出 —— 走退出确认（带取消），取消就回到等待，不卡在退出中。
+  setImpact({ ...clear, restartFreeze: 1 });
+  setFreeze("widen-slow");
+  fake = await startFake();
+  result = await drive(["quit-rechecking", "15"], { answers: "wait,cancel" });
+  assert.equal(result.status, 0, result.out);
+  assert.match(result.out, /QUIT phase=preparing[\s\S]*ASK .*退出 Navi 时 Sparkle.*冻结时才看到的任务.*\| 等它们跑完再装,现在装,取消[\s\S]*REPLY false[\s\S]*PHASE waiting/, result.out);
+  assert.equal((result.out.match(/^ASK /gm) ?? []).length, 2, result.out);
+  assert.equal(alive(fake), true);
+  fake.kill("SIGKILL");
+  await once(fake, "exit");
   rmSync(freezeFile);
-  console.log("PASS: restart freeze: stops on the frozen snapshot after renewing; a longer list is asked again, or keeps waiting once 'wait' was chosen; a held freeze, an abandon during renewal or an undetermined capability stops nothing");
+  console.log("PASS: restart freeze: stops on the frozen snapshot after renewing; a longer list is asked again, or keeps waiting once 'wait' was chosen; a quit during a re-check is answered; a held freeze, an abandon during renewal or an undetermined capability stops nothing");
 
   // ── 问不出来 = 当成会打断 ──
   setImpact("refuse");

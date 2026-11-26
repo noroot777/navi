@@ -98,6 +98,18 @@ case "abandon-renewing":
   emit("PHASE \(gate.phase) PENDING \(gate.hasPending)")
   exit(proceeded ? 1 : 0)
 
+case "quit-rechecking":
+  // 选了「等」之后轮询放行、冻结复核还在路上时用户要退出：复核退回等待也必须答复这次退出。
+  var reply: Bool?
+  gate.request(.update(version: "9.9")) { emit("PROCEED") }
+  _ = runUntil(Double(args[2])!) { gate.phase == .waiting }
+  _ = runUntil(Double(args[2])!) { gate.phase == .preparing }
+  emit("QUIT phase=\(gate.phase)")
+  gate.requestForQuit(version: "9.9", whenDrained: { emit("DRAINED") }) { reply = $0; emit("REPLY \($0)") }
+  _ = runUntil(Double(args[2])!) { reply != nil }
+  emit("PHASE \(gate.phase)")
+  exit(reply == false ? 0 : 1)
+
 case "stop":
   // ServerShutdown 只停评估过的那一份：stop <ours:pid | absent | consented>
   let spec = args[2]
