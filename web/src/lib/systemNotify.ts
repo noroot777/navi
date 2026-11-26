@@ -2,25 +2,34 @@
 // 这里只管弹出来、点了回到那个任务。
 //
 // 弹到哪儿：
-//   · mac app：交给原生（desktop/macos/Sources/SystemNotifications.swift）—— WKWebView 里没有网页通知。默认开着。
+//   · mac app、Windows app：交给壳（desktop/macos/Sources/SystemNotifications.swift、desktop/windows/shell/src/notify.rs）。
+//     mac 的 WKWebView 里没有网页通知；Windows 的 WebView2 有，但弹出来署名是 WebView2、点了回不到任务。默认开着。
 //   · 浏览器：网页通知（Notification），要这台设备上自己打开过、浏览器也给了权限。只在 https 或本机地址下有。
 // 开关记在这台设备上（权限本来就是按设备给的），设置页「通知」那一块改它。
 //
 // 正对着看的那个任务不弹：窗口在前台、地址栏就是它，弹了只是噪音。几个页面各收到一份时靠 key 合成一条
-// （浏览器按 tag、mac 按通知 id 替换）。
+// （浏览器和 Windows 按 tag、mac 按通知 id 替换）。
 import type { ServerEvent } from "@navi/shared";
 import { subscribeEvents } from "./events.ts";
 import { safeStorage } from "./safeStorage.ts";
 
 type Notice = Extract<ServerEvent, { type: "task.notify" }>;
 interface NativeMessage { title: string; subtitle: string; body: string; key: string; project: string | null; task: string | null }
-type NativeWindow = Window & { webkit?: { messageHandlers?: { naviNotify?: { postMessage: (message: NativeMessage) => void } } } };
+type NativeWindow = Window & {
+  /** mac 壳的入口（WKScriptMessageHandler）。 */
+  webkit?: { messageHandlers?: { naviNotify?: { postMessage: (message: NativeMessage) => void } } };
+  /** Windows 壳的入口（壳在每份文档开头注入，desktop/windows/shell/src/window.rs PAGE_SCRIPT）。 */
+  __naviNotify?: (message: NativeMessage) => void;
+};
 
 const PREF_KEY = "navi:system-notify";
 const listeners = new Set<() => void>();
 
-function nativeBridge() {
-  return (window as NativeWindow).webkit?.messageHandlers?.naviNotify ?? null;
+function nativeBridge(): ((message: NativeMessage) => void) | null {
+  const shell = window as NativeWindow;
+  const mac = shell.webkit?.messageHandlers?.naviNotify;
+  if (mac) return (message) => mac.postMessage(message);
+  return typeof shell.__naviNotify === "function" ? shell.__naviNotify : null;
 }
 
 export type NotifyChannel = "native" | "browser" | "none";
@@ -76,7 +85,7 @@ export function openNoticeTarget(projectId: string | null, taskId: string | null
 function show(notice: Notice): void {
   const bridge = nativeBridge();
   if (bridge) {
-    bridge.postMessage({
+    bridge({
       title: notice.title, subtitle: notice.subtitle, body: notice.body, key: notice.key,
       project: notice.projectId, task: notice.taskId,
     });

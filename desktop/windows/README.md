@@ -75,10 +75,11 @@ node desktop/windows/scripts/make-icon.mjs   # 标改了才要：在 mac 上重�
 | DeepLink | `launcher/deep-link.mjs`（规则一字不差） |
 | LoginService | `launcher/login-item.mjs` |
 | RemoteAccessSwitch | `controller.mjs` 的 toggleRemote + `launcher/restart.mjs`（停服务复用 `scripts/platform.mjs`） |
+| SystemNotifications | `shell/src/notify.rs`（页面经 `page_notify` 交来，WinRT toast；来源是安装包给开始菜单快捷方式登记的 AppUserModelID，便携版没有快捷方式、弹不出来；点了当成一条 navi:// 链接交给控制器） |
 | Updater（Sparkle） | `launcher/updates.mjs`（什么时候查、问不问）+ `shell/src/update.rs`（tauri-plugin-updater） |
 | UpdateGate 的换服务 | `launcher/handover.mjs`、`launcher/db-backup.mjs` |
 
-本地那一屏（`http://tauri.localhost/`）和页面（`http://127.0.0.1:<窗口端口>`）是同一个 WebView 里的两份文档：盖一屏就是导航回本地页，所以撤页是真的撤——页面连同它的轮询、SSE 一起没了。本地页拿得到 `shell_screen` / `shell_action`；页面只在载它的时候按窗口端口现加一份能力，只许调 `page_report`（报尺寸、报脚本没载进来）。cookie `navi_instance` 由壳在导航前写上，UA 末尾留 `NaviWin/<版本>`（web 的首启向导据此知道数据那一站已经在壳里走过了）。
+本地那一屏（`http://tauri.localhost/`）和页面（`http://127.0.0.1:<窗口端口>`）是同一个 WebView 里的两份文档：盖一屏就是导航回本地页，所以撤页是真的撤——页面连同它的轮询、SSE 一起没了。本地页拿得到 `shell_screen` / `shell_action`；页面只在载它的时候按窗口端口现加一份能力，只许调 `page_report`（报尺寸、报脚本没载进来）和 `page_notify`（弹系统通知）。cookie `navi_instance` 由壳在导航前写上，UA 末尾留 `NaviWin/<版本>`（web 的首启向导据此知道数据那一站已经在壳里走过了）。
 
 ### 服务怎么起
 

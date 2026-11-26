@@ -7,6 +7,7 @@
 
 mod controller;
 mod health;
+mod notify;
 mod paths;
 #[cfg(windows)]
 mod spawn;
@@ -47,7 +48,7 @@ fn main() {
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_updater::Builder::new().build())
     .manage(shell.clone())
-    .invoke_handler(tauri::generate_handler![window::shell_screen, window::shell_action, window::page_report])
+    .invoke_handler(tauri::generate_handler![window::shell_screen, window::shell_action, window::page_report, window::page_notify])
     .setup(move |app| {
       let handle = app.handle().clone();
       window::create(&handle, &shell)?;
