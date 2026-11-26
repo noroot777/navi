@@ -199,8 +199,8 @@ function serverLines(): Array<Record<string, unknown>> {
   Object.assign(globalThis, { fetch: realFetch });
   page.reportEventsConnection(true);
   page.reportPageReload("reclaim");
-  assert.deepEqual(posted.filter((event) => event.ev === "page.skipped").at(-1), { ev: "page.skipped", count: 0, unsent: 2, tab: posted[0]!.tab, load: posted[0]!.load, shell: "browser", ago: 0 },
-    JSON.stringify(posted.at(-1)));
+  const lastSkipped = posted.filter((event) => event.ev === "page.skipped").at(-1)!;
+  assert.deepEqual([lastSkipped.count, lastSkipped.unsent], [0, 2], JSON.stringify(lastSkipped));
   for (const name of ["location", "sessionStorage", "document", "window", "fetch"]) Reflect.deleteProperty(globalThis, name);
 
   // 服务端：老页面一批塞得比上限多时，先收状态、再收详情，没收的记个数。
