@@ -70,6 +70,11 @@ export function previousResidualLockPublic(): PublicExitSummary | null {
   return publicExitSummary(previousResidualRecord);
 }
 
+/** 留下残留锁的那一轮的 runId（锁 token 的短哈希）。运行日志拿它把「这次启动」和「上一轮怎么没的」按身份对上。 */
+export function previousResidualRunId(): string | null {
+  return previousResidualRecord?.runId ?? null;
+}
+
 export class SingletonConflictError extends Error {
   constructor(
     public readonly dbFile: string,

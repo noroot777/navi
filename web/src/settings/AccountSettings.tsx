@@ -5,6 +5,7 @@ import { KeyReveal } from "../auth/KeyReveal.tsx";
 import { authApi, userApi } from "../lib/authApi.ts";
 import { Button, TextInput } from "../components/ui.tsx";
 import { ConfirmDialog } from "../task-detail/ConfirmDialog.tsx";
+import { reportPageReload } from "../lib/runtimeLog.ts";
 
 // 「我的账号」——设置页里唯一一节**只关于自己**的东西(§三/§五/§八 个人面)。
 //
@@ -163,6 +164,7 @@ export function AccountSettings({ notify }: { notify: (message: string) => void 
               onClick={async () => {
                 try {
                   await authApi.logout();
+                  reportPageReload("account");
                   window.location.reload();
                 } catch (error) {
                   notify(error instanceof Error ? error.message : "登出失败");

@@ -7,6 +7,7 @@ import { QrCode } from "../components/QrCode.tsx";
 import { authApi } from "../lib/authApi.ts";
 import { PAIR_REQUESTS_CHANGED_EVENT, isLoopbackPage, pairLink, seenLabel } from "../lib/pairing.ts";
 import { ConfirmDialog } from "../task-detail/ConfirmDialog.tsx";
+import { reportPageReload } from "../lib/runtimeLog.ts";
 
 const POLL_MS = 3_000;
 
@@ -242,6 +243,7 @@ export function RemoteAccessCard({ notify }: { notify: (message: string) => void
           onConfirm={() => void act(async () => {
             if (confirming.current) {
               await authApi.logout();
+              reportPageReload("remote-access");
               window.location.reload();
               return;
             }

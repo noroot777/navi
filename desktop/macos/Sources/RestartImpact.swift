@@ -144,7 +144,7 @@ enum RestartImpactProbe {
     switch NaviHealth.probeSync() {
     case .down:
       return .clear(.absent)
-    case .unreachable(let why):
+    case .unreachable(let why, _):
       return .unknown("服务没有答复：\(why)")
     case .notNavi(let what):
       // 自己那份正忙、正在重启时也会这样（比如一次 503），不能当成「端口上不是 navi」。

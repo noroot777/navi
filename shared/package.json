@@ -317,6 +317,10 @@
     "./timeline-notice": {
       "types": "./src/timeline-notice.ts",
       "default": "./src/timeline-notice.ts"
+    },
+    "./runtime-log": {
+      "types": "./src/runtime-log.ts",
+      "default": "./src/runtime-log.ts"
     }
   },
   "scripts": {

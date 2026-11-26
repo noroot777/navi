@@ -36,7 +36,7 @@ const fakes = new Set();
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 
 const build = spawnSync("swiftc", ["-swift-version", "5",
-  ...["BundleRuntimeUse", "NaviConfig", "NaviHealth", "DataImport", "DatabaseBackup", "LegacyIdentity", "LoginService", "RestartImpact", "ServerControl", "ServerLauncher", "ServerStartLock", "UpdateGate", "RuntimeRecovery"]
+  ...["BundleRuntimeUse", "NaviConfig", "NaviHealth", "RuntimeLog", "DataImport", "DatabaseBackup", "LegacyIdentity", "LoginService", "RestartImpact", "ServerControl", "ServerLauncher", "ServerStartLock", "UpdateGate", "RuntimeRecovery"]
     .map((name) => join(mac, `Sources/${name}.swift`)),
   join(mac, "Tests/Update/main.swift"), "-o", binary], { encoding: "utf8" });
 assert.equal(build.status, 0, build.stderr);

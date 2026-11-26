@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ServerEvent } from "@navi/shared";
+import { reportEventsConnection } from "./runtimeLog.ts";
 
 type EventListener = (event: ServerEvent) => void;
 type ConnectionListener = (connected: boolean) => void;
@@ -11,6 +12,7 @@ let connected = false;
 
 function publishConnection(next: boolean) {
   connected = next;
+  reportEventsConnection(next);
   for (const listener of connectionListeners) listener(next);
 }
 

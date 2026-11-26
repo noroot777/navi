@@ -3,6 +3,7 @@ import { LockOpen } from "@phosphor-icons/react";
 import { api } from "../lib/api.ts";
 import type { HumanApprovalChallenge, HumanApprovalProof } from "../lib/taskNoticeApi.ts";
 import { AutoTextarea } from "../components/AutoTextarea.tsx";
+import { reportPageReload } from "../lib/runtimeLog.ts";
 
 // 「放开回合占位」那个开关。
 //
@@ -110,7 +111,7 @@ export function ReclaimTurnSwitch({ taskId, onDone }: { taskId: string; onDone?:
         <p className="task-turn-remedy__result" role="status">
           {result}
           {needsReload && (
-            <button type="button" onClick={() => location.reload()}>重新加载页面</button>
+            <button type="button" onClick={() => { reportPageReload("reclaim"); location.reload(); }}>重新加载页面</button>
           )}
         </p>
       )}

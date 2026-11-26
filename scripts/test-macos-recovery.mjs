@@ -196,7 +196,7 @@ server.listen(0,'127.0.0.1',()=>writeFileSync(${JSON.stringify(ready)},JSON.stri
 
   await withTestResources(async () => {
     await runTestProcess("swiftc", ["-swift-version", "5",
-      ...["NaviConfig", "NaviHealth", "DatabaseBackup", "LegacyIdentity", "LoginService", "RestartImpact",
+      ...["NaviConfig", "NaviHealth", "RuntimeLog", "DatabaseBackup", "LegacyIdentity", "LoginService", "RestartImpact",
         "BundleRuntimeUse", "RuntimeRecovery", "ServerControl", "ServerLauncher", "ServerStartLock", "UpdateGate"].map((name) => join(mac, `Sources/${name}.swift`)),
       join(mac, "Tests/Recovery/main.swift"), "-o", binary], { cwd: root });
 
