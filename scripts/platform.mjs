@@ -380,32 +380,40 @@ export function localJson(port, path, timeoutMs = 2000, headers = undefined) {
  * 这类),由 `isNotListening` 判。
  */
 export function localGet(port, path, timeoutMs = 2000, headers = undefined) {
+  return localRequest(port, path, { timeoutMs, headers });
+}
+
+/**
+ * `localGet` 的通用版：能带方法和 JSON 正文（重启前冻结那条 POST，见 scripts/restart-freeze.mjs）。
+ * 读数口径不变：`json` 只在 2xx 时有；另给一个 `data` —— 不论状态码都按 JSON 解出来的正文，
+ * 拒绝的时候服务端说了什么原因靠它（解不出就是 null）。
+ */
+export function localRequest(port, path, { method = "GET", body = undefined, timeoutMs = 2000, headers = undefined } = {}) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (value) => { if (!settled) { settled = true; resolve(value); } };
     let timedOut = false;
+    const payload = body === undefined ? null : JSON.stringify(body);
+    const allHeaders = { ...(headers ?? {}), ...(payload === null ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(payload) }) };
     const req = request(
-      { host: "127.0.0.1", port, path, timeout: timeoutMs, agent: DIRECT_AGENT, ...(headers ? { headers } : {}) },
+      { host: "127.0.0.1", port, path, method, timeout: timeoutMs, agent: DIRECT_AGENT, headers: allHeaders },
       (res) => {
-        let body = "";
+        let text = "";
         res.setEncoding("utf8");
-        res.on("data", (chunk) => { body += chunk; });
+        res.on("data", (chunk) => { text += chunk; });
         res.on("end", () => {
           const status = res.statusCode ?? null;
-          if (!status || status >= 300) return done({ status, json: null, error: null });
-          try {
-            done({ status, json: JSON.parse(body), error: null });
-          } catch {
-            done({ status, json: null, error: null });
-          }
+          let data = null;
+          try { data = JSON.parse(text); } catch { /* 不是 JSON */ }
+          done({ status, json: status && status < 300 ? data : null, data, error: null });
         });
       },
     );
     req.on("timeout", () => { timedOut = true; req.destroy(); });
-    req.on("error", (e) => done({ status: null, json: null, error: timedOut ? "timeout" : (e?.code ?? "error") }));
+    req.on("error", (e) => done({ status: null, json: null, data: null, error: timedOut ? "timeout" : (e?.code ?? "error") }));
     // `req.destroy()` 不保证 emit error(跨 Node 版本不一致),少这一条超时就可能永不 resolve。
-    req.on("close", () => done({ status: null, json: null, error: timedOut ? "timeout" : "closed" }));
-    req.end();
+    req.on("close", () => done({ status: null, json: null, data: null, error: timedOut ? "timeout" : "closed" }));
+    req.end(payload ?? undefined);
   });
 }
 

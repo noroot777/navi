@@ -15,6 +15,7 @@ import { appendTaskTimeline, receiptLine, type TimelineLine, noticeLine } from "
 import { REPORTED_ACCEPTANCE_PREFIX } from "./review-acceptance.js";
 import { id, now } from "./util.js";
 import { NAVI_HEADERS, requestHeader } from "./request-headers.js";
+import { markRequestEffect, type RequestEffect } from "./request-receipts.js";
 
 export async function setTaskStage(
   taskId: string,
@@ -50,6 +51,9 @@ export async function reportTaskStage(taskId: string, stage: TaskStage, opts: {
   bySessionRecovery?: boolean;
   sourceTaskId?: string;
   expectedSourceTask?: ConclusionTask;
+  /** 这次调用的请求号与答复（request-receipts.ts）：跟阶段那一笔在同一个事务里落库。答复里的时间线一项只能
+   *  先写 false —— 时间线排在提交之后，提交时还不知道它写不写得下；正常答完会被真实答复盖掉。 */
+  effect?: (updatedAt: string) => RequestEffect;
 } = {}): Promise<{ updatedAt: string; timelineRecorded: boolean }> {
   const task = opts.expectedTask ?? (await db.select().from(tasks).where(eq(tasks.id, taskId)))[0];
   const source = opts.expectedSourceTask ?? (opts.sourceTaskId && opts.sourceTaskId !== taskId
@@ -79,6 +83,8 @@ export async function reportTaskStage(taskId: string, stage: TaskStage, opts: {
     // 带上自报的记号：之后真去验收合并的那一次另领身份。
     const acceptanceId = stage === "merged" || stage === "accepted" ? { acceptanceId: `${REPORTED_ACCEPTANCE_PREFIX}${id()}` } : {};
     await transaction.update(tasks).set({ stage, ...acceptanceId, updatedAt }).where(eq(tasks.id, taskId));
+    const effect = opts.effect?.(updatedAt);
+    if (effect) await markRequestEffect(transaction, effect.request, effect.answer);
   });
   bus.publish({ type: "task.stage", taskId, stage, updatedAt });
   const timelineRecorded = await appendTaskTimeline(taskId, noticeLine({ kind: "stage", stage }, `验收阶段更新：${STAGE_LABELS[stage]}（${stage}）`));
@@ -301,10 +307,14 @@ export function mountTaskStageRoutes(api: Hono): void {
       }, 409);
     }
 
+    // 请求号：执行到一半被停掉、带同一个请求号重试时，提交过的那一笔凭同一个事务里记下的答复回放
+    // （request-receipts.ts）；没提交就照常再走一遍。
+    const request = requestHeader(c, NAVI_HEADERS.requestId);
     try {
       const { reportFreeReviewConclusion } = await import("./free-workflow.js");
       const freeReview = await reportFreeReviewConclusion(taskId, body.stage, {
         expectedTask: task, recurs: body.recurs,
+        effect: (freeReview) => ({ request, answer: { reported: true, taskId, stage: body.stage, freeReview, timelineRecorded: false } }),
       });
       if (freeReview) {
         return c.json({ reported: true, taskId, stage: body.stage, freeReview, timelineRecorded: false });
@@ -330,7 +340,8 @@ export function mountTaskStageRoutes(api: Hono): void {
 
     let result;
     try {
-      result = await reportTaskStage(taskId, body.stage, { expectedTask: task, sourceTaskId, expectedSourceTask: source });
+      result = await reportTaskStage(taskId, body.stage, { expectedTask: task, sourceTaskId, expectedSourceTask: source,
+        effect: (updatedAt) => ({ request, answer: { reported: true, taskId, stage: body.stage, updatedAt, timelineRecorded: false } }) });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 409);
     }

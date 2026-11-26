@@ -318,17 +318,21 @@ api.post("/tasks/:id/pause", async (c) => {
   // 托盘里已经有本来会把这一轮叫醒的哨兵结果 ⇒ 不暂停、不记检查点,当场交出去(monitor-turn-handoff.ts)。
   // 只交给带得回回执号的调用方(`monitorAck`,navi 的 MCP;带不回就永远算没送到,见 monitor-turn-ack.ts);
   // 这一次带回来的回执号先确认。
+  // 请求号:这一次调用执行到一半被停掉、重试过来时(request-receipts.ts),交过的那一批凭它交回同一份,
+  // 写过的检查点凭同一个事务里记下的答复回放 —— 两样都不会做第二遍。
+  const request = requestHeader(c, NAVI_HEADERS.requestId);
   const handed = await handMonitorResultsOnPause(taskId, r.activeTurnToken, identity,
-    { receipts: receiptHands(b.monitorReceipt), take: b.monitorAck === true });
+    { receipts: receiptHands(b.monitorReceipt), take: b.monitorAck === true, request });
   if (handed) {
     return c.json({
       paused: false, note: pauseHandedNote(handed.hand), monitorResults: handed.text,
       monitorResultsHanded: handed.count, monitorResultsReceipt: handed.hand,
     });
   }
-  const occupied = await occupyResumePrompt(taskId, rp, false, identity);
+  const answer = { paused: true, willSettleAs: "paused" };
+  const occupied = await occupyResumePrompt(taskId, rp, false, identity, { request, answer });
   if (!occupied) return c.json({ error: "当前回合已经结束或已被引导，检查点未写入" }, 409);
-  return c.json({ paused: true, willSettleAs: "paused" });
+  return c.json(answer);
 });
 
 // 完成确认(严格 done 协议,对称 /pause):agent 当且仅当确定任务目标已达成时
@@ -378,7 +382,9 @@ api.post("/tasks/:id/complete", async (c) => {
     staleError: "当前回合已经结束或已被引导，完成确认未写入",
     // 同 /pause:只交给带得回回执号的调用方;这一次带回来的回执号先确认。
     receipts: { token: r.activeTurnToken, hands: receiptHands(completeBody.monitorReceipt) },
-    ...(completeBody.monitorAck === true ? { handOver: { token: r.activeTurnToken } } : {}),
+    // 请求号:同一次调用早先领走过一批、答复没写出去就被停掉时,重试凭它交回同一份(request-receipts.ts)。
+    ...(completeBody.monitorAck === true
+      ? { handOver: { token: r.activeTurnToken, request: requestHeader(c, NAVI_HEADERS.requestId) } } : {}),
   });
   if (!confirm.ok) {
     const h = confirm.handed;

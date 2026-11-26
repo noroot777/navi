@@ -8,6 +8,9 @@ import { liveMaintenanceHolderForAny, maintenanceLockFileFor } from "./maintenan
 import { resourceKeysFor, withResourceClaim } from "./resource-claim.js";
 import { type NaviPresenceRegistration, registerNaviPresence } from "./navi-presence.js";
 import { RUNS_DIR } from "./paths.js";
+import { drainShutdownCleanups, SHUTDOWN_DRAIN_MS, shutdownDrainPending } from "./shutdown-resources.js";
+import { describeInFlight, inFlightRequests, waitInFlightRequests } from "./inflight-requests.js";
+import { beginServiceShutdown } from "./runtime-handover-state.js";
 import { IS_WINDOWS, killPidsCommand } from "./platform.js";
 import type { ProcessInfo } from "./proc.js";
 import {
@@ -284,12 +287,12 @@ function installPresenceCleanup(dbFile: string, registration: NaviPresenceRegist
   const startedAtMs = Date.now() - Math.round(process.uptime() * 1000);
   process.once("exit", () => registration.release());
   for (const signal of EXIT_SIGNALS) {
-    process.once(signal, () => {
+    process.once(signal, () => void drainBeforeExit().then(() => {
       registration.release();
       console.warn(`[navi] 收到 ${signal}，退出（运行 ${humanDuration(Date.now() - startedAtMs)}，`
         + `NAVI_ALLOW_MULTI 实例无单例锁，在线登记已撤销；库 ${dbFile}）`);
       process.exit(SIGNAL_EXIT_CODE[signal] ?? 143);
-    });
+    }));
   }
 }
 
@@ -562,7 +565,7 @@ function installCleanup(lock: SingletonLock, presence: NaviPresenceRegistration 
     lock.release();
   });
   for (const signal of EXIT_SIGNALS) {
-    process.once(signal, () => {
+    process.once(signal, () => void drainBeforeExit().then(() => {
       const uptimeMs = Date.now() - startedAtMs;
       note({ at: new Date().toISOString(), pid: process.pid, runId, kind: "signal", signal, uptimeMs });
       const outcome = lock.release();
@@ -571,8 +574,39 @@ function installCleanup(lock: SingletonLock, presence: NaviPresenceRegistration 
       // 分开,而且锁到底有没有删掉也如实说 —— 说错了会让下一个实例得出假结论。
       console.warn(`[navi] 收到 ${signal}，退出（运行 ${humanDuration(uptimeMs)}，${describeRelease(outcome)}）`);
       process.exit(SIGNAL_EXIT_CODE[signal] ?? 143);
-    });
+    }));
   }
+}
+
+/**
+ * 退出之前那一段能 await 的收尾（shutdown-resources.ts）：临时智能体的停止是异步的，进了 exit 就跑不完。
+ * 先关上接活（beginServiceShutdown：不可撤销，别处放掉或到期的重启许可都放不开它；从这一刻起新来的 /api
+ * 请求一律答「未执行」，navi MCP 会重试到新服务起来，见 runtime-handover-gate.ts），再排空（最多
+ * SHUTDOWN_DRAIN_MS）：随服务关掉的资源收尾，和已经进门的请求处理完、响应写出去 —— 交卷做到一半被退出
+ * 截断，调用方拿到的是连接重置。两样一起等。锁和在线登记照旧握着，排空完才放 —— 服务还在端口上，
+ * 别让下一个实例先起来撞上。没有要排空的就和原来一样立刻退。没收完、没处理完的如实写进日志：资源可能
+ * 还留在后台；请求带着请求号的会在新服务上按请求号续上（request-receipts.ts），其余调用方收到连接中断。
+ */
+async function drainBeforeExit(): Promise<void> {
+  beginServiceShutdown();
+  if (!shutdownDrainPending() && !inFlightRequests().length) return;
+  const cleanups = (async () => {
+    if (!shutdownDrainPending()) return;
+    try {
+      const outcome = await drainShutdownCleanups();
+      if (!outcome.done) {
+        console.warn(`[navi] 退出前收尾${outcome.why}：${outcome.kinds.join("、") || "（说不出是哪几类）"}，可能还留在后台`);
+      }
+    } catch (error) {
+      console.error("[navi] 退出前收尾失败，照常退出:", error);
+    }
+  })();
+  const requests = waitInFlightRequests(SHUTDOWN_DRAIN_MS).then((outcome) => {
+    if (outcome.done) return;
+    console.warn(`[navi] 退出前还有 ${outcome.left.length} 个请求超过 ${Math.round(SHUTDOWN_DRAIN_MS / 1000)} 秒没处理完，`
+      + `随服务一起断开：${describeInFlight(outcome.left)}。带请求号的 Navi MCP 调用会在新服务上按请求号续上，其余调用方收到连接中断`);
+  });
+  await Promise.all([cleanups, requests]);
 }
 
 function formatConflictMessage(

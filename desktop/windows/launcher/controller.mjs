@@ -19,7 +19,7 @@ import { createHandover } from "./handover.mjs";
 import { forgetUnfinished, noteUnfinished, readUnfinished } from "./handover-duty.mjs";
 import { isServing, mismatch, ours, probe as probeHealth } from "./health.mjs";
 import { activeHold, beginMaintenance } from "./maintenance.mjs";
-import { assessImpact, stopServer, widened } from "./restart.mjs";
+import { assessImpact, freezeImpact, releaseFreeze, renewFreeze, stopServer, widened } from "./restart.mjs";
 import { allowsOtherDevices, writeSettings } from "./settings.mjs";
 import { createUpdates } from "./updates.mjs";
 
@@ -32,7 +32,10 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
     probeMain: () => probeHealth(cfg.baseURL),
     probeWindow: () => probeHealth(cfg.windowURL),
     assess: () => assessImpact(cfg),
-    stop: (target) => stopServer(cfg, target),
+    freeze: () => freezeImpact(cfg, { assess: () => deps.assess() }),
+    renew: renewFreeze,
+    release: releaseFreeze,
+    stop: (target, options) => stopServer(cfg, target, options),
     ...overrides,
   };
   const t = { guard: 1_000, poll: 2_000, starting: 400, present: PRESENT_TIMEOUT_MS, holdRetry: 2_000, ...timing };
@@ -463,9 +466,11 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
   // 只停评估过的那一份，**确认停下之后、松开维护锁之前**才把新设置落盘，再按它起。中途在哪一步退出，留下的设置和
   // 服务都对得上；没停成就什么都不改。
   //
-  // 确认框可能开着好一阵，这期间别处又起了任务，用户点头时看到的名单就过时了。所以攥住维护锁之后、停服务之前再
-  // 评估一次（widened），多出了他没同意过的影响就松锁、把新名单重新摆给他。这只把窗口从「确认框开着的那段时间」
-  // 收窄到「再评估到停下之间」那一下：服务端没有「先停止接活、再给影响快照」的关口，这一下仍然挡不住。
+  // 确认框可能开着好一阵，这期间别处又起了任务，用户点头时看到的名单就过时了。所以攥住维护锁之后、停服务之前先让
+  // 服务冻结接活、拿冻结之下的快照（freezeImpact，server/src/restart-freeze.ts），多出了他没同意过的影响（widened）
+  // 就放开冻结、松锁、把新名单重新摆给他；没多出来就凭这份快照停，下刀前续一次期确认冻结还在、此刻的名单也没多出谁
+  // （已经在跑的 agent 中途拉起 MCP 服务端冻不住，多了就不停）。冻着的时候不起新回合，所以再评估到停下之间那一下也
+  // 堵上了。老版本服务没有这道关口：退回即时再评估，确认框里如实说这一下堵不上。
   async function toggleRemote() {
     if (state.remoteBusy) return;
     const other = occupied();
@@ -485,19 +490,30 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
       let changed = null;
       try {
         const end = await beginMaintenance(cfg, "正在按新设置重启 Navi 服务…", 50_000);
+        let lease = null;
         try {
-          const now = await deps.assess();
-          if (widened(verdict, now)) changed = now;
+          const frozen = await deps.freeze();
+          if (frozen.kind === "refused") failure = `服务这会儿冻结不了接活（${frozen.why}），这次没有重启。`;
           else {
-            const stopped = await deps.stop(verdict.target ?? null);
-            if (stopped.kind === "stopped") {
-              state.served = null;
-              writeSettings(cfg, { allowOtherDevices: enable });
-            } else {
-              failure = stopped.kind === "changed" ? `评估之后端口上的服务变了（${stopped.why}），这次没有重启。` : stopped.why;
+            lease = frozen.lease ?? null;
+            if (widened(verdict, frozen.verdict)) changed = frozen.verdict;
+            else {
+              const beforeKill = lease ? () => deps.renew(lease, verdict) : undefined;
+              const stopped = await deps.stop(verdict.target ?? null, { beforeKill });
+              if (stopped.kind === "stopped") {
+                lease = null; // 服务退了，冻结跟着没了
+                state.served = null;
+                writeSettings(cfg, { allowOtherDevices: enable });
+              } else {
+                failure = stopped.kind === "changed" ? `评估之后服务变了（${stopped.why}），这次没有重启。` : stopped.why;
+              }
             }
           }
-        } finally { end(); }
+        } finally {
+          // 没停成（名单变了要重问、停不下来）：服务还在，冻结当场放开，被挡住的任务接着起。
+          if (lease) await deps.release(lease);
+          end();
+        }
       } catch (error) {
         failure = `没能让服务下线：${error.message}`;
       }
@@ -533,6 +549,9 @@ export function createController({ cfg, send, launcher, loginItem, log = () => {
       const more = verdict.items.length > shown.length ? [`…另有 ${verdict.items.length - shown.length} 个`] : [];
       lines.push(["要重启 Navi 服务才生效，现在重启会打断：", ...shown, ...more].join("\n"));
     } else lines.push(`要重启 Navi 服务才生效。确认不了重启会不会打断任务（${verdict.why}），按会打断对待。`);
+    if (verdict.target?.kind === "ours" && verdict.freezable === false) {
+      lines.push("这一版服务不支持重启前冻结：确认之后到停下之间新起的任务不在上面，也会被打断。");
+    }
     return (await ask(title, lines.join("\n\n"), [primary, "取消"])) === 0;
   }
 

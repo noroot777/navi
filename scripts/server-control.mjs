@@ -1,12 +1,13 @@
-// restart.mjs 与 stop.mjs 共用的「让 :PORT 上的 navi 下线」那半截:问判据、等排空、
-// 认准监听者下刀、等端口彻底安静。两个入口只在「下线之后做什么」上不同,安全闸必须是
+// restart.mjs、stop.mjs、upgrade.mjs 共用的「让 :PORT 上的 navi 下线」那半截:问判据、等排空、
+// 冻结接活再核一遍、认准监听者下刀、等端口彻底安静。两个入口只在「下线之后做什么」上不同,安全闸必须是
 // 同一份 —— 停止命令要是另写一套,「问不出来就当 0」那类旧错就会在新入口上重演一遍。
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readStorageEnv } from "./env.mjs";
 import { dbFileIn } from "./db-file.mjs";
 import { LEGACY_HTTP_HEADER_PREFIX, LEGACY_SINGLETON_LOCK_SUFFIX } from "./legacy-names.mjs";
-import { IS_WINDOWS, isNotListening, killServerProcesses, listenerPids, localGet, localJson, sleep } from "./platform.mjs";
+import { IS_WINDOWS, isNotListening, killServerProcesses, listenerPids, localGet, localJson, localRequest, sleep } from "./platform.mjs";
+import { RESTART_FREEZE_PATH, acquireRestartFreeze, releaseRestartFreeze, renewRestartFreeze, supportsRestartFreeze } from "./restart-freeze.mjs";
 
 const LOCK_SUFFIX = ".navi.lock";
 const HOST_TOKEN_HEADER = "x-navi-host-token";
@@ -95,6 +96,15 @@ export async function queryImpact(port, lockFile, { requireOk = false, includeSh
   return { unknown: probe.error || "unknown" };
 }
 
+/**
+ * 重启前冻结那条 POST 的传输（协议在 scripts/restart-freeze.mjs）：同一张宿主机凭证、同样直连本机。
+ * 冻结那一下服务端要先等还在起跑的回合落定再算快照，所以时限给得比问判据宽。
+ */
+export function restartFreezeSender(port, lockFile) {
+  const headers = hostTokenHeaders(lockFile, port);
+  return (body) => localRequest(port, RESTART_FREEZE_PATH, { method: "POST", body, timeoutMs: 20_000, headers });
+}
+
 export function countOf(data, field) {
   return Array.isArray(data[field]) ? data[field].length : 0;
 }
@@ -130,15 +140,17 @@ export function explainNoVerdict(data, { say, lockFile, log }) {
  * --wait 用:轮询到「不再有会被打断的任务」为止,把「人守着等」换成「脚本替你等」。
  * `count` 每次都得走调用方的 fail-closed 判据(中途凭证失效同样会把 busy 读成 0)。
  * 等到了返回 true;超时返回 false(那句话已经说了),由调用方中止(退出码 3)。
+ * `deadline`(绝对时刻,毫秒)给了就按它算超时:一次操作里要等好几轮(冻结之下又多出来、放开再等)时,
+ * 每一轮耗的是同一份 WAIT_TIMEOUT,不是每轮从头算。
  */
-export async function drainWait({ count, waitTimeout, say, verb }) {
+export async function drainWait({ count, waitTimeout, deadline = waitDeadline(waitTimeout), say, verb }) {
   let n = await count();
   if (!n) return true;
   say(`  ⏳ WAIT:还有 ${n} 个任务${verb}会被打断,等它们跑完(Ctrl-C 可随时放弃)…`);
   let elapsed = 0;
   const step = 5;
   while (n > 0) {
-    if (waitTimeout !== null && elapsed >= waitTimeout) {
+    if (deadline !== null && Date.now() >= deadline) {
       say(`  ✕ WAIT 超时(${waitTimeout}s),仍有 ${n} 个会被打断 —— 已中止,未${verb}服务端。`);
       return false;
     }
@@ -149,6 +161,11 @@ export async function drainWait({ count, waitTimeout, say, verb }) {
   }
   say("  ✓ 已经没有会被打断的任务了,继续。");
   return true;
+}
+
+/** WAIT_TIMEOUT(秒,null = 不设上限)从此刻起算的截止时刻。 */
+export function waitDeadline(waitTimeout) {
+  return waitTimeout === null || waitTimeout === undefined ? null : Date.now() + waitTimeout * 1000;
 }
 
 /**
@@ -194,10 +211,28 @@ export async function explainStillUp(port, old, { say, lockFile }) {
   return 1;
 }
 
+/** 随服务一起关掉的终端、聊天、AI 协助、预览试跑:不为它们中止,只如实列出来(冻结快照和续期答复里带着)。 */
+export function sayClosing(say, resources) {
+  const closing = Array.isArray(resources) ? resources : [];
+  if (closing.length) {
+    say(`  ⚠ 会随服务一起关掉 ${closing.length} 个:${closing.slice(0, 6).map((r) => r.label || r.kind).join("、")}${closing.length > 6 ? " 等" : ""}`);
+  }
+}
+
+/** 同一个任务在两份名单里认不认得出来:有任务号认任务号,老服务给的条目没有就认标题。 */
+const itemKey = (item) => item.id ?? item.title;
+
 /**
  * 让 :port 上的 navi 下线 —— stop.mjs、upgrade.mjs 共用的这一整段(restart.mjs 第 2 步在两次问判据之间
  * 夹着 build,自己拼这几块)。顺序与理由同 stop.mjs 顶部:只认系统说的监听者、问不出判据就不下刀、
  * 会被挡的任务默认中止、端口彻底安静才算停了。
+ *
+ * 过了闸、真要下刀时先让服务冻结接活(重启前冻结,协议见 restart-freeze.mjs),闸改用冻结之下的那份快照再过一遍:
+ * 冻着的时候不起新回合、新 agent,问完到停下之间它不会再变多。快照里多出了会被挡的就放开冻结、照常拦下
+ * (--wait 放开再等一轮);下刀前续一次期,顺带拿此刻的名单跟快照比,冻结失效了、多出谁了都不停。中止的每条出路
+ * 都先放掉冻结,停成了不用放(服务一退冻结就没了),脚本自己崩了冻结也会到期自己解。服务认这道关口却冻不了
+ * (另一处正在准备重启、mac 版正在换新版服务那份交接许可占着 —— 两种冻结同一时刻只有一份)就中止,--force 例外。
+ * 老版本服务不认这道关口:退回即时判据,并如实说问完到停下之间新起的任务不在名单上。
  *
  * gate 说清「什么情况下不下刀」和中止时怎么说:
  *   verb        「停止」「升级」
@@ -206,7 +241,7 @@ export async function explainStillUp(port, old, { say, lockFile }) {
  *   tail        中止时补的那半句:动了什么、没动什么
  *   command(f)  出路命令(--wait / --force)
  *   passLine(safe, lead)  可选:放行时还有任务在跑,说一句它们会怎样
- * check:只过闸、不下刀(升级在动任何东西之前先问一遍)。
+ * check:只过闸、不下刀(升级在动任何东西之前先问一遍;不冻结)。
  * abort(code) 不返回:缺省直接退出;升级要先把拉下来的代码退回去再退。
  * 返回 { running:false } 本来就没在跑;{ running:true, data } 过了闸(check)或已停干净。
  */
@@ -217,6 +252,18 @@ export async function takeDown({ port, lockFile, log, force, wait, waitTimeout, 
     // 查不到监听者(lsof/ss/fuser 都没装)却有人占着:只过闸时照样问判据,真要下刀时如实失败。
     if (!check) return abort(await explainStillUp(port, old, { say, lockFile }));
   }
+  const send = restartFreezeSender(port, lockFile);
+  let lease = null;
+  const onInterrupt = () => { void letGo().finally(() => process.exit(130)); };
+  /** 放掉手上的冻结:服务还活着,别让它冻到期才解。 */
+  async function letGo() {
+    if (!lease) return;
+    const held = lease;
+    lease = null;
+    process.off("SIGINT", onInterrupt);
+    await releaseRestartFreeze(send, held);
+  }
+  const stopHere = async (code) => { await letGo(); return abort(code); };
   const ask = async () => {
     const data = await queryImpact(port, lockFile);
     const why = noVerdictReason(data);
@@ -228,37 +275,99 @@ export async function takeDown({ port, lockFile, log, force, wait, waitTimeout, 
   };
   let data = await ask();
   let held = gate.held(data);
-  if (held.length && wait && !force) {
-    const drained = await drainWait({ count: async () => gate.held(await ask()).length, waitTimeout, say, verb: gate.verb });
-    if (!drained) return abort(3);
-    data = await ask();
+  // 整次操作只有一份等待上限:普通判据的排空、冻结之下又多出来之后的重试,耗的都是它。
+  const deadline = waitDeadline(waitTimeout);
+  let retried = false;
+  for (;;) {
+    if (held.length && wait && !force) {
+      const drained = await drainWait({ count: async () => gate.held(await ask()).length, waitTimeout, deadline, say, verb: gate.verb });
+      if (!drained) return abort(3);
+      data = await ask();
+      held = gate.held(data);
+    }
+    if (held.length && !force) {
+      say(`  ✋ ${gate.heldLine(held.length)} —— 已中止,${gate.tail}`);
+      for (const t of held.slice(0, 8)) say(`     · ${t.title}${t.reason ? ` —— ${t.reason}` : ""}`);
+      say(`     让脚本替你等它们跑完:  ${gate.command("--wait")}`);
+      say(`     确定要打断:            ${gate.command("--force")}`);
+      return abort(2);
+    }
+    if (check) return { running: true, data };
+    // 问不到判据还往下走的只有 force(ask):那时连这份服务认不认冻结都不知道,force 已经说过会打断。
+    if (noVerdictReason(data) !== null) break;
+    if (!supportsRestartFreeze(data)) {
+      say("  ⚠ 这一版服务端没有重启前冻结:判据是即时问的,问完到停下之间新起的任务不在上面,仍可能被打断。");
+      break;
+    }
+    const got = await acquireRestartFreeze(send);
+    if (got.kind !== "frozen") {
+      if (!force) {
+        say(`  ✋ 冻结不了接活(${got.why}) —— 已中止,${gate.tail}`);
+        say(`     稍后重跑一次;明知新起的任务可能被打断也要${gate.verb}:  ${gate.command("--force")}`);
+        return abort(2);
+      }
+      say(`  ⚠ FORCE:冻结不了接活(${got.why}),按即时判据${gate.verb} —— 这期间新起的任务也会被打断。`);
+      break;
+    }
+    lease = got.lease;
+    process.once("SIGINT", onInterrupt);
+    data = got.impact;
     held = gate.held(data);
+    if (!held.length || force) break;
+    // 冻结之下多出了会被挡的(冻结那一刻还在起跑的那种):放开冻结,回到上面拦下,或者 --wait 再等一轮。
+    await letGo();
+    if (wait) {
+      // 普通判据看不到它们(只在冻结快照里),排空那一步会立刻放行:隔一会儿再冻,别空转着反复冻结整份服务。
+      // 隔的这一会儿也耗同一份上限:睡到截止就不再冻,不在超时之后又冻一次、碰巧空了就停下去。
+      if (!retried) say(`  ⏳ WAIT:冻结之下还有 ${held.length} 个会被挡下(正在起跑或正在操作工作区),过一会儿再试…`);
+      retried = true;
+      const left = deadline === null ? 5000 : deadline - Date.now();
+      if (left > 0) await sleep(Math.min(5000, left));
+      if (deadline !== null && Date.now() >= deadline) {
+        say(`  ✕ WAIT 超时(${waitTimeout}s),冻结之下仍有 ${held.length} 个会被挡下 —— 已中止,${gate.tail}`);
+        for (const t of held.slice(0, 8)) say(`     · ${t.title}${t.reason ? ` —— ${t.reason}` : ""}`);
+        return abort(3);
+      }
+    }
   }
-  if (held.length && !force) {
-    say(`  ✋ ${gate.heldLine(held.length)} —— 已中止,${gate.tail}`);
-    for (const t of held.slice(0, 8)) say(`     · ${t.title}${t.reason ? ` —— ${t.reason}` : ""}`);
-    say(`     让脚本替你等它们跑完:  ${gate.command("--wait")}`);
-    say(`     确定要打断:            ${gate.command("--force")}`);
-    return abort(2);
-  }
-  if (check) return { running: true, data };
   const safe = countOf(data, "survives");
   const lead = countOf(data, "resumes");
   if ((safe > 0 || lead > 0) && gate.passLine) say(gate.passLine(safe, lead));
   const busy = countOf(data, "interrupted");
   if (busy > 0) say(`  ⚠ FORCE:打断 ${busy} 个**接管不了**的任务(判为 failed,可重试);会被接管的不受影响。`);
+  // 下刀前最后核一次冻结还在(顺带续期):判据只在冻着的时候算数。续期带回此刻的名单 —— 已经在跑的 agent 自己变出的
+  // 新影响服务端冻不住(server/src/restart-freeze.ts 顶部),多出了会被挡的就不停。
+  if (lease) {
+    const renewed = await renewRestartFreeze(send, lease);
+    const known = new Set(held.map(itemKey));
+    const extra = renewed.valid ? gate.held(renewed.impact).filter((t) => !known.has(itemKey(t))) : [];
+    if (!renewed.valid || (extra.length && !force)) {
+      say(renewed.valid
+        ? `  ✋ 冻结之后又多了 ${extra.length} 个会被挡下的任务 —— 已中止,${gate.tail}重跑一次即可。`
+        : `  ✋ ${renewed.why} —— 判据不再算数,已中止,${gate.tail}重跑一次即可。`);
+      for (const t of extra.slice(0, 8)) say(`     · ${t.title}${t.reason ? ` —— ${t.reason}` : ""}`);
+      return stopHere(2);
+    }
+    if (extra.length) say(`  ⚠ FORCE:冻结之后又多了 ${extra.length} 个会被挡下的任务,一并打断。`);
+    data = renewed.impact;
+    sayClosing(say, data.shutdown?.resources);
+  }
   let how = "signal";
   try {
     how = killListeners(old, data, { force });
   } catch (error) {
     say(`  ✋ 无法安全终止 Windows 实例: ${error.message}。已中止,${gate.tail}`);
     say(`     未授权整树强杀;确定接受任务中断才使用 ${gate.command("--force")}。`);
-    return abort(2);
+    return stopHere(2);
   }
   if (IS_WINDOWS && safe > 0 && how !== "selective") {
     say(`  ⚠ 这一刀走的是整树强杀(taskkill /T),${safe} 个本可接管的任务会跟着断 ——`);
     say("     只有问得到判据(survives 名单)时才能点名保住它们。");
   }
-  if (!(await waitPortQuiet(port))) return abort(await explainStillUp(port, old, { say, lockFile }));
+  // 它没退:还冻着就放开,别让它带着冻结接着跑到期。
+  if (!(await waitPortQuiet(port))) return stopHere(await explainStillUp(port, old, { say, lockFile }));
+  // 停成了:服务一退冻结跟着没了,不用放。
+  lease = null;
+  process.off("SIGINT", onInterrupt);
   return { running: true, data };
 }

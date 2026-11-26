@@ -5,6 +5,12 @@ import os
 /// 新窗口接管服务时先备份并取得起跑闸门；不可接管的当前回合继续由旧服务运行。
 /// 尚未迁出的旧布局沿用原先的确认、停服务、备份流程。
 ///
+/// 不保留在跑任务的那条路（停服务、备份、换代码）在停服务之前先让服务冻结接活（RestartFreeze，
+/// server/src/restart-freeze.ts）：拿冻结之下的快照跟用户同意过（或者自己判定没人会被打断）的那份比，多出了谁就
+/// 放开冻结、拿这份快照重新问；没多出来才停，下刀前续一次期、此刻的名单也没多出谁才下刀；没停成就放开。保留在跑
+/// 任务的那条路用的是接管许可（RuntimeHandover），两种冻结服务端同一时刻只给一份，这里也从不在一次停服务里同时拿。
+/// 老版本服务不认冻结：照旧凭评估时的结论停，确认框里如实说确认之后新起的任务不在名单上。
+///
 /// 两种来由：
 ///  · `.update`       Sparkle 下好了新版、要装了（装完重开 / 退出时装）
 ///  · `.staleServer`  app 已经是新版，端口上那份服务却还是旧版 app 起的（见 ServerRecord）——
@@ -114,6 +120,7 @@ final class UpdateGate {
     guard hasPending, phase == .waiting || phase == .idle || phase == .blocked else { return }
     stopPolling()
     handoverFailures = 0
+    frozenWidenings = 0
     evaluate(allowPrompt: true)
   }
 
@@ -138,7 +145,12 @@ final class UpdateGate {
     }
     switch phase {
     case .prepared: reply(true); return
-    case .preparing: quitReplies.append(reply); return
+    case .preparing:
+      quitReplies.append(reply)
+      // 这一下放行要是没成、退回等待（见 settle 的 .widened），走的还是退出确认那一套：取消回到等待、等完照样退。
+      self.whenDrained = whenDrained
+      resumeWaitingOnCancel = preparedFromWaiting
+      return
     default: break
     }
     if purpose == nil || RuntimeStore.destination != nil { purpose = .update(version: version) }
@@ -192,34 +204,39 @@ final class UpdateGate {
       }
       return
     }
-    let quitting = !quitReplies.isEmpty
     assess { [self] assessed in
       guard mine == epoch else { return }
-      let verdict: ImpactVerdict
-      if !assessed.needsConsent, preservingRuntime, let handoverBlock, let target = assessed.target {
-        verdict = .disrupts(target, [(title: "旧服务", why: handoverBlock)])
-      } else { verdict = assessed }
-      guard verdict.needsConsent else { prepare(verdict.target); return }
-      if preservingRuntime && !allowPrompt && !quitting {
-        startWaiting()
-        return
-      }
-      let choice = ask(prompt(for: verdict, quitting: quitting))
-      // 弹窗开着的时候 Sparkle 可能已经放弃了这次更新。
-      guard mine == epoch else { return }
-      switch choice {
-      case .now:
-        prepare(verdict.target)
-      case .recover:
-        confirmRecovery(epoch: mine)
-      case .wait:
-        answerQuit(false)
-        if quitting, proceeds.isEmpty, let whenDrained { proceeds.append(whenDrained) }
-        startWaiting()
-      case .cancel:
-        answerQuit(false)
-        if !quitting || resumeWaitingOnCancel { startWaiting() } else { phase = .idle }
-      }
+      decide(assessed, epoch: mine, allowPrompt: allowPrompt)
+    }
+  }
+
+  /// 拿评估出来的（或冻结之下的，`changed`）那份决定：不用问就放行，要问就问。
+  private func decide(_ assessed: ImpactVerdict, epoch mine: Int, allowPrompt: Bool, changed: Bool = false) {
+    let quitting = !quitReplies.isEmpty
+    let verdict: ImpactVerdict
+    if !assessed.needsConsent, preservingRuntime, let handoverBlock, let target = assessed.target {
+      verdict = .disrupts(target, [(id: nil, title: "旧服务", why: handoverBlock)])
+    } else { verdict = assessed }
+    guard verdict.needsConsent else { prepare(verdict.target, agreed: verdict); return }
+    if preservingRuntime && !allowPrompt && !quitting {
+      startWaiting()
+      return
+    }
+    let choice = ask(prompt(for: verdict, quitting: quitting, changed: changed))
+    // 弹窗开着的时候 Sparkle 可能已经放弃了这次更新。
+    guard mine == epoch else { return }
+    switch choice {
+    case .now:
+      prepare(verdict.target, agreed: verdict)
+    case .recover:
+      confirmRecovery(epoch: mine)
+    case .wait:
+      answerQuit(false)
+      if quitting, proceeds.isEmpty, let whenDrained { proceeds.append(whenDrained) }
+      startWaiting()
+    case .cancel:
+      answerQuit(false)
+      if !quitting || resumeWaitingOnCancel { startWaiting() } else { phase = .idle }
     }
   }
 
@@ -260,13 +277,19 @@ final class UpdateGate {
         return RuntimeStore.contains(codeDir)
       }()
       let verdict: ImpactVerdict
+      var freezable = true
       do {
         if preservingRuntime, try RuntimeRecovery.paused() != nil {
           try RuntimeStore.prepare(activate: false)
         }
-        verdict = RestartImpactProbe.assessSync(preservingRuntime: preservingRuntime)
+        let assessment = RestartImpactProbe.assessDetailedSync(preservingRuntime: preservingRuntime)
+        (verdict, freezable) = (assessment.verdict, assessment.freezable)
       } catch { verdict = .unknown("新版运行时准备失败：\(error.localizedDescription)") }
-      DispatchQueue.main.async { self.preservingRuntime = preservingRuntime; completion(verdict) }
+      DispatchQueue.main.async {
+        self.preservingRuntime = preservingRuntime
+        self.freezable = freezable
+        completion(verdict)
+      }
     }
   }
 
@@ -278,19 +301,25 @@ final class UpdateGate {
 
   /// 只有**确认**没人会被打断才自己放行；确认不了（服务一时没答复、答的不像 navi……）就接着等。
   private func startWaiting() {
+    // 转入长期等待之前，排着的退出请求必须有个答复（AppKit 在等 reply(toApplicationShouldTerminate:)，不答就一直卡在
+    // 退出中）：这次不退，排空后的退出意图另存成回调，等完照样退。
+    if !quitReplies.isEmpty {
+      if proceeds.isEmpty, let whenDrained { proceeds.append(whenDrained) }
+      answerQuit(false)
+    }
     phase = .waiting
     log(preservingRuntime ? "旧服务继续运行，每 \(Int(pollInterval)) 秒检查安全接管窗口"
       : "等会被打断的任务跑完，每 \(Int(pollInterval)) 秒再问一次")
     stopPolling()
     let mine = epoch
-    let interval = preservingRuntime ? min(60, pollInterval * pow(2, Double(handoverFailures))) : pollInterval
+    let interval = min(60, pollInterval * pow(2, Double(preservingRuntime ? handoverFailures : frozenWidenings)))
     pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
       guard let self, !self.polling, self.phase == .waiting, mine == self.epoch else { return }
       self.polling = true
       self.assess { verdict in
         guard mine == self.epoch else { return }
         self.polling = false
-        if self.phase == .waiting && !verdict.needsConsent { self.prepare(verdict.target) }
+        if self.phase == .waiting && !verdict.needsConsent { self.prepare(verdict.target, agreed: verdict, fromWaiting: true) }
       }
     }
   }
@@ -304,15 +333,26 @@ final class UpdateGate {
   private enum Step {
     case done(Maintenance)
     case changed(String)
+    /// 冻结之下 / 续期时的名单比同意过的多出了谁：没停，拿这份重新问。
+    case widened(ImpactVerdict)
     case failed(String)
   }
 
   private var preservingRuntime = false
+  /// 端口上那份服务认不认「重启前冻结」（最近一次评估时）；不认就在确认框里如实说。
+  private var freezable = true
+  /// 这一次放行是用户选了「等」之后轮询到的：冻结之下仍有会被打断的就接着等，不再弹同一个确认框。
+  private var preparedFromWaiting = false
+  /// 等待中冻结复核连着没过的次数：轮询跟着退避，别每几秒就冻一次整份服务。
+  private var frozenWidenings = 0
   private var handoverBlock: String?
 
-  /// 放行。`target` 是评估时端口上那一份；nil = 用户在确认不了时点了「现在」。
-  private func prepare(_ target: ServiceTarget?, recovery: ServiceRecoveryIdentity? = nil) {
+  /// 放行。`target` 是评估时端口上那一份；nil = 用户在确认不了时点了「现在」。`agreed` 是用户同意过（或判定
+  /// 没人会被打断）的那份，停服务之前拿冻结之下的快照跟它比；强制切换（`recovery`）不带。
+  private func prepare(_ target: ServiceTarget?, agreed: ImpactVerdict? = nil, recovery: ServiceRecoveryIdentity? = nil,
+                       fromWaiting: Bool = false) {
     guard phase != .preparing && phase != .prepared else { return }
+    preparedFromWaiting = fromWaiting
     stopPolling()
     phase = .preparing
     let mine = epoch
@@ -323,7 +363,7 @@ final class UpdateGate {
     let (shutdownTimeout, lockTimeout) = (shutdownTimeout, lockTimeout)
     let preservingRuntime = self.preservingRuntime
     DispatchQueue.global(qos: .userInitiated).async { [self] in
-      let step = Self.stopAndBackUp(target, note: note, fromVersion: stale ?? NaviConfig.bundleVersion,
+      let step = Self.stopAndBackUp(target, agreed: agreed, note: note, fromVersion: stale ?? NaviConfig.bundleVersion,
                                     shutdownTimeout: shutdownTimeout, lockTimeout: lockTimeout,
                                     preservingRuntime: preservingRuntime, recovery: recovery, beforeStop: {
         DispatchQueue.main.sync {
@@ -342,7 +382,7 @@ final class UpdateGate {
     }
   }
 
-  private static func stopAndBackUp(_ target: ServiceTarget?, note: String, fromVersion: String,
+  private static func stopAndBackUp(_ target: ServiceTarget?, agreed: ImpactVerdict?, note: String, fromVersion: String,
                                     shutdownTimeout: TimeInterval, lockTimeout: TimeInterval, preservingRuntime: Bool,
                                     recovery: ServiceRecoveryIdentity?, beforeStop: () -> Bool, didSignal: () -> Void) -> Step {
     var lease: String?
@@ -389,15 +429,47 @@ final class UpdateGate {
         return .changed("接管许可已失效，旧服务未停止")
       }
     }
-    switch ServerShutdown.stop(expecting: target, timeout: shutdownTimeout, identity: recovery,
-                               beforeStop: beforeStop, didSignal: didSignal) {
+    // 不保留在跑任务的那条路：冻结接活，凭冻结之下的快照停（见类型顶部）。没停成的每条出路都放开它。
+    var freeze: RestartFreeze.Lease?
+    defer { if let freeze { RestartFreeze.release(freeze) } }
+    if recovery == nil, !preservingRuntime, let agreed {
+      switch RestartFreeze.acquire(includingShutdown: false) {
+      case .refused(let why):
+        maintenance.end()
+        return .failed("服务这会儿冻结不了接活（\(why)），先没停服务，更新没装。")
+      case .unfrozen:
+        break // 明确不认冻结的老服务（或端口上不是自己那份）：照旧凭评估时的结论停，ServerShutdown 只停评估过的那一份。
+      case .undetermined(let why):
+        // 分不出认不认冻结：不退回不冻的老路，按「确认不了」比 —— 用户同意过的不是「确认不了」就重新问。
+        let now = ImpactVerdict.unknown(why)
+        if agreed.widened(to: now) { maintenance.end(); return .widened(now) }
+      case .frozen(let lease, let now):
+        freeze = lease
+        if agreed.widened(to: now) { maintenance.end(); return .widened(now) }
+      }
+    }
+    var renewal: RestartFreeze.Check = .valid
+    let stopped = ServerShutdown.stop(expecting: target, timeout: shutdownTimeout, identity: recovery, beforeStop: {
+      guard beforeStop() else { return false }
+      guard let freeze, let agreed else { return true }
+      renewal = RestartFreeze.check(freeze, agreed: agreed, includingShutdown: false)
+      guard case .valid = renewal else { return false }
+      // 续期是一次网络往返，这期间这一轮可能已经作废（Sparkle 放弃了）：下刀前的授权只认等完之后的那一眼。
+      return beforeStop()
+    }, didSignal: didSignal)
+    switch stopped {
     case .changed(let why):
       maintenance.end()
-      return .changed(why)
+      switch renewal {
+      case .valid: return .changed(why)
+      case .widened(let now, _): return .widened(now)
+      case .invalid(let why): return .changed(why)
+      }
     case .failed(let reason):
       maintenance.end()
       return .failed(reason)
     case .stopped(let pid):
+      freeze = nil // 服务退了，冻结跟着没了
       if preservingRuntime {
         do {
           let backup = try DatabaseBackup.beforeUpdate(fromVersion: fromVersion)
@@ -448,12 +520,29 @@ final class UpdateGate {
         releaseHold()
         answerQuit(false)
       } else { releaseHold(); evaluate() }
+    case .widened(let verdict):
+      releaseHold()
+      // 用户已经选了「等」：冻结之下仍有会被打断的（多半是即时评估看不到的那几个）就放开冻结接着等，不再弹同一个框；
+      // 他从菜单主动重试时才重新问。
+      // 复核在途时用户要退出：不默默接着等，走退出确认（列出名单，等 / 现在 / 取消）。
+      if preparedFromWaiting && quitReplies.isEmpty {
+        frozenWidenings += 1
+        log("冻结之下仍有会被打断的任务，接着等")
+        startWaiting()
+        return
+      }
+      // 冻结之下多出了用户没同意过的：拿这份重新问（即时评估未必看得到冻结那一刻还在起跑的那几个）。
+      log("停服务之前名单变多了，重新问")
+      phase = .checking
+      epoch += 1
+      decide(verdict, epoch: epoch, allowPrompt: true, changed: true)
     case .failed(let reason):
       fail(reason)
     }
   }
 
   private func finish(stale: Bool) {
+    frozenWidenings = 0
     let run = proceeds
     let replies = quitReplies
     proceeds = []
@@ -509,9 +598,9 @@ final class UpdateGate {
     onHoldChanged?(nil)
   }
 
-  private func prompt(for verdict: ImpactVerdict, quitting: Bool) -> Prompt {
+  private func prompt(for verdict: ImpactVerdict, quitting: Bool, changed: Bool = false) -> Prompt {
     let title: String
-    var lines: [String] = []
+    var lines: [String] = changed ? ["刚才确认之后情况变了，按现在的样子再确认一次。"] : []
     let (waitTitle, nowTitle): (String, String)
     switch purpose {
     case .staleServer(let from):
@@ -535,6 +624,9 @@ final class UpdateGate {
       lines.append("确认不了重启会不会打断任务（\(why)）。确认不了不等于没有。")
     case .clear:
       break
+    }
+    if !preservingRuntime, case .ours = verdict.target, !freezable {
+      lines.append("这一版服务不支持重启前冻结：确认之后到停下之间新起的任务不在上面，也会被打断。")
     }
     log("问用户：\(title)；\(lines.joined(separator: " "))")
     var buttons = [waitTitle, nowTitle]
