@@ -673,6 +673,10 @@ activeServer = serve({ fetch: app.fetch, port, ...(LOCAL_ONLY ? { hostname: LOCA
       // 飞书长连接（没配凭证就什么都不做）。同一个库起了多个实例（没拿到单实例锁）时不连：
       // 飞书长连接是集群模式，两个客户端会随机分走事件。通道以绑定者身份调本进程的路由，
       // 所以要传 app.fetch —— 走完整的鉴权与可见性中间件（im/navi-client.ts）。
+      // 系统通知（客户端弹的横幅）：同飞书推送一套判据，对账驱动（system-notify.ts）。
+      void import("./system-notify.js")
+        .then(({ startSystemNotify }) => startSystemNotify())
+        .catch((error) => console.error("[navi] 系统通知启动失败:", error));
       void import("./im/channel.js")
         .then(({ startFeishuChannel }) => startFeishuChannel({ fetch: app.fetch, exclusive: singletonLock !== null }))
         .catch((error) => console.error("[navi] 飞书通道启动失败:", error));

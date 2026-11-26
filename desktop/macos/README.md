@@ -52,6 +52,10 @@ app 注册了 `navi://`（`build.sh` 写进 Info.plist）。`navi://open?project
 
 飞书卡片只在 app 起的服务**只听本机**时给按钮的 `pc_url` 带这条链接（手机仍走 `default_url` 的 http）：那时 http 在别的电脑上一律打不开，`navi://` 只会让本机这一台变好。放开了别的设备访问就不给，桌面端也走 http —— 发卡的服务不知道收卡的电脑装没装 app。开关一换、服务按新设置起来，飞书通道会把库里存着的卡按新的链接策略重写，14 天内发出的逐张记着、改到飞书上才算完 —— 额度挡住就往后挪着再改，改卡放弃了下次起服务重新排上（更早的飞书不让改，`server/src/im/relink.ts`）。连着点了几条链接时只有最后一条落地。飞书开放平台文档写明 `pc_url` 支持 AppLink，没写第三方 scheme 支不支持，真飞书桌面端没验证过（`server/src/im/app-link.ts`）。
 
+## 系统通知
+
+任务跑完等验收、验收落章、验证或验收前置命令没过、跑挂了，或者停下来等人拍板（提问、驳回待裁定、讨论闸口）时，服务端往事件流上推一条 `task.notify`（`server/src/system-notify.ts`，判据与飞书推送同一份），页面经 `naviNotify` 交给原生弹成 macOS 通知（`SystemNotifications.swift`）；点一下就像点 `navi://` 链接那样打开那个任务。WKWebView 里没有网页通知，所以要这一道。授权等头一条要弹时才问；正对着看的那个任务不弹；开关在「设置 › 默认规则 › 通知」，按设备记。关了窗口页面还在，照样弹；退出 app 就没人弹了。
+
 ## 自更新
 
 用 [Sparkle](https://sparkle-project.org) 2（版本和 sha256 钉在 `scripts/sparkle.mjs`，框架原样放进 `Contents/Frameworks`）。菜单「Navi → 检查更新…」，另外每 6 小时自己查一次。两个公开仓库，都在 `release.json` 里配：
