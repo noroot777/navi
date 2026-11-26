@@ -29,7 +29,7 @@ if CommandLine.arguments.contains("--start-server") {
   case .needsSetup:
     print("\(NaviConfig.dataURL.path) 里还没有数据：先打开一次 Navi 选「全新开始」或「导入已有数据」。")
     exit(0)
-  case .occupied(let explanation):
+  case .occupied(let explanation), .unresponsive(_, let explanation):
     print(explanation)
     exit(1)
   case .failed(let reason):

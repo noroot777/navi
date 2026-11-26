@@ -111,7 +111,14 @@ const SCHEMA: Record<string, Record<string, Check>> = {
   "app.launch": { version, os: shape(/^Version [\d.]{1,16} \(Build [0-9A-Za-z]{1,16}\)$/) },
   "app.quit": {},
   "server.spawn": { serverPid: num, version },
-  "server.ensure": { outcome: oneOf(["ready", "needs_setup", "occupied", "failed"]), ms: num },
+  // 端口上没人应答、库锁还在一个活着的服务手里：不起，等它（ServerLauncher.waitForLockHolder）。
+  "server.held": { holderPid: num },
+  // 起出来的进程一次没应答就退了，那时库锁在另一个活着的服务手里（被它挡下的，或者它是之后才起来的）。
+  "server.exited_while_held": { serverPid: num, holderPid: num },
+  // 服务的账这一次没记上：起出来的进程号没补进尝试（attempt，之后只有起它的启动器认得出它）/ 应答了但 current
+  // 切不过去（runtime）/ 服务记录写不进去（record），后两种下一次看到它应答再记。
+  "server.confirm_deferred": { serverPid: num, step: oneOf(["attempt", "database", "runtime", "record"]) },
+  "server.ensure": { outcome: oneOf(["ready", "needs_setup", "occupied", "unresponsive", "failed"]), ms: num },
   "cover.show": { kind: oneOf(["starting", "maintenance"]) },
   "cover.hide": {},
   "page.presented": {},

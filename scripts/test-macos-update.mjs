@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { once } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -51,7 +51,14 @@ async function freePort() {
 }
 
 const port = await freePort();
-const runtime = join(temporary, "no-runtime");
+// 假的自带运行时：布局同 bundle-runtime.mjs，server 起来就退（起不来的新版：备份、记尝试都照常走到，服务不会有）。
+const runtime = join(temporary, "runtime");
+mkdirSync(join(runtime, "node/bin"), { recursive: true });
+mkdirSync(join(runtime, "scripts"), { recursive: true });
+mkdirSync(join(runtime, "server/dist"), { recursive: true });
+symlinkSync(process.execPath, join(runtime, "node/bin/node"));
+copyFileSync(join(root, "scripts/start-detached.mjs"), join(runtime, "scripts/start-detached.mjs"));
+writeFileSync(join(runtime, "server/dist/index.js"), "process.exit(1);");
 const windowPort = await freePort();
 // 跑测试的这个进程自己带着的 app 配置（两代名字都算）不往下传。
 const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !new RegExp(`^(?:NAVI_|${LEGACY_ENV_PREFIXES[0]})(?:DATA_DIR|URL|LOCAL_ONLY|MAC_\\w+)$`).test(key)));
@@ -70,10 +77,16 @@ const freezeCalls = () => (existsSync(freezeLog) ? readFileSync(freezeLog, "utf8
 const clear = { survives: [{ id: "s", title: "接管得了的", pid: 1 }], resumes: [{ id: "lead", title: "调度台" }], interrupted: [], mcpDisrupted: [] };
 
 /** 假 navi：独立进程，pid 就是它自己。stubborn = 不理 SIGTERM。 */
-async function startFake({ dataDir = data, stubborn = false } = {}) {
+async function startFake({ dataDir = data, stubborn = false, lock = false } = {}) {
+  // lock：像真 server 一样握着这份库的单实例锁（pid + 启动时刻）。确认在服务只认握着锁的那个进程。
   const source = `
     const http = require('node:http'); const fs = require('node:fs');
     ${stubborn ? "process.on('SIGTERM', () => {});" : ""}
+    if (${lock}) {
+      const startedAt = Date.now() - process.uptime() * 1000;
+      fs.writeFileSync(${JSON.stringify(join(data, "navi.db.navi.lock"))}, JSON.stringify({ version: 1, pid: process.pid,
+        processStartedAtMs: startedAt, processStartedAt: new Date(startedAt).toISOString(), token: 'fake' }));
+    }
     let impactAsked = 0;
     http.createServer((req, res) => {
       res.setHeader('content-type', 'application/json');
@@ -376,7 +389,7 @@ try {
   process.kill(maintainerPid, "SIGKILL");
   await maintainer.done;
   result = await drive(["launch", "2"]);
-  assert.match(result.out, /LAUNCH failed .*不完整/, "once the holder is gone the marker is void (here the fixture has no runtime)");
+  assert.match(result.out, /LAUNCH failed .*起来就退出了/, "once the holder is gone the marker is void (here the fixture's server exits at once)");
   assert.equal(existsSync(join(data, ".mac-maintenance.json")), false);
   console.log("PASS: maintenance holds every launcher across processes, and dies with its holder");
 
@@ -468,7 +481,7 @@ try {
   rmSync(join(data, "backups"), { recursive: true, force: true });
   await drive(["record", "4242", "20000101.0000"]);
   result = await drive(["launch", "2"]);
-  assert.match(result.out, /LAUNCH failed .*不完整/, result.out);
+  assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
   assert.deepEqual(backups().map((n) => n.split("-").pop()), ["20000101.0000.db"], "backed up before a newer build may migrate it");
   assert.deepEqual(await pins(), backups(), "and pinned as the recovery point");
   result = await drive(["launch", "2"]);
@@ -502,7 +515,7 @@ try {
   rmSync(join(data, ".mac-server.json"), { force: true });
   db.exec("insert into tasks values ('before-migration')");
   result = await drive(["launch", "2"]);
-  assert.match(result.out, /LAUNCH failed .*不完整/, result.out);
+  assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
   const original = backups()[0];
   assert.deepEqual(await pins(), [original]);
   // 失败的迁移已经改过这份库；之后每一次重试都起不来。
@@ -510,7 +523,7 @@ try {
   for (let i = 0; i < 6; i += 1) {
     await delay(1100);
     result = await drive(["launch", "2"]);
-    assert.match(result.out, /LAUNCH failed .*不完整/, result.out);
+    assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
   }
   assert.deepEqual(backups(), [original], "retries of a failing new build never back up the half-migrated database over the original");
   assert.equal(rows(original, "before-migration"), 1, "the recovery point is the pre-migration original");
@@ -526,7 +539,7 @@ try {
   result = await drive(["launch", "2"]);
   const beforeB = backups()[0];
   assert.deepEqual(await pins(), [beforeB]);
-  fake = await startFake();
+  fake = await startFake({ lock: true });
   await drive(["record", String(fake.pid)]); // 启动器拉起了进程、记下 pid，然后就被退掉了
   result = await drive(["launch", "2"]);
   assert.match(result.out, /LAUNCH ready/, result.out);
@@ -536,7 +549,7 @@ try {
   await once(fake, "exit");
   await drive(["record", String(fake.pid), "20000101.0000"]); // 换了下一版 app：库最后是上一版起的
   result = await drive(["launch", "2"]);
-  assert.match(result.out, /LAUNCH failed .*不完整/, result.out);
+  assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
   const beforeC = (await pins())[0];
   assert.notEqual(beforeC, beforeB, "the next build backs up again instead of trusting the earlier generation's point");
   assert.equal(rows(beforeC, "after-B"), 1, "and that backup has what was written while the previous build ran");
@@ -557,7 +570,7 @@ try {
   console.log("PASS: a point taken before another build ran never stands in for this build's backup");
 
   // ── 确认之后旧恢复点一律作废，删不掉恢复点文件也一样 ──
-  fake = await startFake();
+  fake = await startFake({ lock: true });
   await drive(["record", String(fake.pid)]);
   chmodSync(join(data, "backups"), 0o500);
   result = await drive(["launch", "2"]);
@@ -590,8 +603,11 @@ try {
   assert.deepEqual(kept.map((n) => n.split("-").pop()), ["v6.db", "v5.db", "v4.db", "v3.db", "v2.db", "v1.db", "v0.db"],
     "unconfirmed points are never rotated out");
   assert.deepEqual(result.out.match(/PINS (.*)/)[1].split(","), kept);
-  await drive(["record", "4242"]);
-  assert.match((await drive(["confirm", "4242"])).out, /PINS $/m, "a confirmation releases them");
+  fake = await startFake({ lock: true });
+  await drive(["record", String(fake.pid)]);
+  assert.match((await drive(["confirm", String(fake.pid)])).out, /PINS $/m, "a confirmation releases them");
+  fake.kill("SIGKILL");
+  await once(fake, "exit");
   result = await drive(["backups", "1"]);
   kept = result.out.match(/KEPT (.*)/)[1].split(",");
   assert.equal(kept.length, 5, result.out);

@@ -420,14 +420,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   ///
   /// `takeOverWhenFree`：端口被别人占着时，对方一停（端口空出来）就接着起自己那份，不必用户再点
   /// 「重试」。只给「被占着」这一档：起不来的那一档要是也这样，就会每 2 秒起一次注定失败的服务。
-  func startHealthPolling(at url: URL = NaviConfig.healthURL, takeOverWhenFree: Bool = false) {
+  /// `takeOverWhen`：除了服务应答，这件事成立了也接着走一遍 loadHome（在后台线程上问）。
+  func startHealthPolling(at url: URL = NaviConfig.healthURL, takeOverWhenFree: Bool = false,
+                          takeOverWhen: (() -> Bool)? = nil) {
     guard healthTimer == nil else { return }
     healthTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
       NaviHealth.probe(url) { probe in
         var down = false
         if case .down = probe { down = true }
         if case .unreachable = probe { down = true }
-        guard NaviHealth.isServing(probe) || (takeOverWhenFree && down) else { return }
+        guard NaviHealth.isServing(probe) || (takeOverWhenFree && down) || takeOverWhen?() == true else { return }
         DispatchQueue.main.async {
           guard let self, self.healthTimer === timer else { return }
           self.loadHome()

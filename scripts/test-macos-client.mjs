@@ -104,6 +104,9 @@ fs.writeFileSync(${JSON.stringify(seen)},JSON.stringify({cwd:process.cwd(),dataD
   leaked:Object.keys(process.env).filter(k=>k.startsWith('NAVI_MAC_'))}));
 ${exitAtOnce ? "process.exit(1);" : ""}
 fs.writeFileSync(path.join(dataDir,'navi.db'),'');
+// 像真 server 一样握着这份库的单实例锁：app 确认在服务只认握着锁的那个进程。
+const startedAt=Date.now()-process.uptime()*1000;
+fs.writeFileSync(path.join(dataDir,'navi.db.navi.lock'),JSON.stringify({version:1,pid:process.pid,processStartedAtMs:startedAt,token:'fixture'}));
 http.createServer((req,res)=>{res.setHeader('Content-Type','application/json');
 res.end(JSON.stringify({ok:true,pid:process.pid+${pidOffset},instance:{id:'svc-'+process.pid,dataDir,codeDir:path.resolve(__dirname,'../..'),
   localOnly:process.env.NAVI_LOCAL_ONLY==='1',desktop:process.env.NAVI_DESKTOP_APP==='1',windowPort:Number(process.env.NAVI_WINDOW_PORT)}}));})
@@ -455,6 +458,7 @@ console.log(JSON.stringify({held:{tasks:2,schedules:1},relocated:3}));`);
   writeFileSync(join(source, `${OLD_DB}.identity.json`), '{"who":"source"}');
   writeFileSync(join(source, `${OLD_DB}.ash-online.123.json`), "{}");
   writeFileSync(join(source, ".mac-maintenance.json"), JSON.stringify({ pid: process.pid, note: "源那边在装更新", since: 0 }));
+  writeFileSync(join(source, ".mac-server.json.lock"), "the source app's record lock");
   // 源库开着、WAL 模式、最后几笔还在 WAL 里没落进主文件 —— 跟正在跑的那份 server 一样。
   const live = new DatabaseSync(join(source, OLD_DB));
   live.exec("pragma journal_mode = wal; pragma wal_autocheckpoint = 0;");
@@ -534,8 +538,11 @@ console.log(JSON.stringify({held:{tasks:2,schedules:1},relocated:3}));`);
   const dead = spawnSync(process.execPath, ["-e", "console.log(process.pid)"], { encoding: "utf8" });
   const abandoned = join(data, `.import-staging-${dead.stdout.trim()}-old`);
   mkdirSync(abandoned);
+  // 第一次全新开始没起来（库还没建）留下的服务记录锁：app 自己的东西，不挡导入。
+  writeFileSync(join(data, ".mac-server.json.lock"), "");
   result = await launch(binary, ["import", source], env).done;
   assert.equal(result.status, 0, result.output);
+  assert.equal(readFileSync(join(data, ".mac-server.json.lock"), "utf8"), "", "the app's own record lock stays, the source's is not carried over");
   assert.match(result.output, /held=schedules:1,tasks:2 relocated=3 skipped=1/, "what the import held and skipped is reported");
   assert.equal(readFileSync(join(data, "runs", "task-1", "transcript.jsonl"), "utf8"), "line\n");
   assert.ok(lstatSync(join(data, "runs", "task-1", "latest")).isSymbolicLink(), "a symlink is copied as a link");
@@ -578,6 +585,41 @@ console.log(JSON.stringify({held:{tasks:2,schedules:1},relocated:3}));`);
   assert.equal(fromStopped.prepare("select count(*) as n from tasks").get().n, 51, "a stopped source is read whole");
   fromStopped.close();
   assert.deepEqual(readdirSync(source).sort(), stoppedBefore, "reading a stopped source leaves no -shm behind");
+
+  // 确认在服务正攥着服务记录锁（查库锁到记下「是哪份库」那一段）：发布等它放开才换库，插不进那一段。
+  const recordTarget = join(temporary, "data-record-locked");
+  mkdirSync(recordTarget);
+  const recordEntered = join(temporary, "record-lock-entered");
+  const recordHolder = launch("/usr/bin/lockf", ["-k", join(recordTarget, ".mac-server.json.lock"), process.execPath, "-e",
+    `require('node:fs').writeFileSync(${JSON.stringify(recordEntered)},String(process.pid));setTimeout(()=>{},60000)`]);
+  await until(() => existsSync(recordEntered), "record lock fixture did not acquire lock");
+  const recordHolderPid = Number(readFileSync(recordEntered, "utf8"));
+  fixturePids.add(recordHolderPid);
+  rmSync(toolSeen, { force: true });
+  const waitingImport = launch(binary, ["import", source, "20"], { ...env, NAVI_DATA_DIR: recordTarget });
+  await until(() => existsSync(toolSeen), "import did not reach the publish step");
+  await delay(1500);
+  assert.equal(existsSync(join(recordTarget, "navi.db")), false, "publishing waits while a confirmation holds the record lock");
+  process.kill(recordHolderPid, "SIGTERM");
+  await recordHolder.done;
+  fixturePids.delete(recordHolderPid);
+  result = await waitingImport.done;
+  assert.equal(result.status, 0, result.output);
+  assert.equal(existsSync(join(recordTarget, "navi.db")), true, "and publishes once it is released");
+
+  // 还有活着的服务握着数据根的库锁（它的库被挪走了）：不往它底下换上另一份库。
+  const heldTarget = join(temporary, "data-lock-held");
+  mkdirSync(heldTarget);
+  const lockOwner = spawn(process.execPath, ["-e", "setTimeout(()=>{},60000)"], { stdio: "ignore" });
+  fixturePids.add(lockOwner.pid);
+  // 启动时刻差 10 秒以内都认（LockHolder），刚 spawn 完的此刻就够准。
+  writeFileSync(join(heldTarget, "navi.db.navi.lock"), JSON.stringify({ version: 1, pid: lockOwner.pid, processStartedAtMs: Date.now(), token: "held" }));
+  result = await launch(binary, ["import", source], { ...env, NAVI_DATA_DIR: heldTarget }).done;
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, new RegExp(`还有一份 Navi 服务（进程 ${lockOwner.pid}）开着`), result.output);
+  assert.equal(existsSync(join(heldTarget, "navi.db")), false);
+  lockOwner.kill("SIGKILL");
+  fixturePids.delete(lockOwner.pid);
 
   result = await launch(binary, ["import", source], { ...env, NAVI_DATA_DIR: source }).done;
   assert.match(result.output, /app 自己的数据目录/);

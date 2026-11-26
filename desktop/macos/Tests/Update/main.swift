@@ -130,18 +130,38 @@ case "launch":
   case .ready: emit("LAUNCH ready")
   case .needsSetup: emit("LAUNCH needs-setup")
   case .occupied(let why): emit("LAUNCH occupied \(why)")
+  case .unresponsive(let holder, let why): emit("LAUNCH unresponsive \(holder.pid) \(why.replacingOccurrences(of: "\n", with: " / "))")
   case .failed(let why): emit("LAUNCH failed \(why.replacingOccurrences(of: "\n", with: " / "))")
   }
 
 case "record":
-  ServerRecord.write(pid: Int(args[2])!)
-  // 测试按需把构建号改成别的，模拟「旧版 app 起的」。
+  ServerRecord.write(pid: Int(args[2])!, runtime: NaviConfig.targetRuntimeURL)
+  // 测试按需把构建号改成别的，模拟「旧版 app 起的」（同一种记账：记着它开着的是眼前这份库）。
   if args.count > 3 {
-    let data = try! JSONEncoder().encode(ServerRecord(pid: Int(args[2])!, bundleVersion: args[3], confirmedAt: ServerRecord.read()?.confirmedAt))
+    let data = try! JSONEncoder().encode(ServerRecord(pid: Int(args[2])!, bundleVersion: args[3], confirmedAt: ServerRecord.read()?.confirmedAt,
+                                                      database: DatabaseFile.identity(in: NaviConfig.dataURL)))
     try! data.write(to: ServerRecord.url)
   }
   emit("STALE \(ServerRecord.staleVersion(servingPID: Int(args[2])!) ?? "none")")
   emit("STALE-OTHER-PID \(ServerRecord.staleVersion(servingPID: Int(args[2])! + 1) ?? "none")")
+
+case "observe":
+  // 探一眼、先不记账，等 args[2] 那个文件出现才把这一眼交给确认那一处：迟到的一眼。
+  let asked = Date()
+  let probe = NaviHealth.probeSync()
+  guard case .navi(let instance) = probe else { emit("OBSERVED nothing"); exit(1) }
+  emit("OBSERVED \(instance.pid ?? -1)")
+  _ = runUntil(30) { FileManager.default.fileExists(atPath: args[2]) }
+  emit("SETTLED \(ServerLauncher.settle(probe, askedAt: asked).map { "\($0)" } ?? "nil")")
+
+case "staleness":
+  // 只读：端口上那份（pid）认不认得出是别的构建号起的。
+  emit("STALE \(ServerRecord.staleVersion(servingPID: Int(args[2])!) ?? "none")")
+
+case "stop-unresponsive":
+  // 「服务没有应答」那一屏的「停掉它」（term）/「强制结束」（kill）：停此刻握着库锁的那一个。
+  guard let holder = DatabaseFile.liveHolder(in: NaviConfig.dataURL) else { emit("STOP-HOLDER none"); exit(0) }
+  emit("STOP-HOLDER \(ServerShutdown.stopUnresponsive(holder, force: args[2] == "kill", timeout: 2))")
 
 case "backups":
   // 连做 n 份（时间各差一秒），看只留最近几份、名字按时间排。
@@ -171,9 +191,16 @@ case "backups-same-second":
 
 case "pins":
   emit("PINS \(DatabaseBackup.recoveryPoints().map(\.lastPathComponent).joined(separator: ","))")
+  emit("PINS-HERE \(DatabaseBackup.recoveryPointsOfCurrentDatabase().map(\.lastPathComponent).joined(separator: ","))")
+  emit("HINT \(DatabaseBackup.newestBackupOfCurrentDatabase()?.lastPathComponent ?? "none")")
+
+case "attempt-marker":
+  // 记下「要起了」，进程号还没补上（补进程号那一下没记上就是这样）。
+  try! ServerRecord.writeAttempt(runtime: NaviConfig.targetRuntimeURL)
+  emit("MARKED")
 
 case "confirm":
-  ServerRecord.confirmServing(pid: Int(args[2])!)
+  ServerRecord.confirmServing(pid: Int(args[2])!, observedAt: Date())
   emit("PINS \(DatabaseBackup.recoveryPoints().map(\.lastPathComponent).joined(separator: ","))")
 
 default:

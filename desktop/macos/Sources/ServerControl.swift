@@ -1,41 +1,149 @@
 import Foundation
 import Darwin
 
-/// 「这份库最后交给哪一版 app 起、那一份起来过没有」。在数据根里记一笔 pid + 构建号：
+/// 「这份库最后交给哪一版 app 起、那一份起来过没有」。在数据根里记两件事，分开存：
 ///
-///  · 起服务**之前**先记下构建号（pid 还是 0）—— 写不进去就不起：恢复点认「这一次备过没有」靠的
-///    就是它（DatabaseBackup.covers），起了却没记下，下一版就会把一份过时的底当成这一次的。
-///  · 进程起来了补上 pid。
-///  · 端口上应答的正是记录里那个进程（`confirmServing`）= 这一版在这份库上起来过、迁移跑完了：
-///    记下确认时间，恢复点随之作废。不管是起它的那个启动器等到的，还是之后重开 app、登录项、
-///    另一个窗口看到的，都走这一处。
+///  · **在服务的那一份**（`pid` + `bundleVersion`）：确认应答过的那个进程、是哪一版 app 起的。只有确认
+///    （`confirmServing`）会改它 —— 起服务的人自己说了不算。
+///  · **这一次起服务**（`attempt`）：起之前先记下构建号和时刻（pid 还是 0；写不进去就不起），进程起来了补上 pid。
+///    它应答了（不管是起它的那个启动器等到的，还是之后重开 app、登录项、另一个窗口看到的）才升成在服务的那一份。
+///    没应答就退了、等超时了、端口被别人抢了，它都只是一次没成的尝试，留在 `attempt` 里，在服务的那一份原样不动。
 ///
-/// 换了新版 app（Sparkle 装完重开、`build.sh --install`）再连上时，pid 还是那个、构建号却不是
-/// 自己 = 服务还在跑旧版代码，而且它后面才加载的模块已经是新版的文件了 —— 两版混着跑。见
-/// UpdateGate 的 `.staleServer`。记录里的 pid 对不上就是「不知道」，不当成旧版。
+/// 分开存是因为起服务的结局启动器自己说不准：被锁挡下、迟迟才退、起了一半又换了人……要是起之前就拿新进程
+/// 盖掉在服务的那一份，任何一条没对上账的路都会让端口上那份旧服务从此「pid 对不上 = 不知道是谁」。
+///
+/// **确认是一次带时刻的比较交换**：几处（窗口、登录项、另一个 app 进程）各自探活、各自确认，探到和记账之间
+/// 隔着多久谁也说不准。所以读、改、写都在同一把文件锁里（`locked`，恢复点清单的增删也在这把锁里），确认带上
+/// 「这一眼是什么时候发出去的」：
+///  · 应答的是这一次尝试的那个进程：升成在服务的那一份。尝试只有最新的一次（新的尝试会盖掉旧的），所以迟到的
+///    一眼最多确认它自己那一代，盖不掉之后才起的那一次。
+///  · 应答的是在服务的那一份：只有这一眼发出去的时候晚于这一次尝试开始，才算「尝试之后它还在写库」—— 更早
+///    的一眼说明不了尝试之后的事，什么都不改。
+/// current（新开的 MCP 用哪一版运行时，RuntimeStore.follow）在同一处、同一个判断下跟过去，切不过去就整次不记，
+/// 下一眼再来。
+///
+/// 库最后交给了哪一版（`lastHandedTo`）：尝试比最近一次确认晚，就是尝试那一版 —— 它可能已经动过库（迁移不可逆），
+/// 恢复点认「这一次备过没有」靠的就是它（DatabaseBackup.covers）。尝试之后在服务的那一份又被确认过（旧服务
+/// 缓过来了、接着写库），就是在服务的那一版：下一次起之前要照常再备一份。
+///
+/// 这几笔账都是对**某一份库**记的：尝试、确认、恢复点（DatabaseBackup.Pin）各自记下当时数据根里是哪一份库
+/// （DatabaseFile.identity）。眼前的库换过了（第一次全新开始没起来、之后导入了一份；导入的那份没起来、挪走后又导入
+/// 一份；回退到迁移前换回了恢复点），记的那一版说明不了它，算「不知道」，起之前照常备份；别的库的恢复点照样留着，
+/// 不算它备过，也不当成它的恢复入口；对着另一份库的确认不算数。改这套记账之前的老记录没记库，按原样认。
+///
+/// 换了新版 app（Sparkle 装完重开、`build.sh --install`）再连上时，在服务的那一份构建号不是自己 = 服务还在跑
+/// 旧版代码。见 UpdateGate 的 `.staleServer`。pid 对不上就是「不知道」，不当成旧版。
 struct ServerRecord: Codable {
+  struct Attempt: Codable {
+    let pid: Int
+    let bundleVersion: String
+    /// 这一次起服务记下的时刻（备份之后、起进程之前）。这之前留的恢复点都是给它的。
+    let startedAt: Date
+    /// 那时数据根里是哪一份库（见类型顶部）。
+    var database: String? = nil
+    /// 起的是哪一份运行时（codeDir）：应答的那个跑的不是它，就不是这次起出来的。
+    var runtime: String? = nil
+  }
+
   static let fileName = ".mac-server.json"
+  /// 读改写那把锁（`locked`）的文件，跟记录本身一样是 app 自己的（DataImport.appOwned）。
+  static let lockFileName = fileName + ".lock"
   static var url: URL { NaviConfig.dataURL.appendingPathComponent(fileName) }
+  private static var lockURL: URL { NaviConfig.dataURL.appendingPathComponent(lockFileName) }
 
   let pid: Int
   let bundleVersion: String
-  /// 最近一次确认有服务在这份库上起来过的时间（比它早的恢复点作废）。
+  /// 最近一次确认的时刻：比它早的恢复点作废（DatabaseBackup.validPins）。升级确认记的是那次尝试开始的时刻，
+  /// 再确认记的是那一眼发出去的时刻 —— 都不会晚于「看到它在服务」，确认之后别人才留的底不会被它顺带作废。
   var confirmedAt: Date? = nil
+  /// 最近一次起服务（见类型顶部）。
+  var attempt: Attempt? = nil
+  /// 确认那一刻数据根里是哪一份库（见类型顶部）。
+  var database: String? = nil
 
-  /// 要起服务了：先记下是这一版。写不进去抛错，调用方就别起。
-  static func writeAttempt(version: String = NaviConfig.bundleVersion) throws {
-    try save(ServerRecord(pid: 0, bundleVersion: version, confirmedAt: read()?.confirmedAt))
+  /// 库最后交给了哪一版 app（见类型顶部）。
+  var lastHandedTo: String {
+    let current = DatabaseFile.identity(in: NaviConfig.dataURL)
+    if let attempt, attempt.startedAt > (confirmedAt ?? .distantPast), DatabaseFile.isSame(attempt.database, as: current) {
+      return attempt.bundleVersion
+    }
+    return DatabaseFile.isSame(database, as: current) ? bundleVersion : "unknown"
   }
 
-  static func write(pid: Int, version: String = NaviConfig.bundleVersion) {
-    try? save(ServerRecord(pid: pid, bundleVersion: version, confirmedAt: read()?.confirmedAt))
+  /// 要起服务了：先记下是这一版、用哪一份运行时、什么时候起的、对着哪一份库（还没有库也记）。写不进去抛错，
+  /// 调用方就别起。
+  static func writeAttempt(version: String = NaviConfig.bundleVersion, runtime: URL) throws {
+    try locked {
+      try save(with(attempt: Attempt(pid: 0, bundleVersion: version, startedAt: Date(),
+                                     database: DatabaseFile.identity(in: NaviConfig.dataURL), runtime: runtime.path)))
+    }
   }
 
-  /// 端口上自己那份应答了：是记录里那个进程，就确认它起来过。
-  static func confirmServing(pid: Int?) {
-    guard let pid, pid > 1, let record = read(), record.pid == pid else { return }
-    try? save(ServerRecord(pid: record.pid, bundleVersion: record.bundleVersion, confirmedAt: Date()))
-    DatabaseBackup.releaseRecoveryPoints()
+  /// 起出来的进程号，补进这一次尝试（没有先记下尝试的 —— 回退时拉起旧版那一下 —— 从现在算起）。记不下返回 false：
+  /// 尝试里还是 0，只有起它、手里攥着这个进程号的那个启动器认得出它（confirmServing 的 `launchedHere`）；别人
+  /// 看到它应答也说不准它是不是这次起的，就当不知道。
+  @discardableResult
+  static func write(pid: Int, version: String = NaviConfig.bundleVersion, runtime: URL) -> Bool {
+    do {
+      try locked {
+        let pending = read()?.attempt.flatMap { $0.pid == 0 && $0.bundleVersion == version ? $0 : nil }
+        try save(with(attempt: Attempt(pid: pid, bundleVersion: version, startedAt: pending?.startedAt ?? Date(),
+                                       database: pending?.database ?? DatabaseFile.identity(in: NaviConfig.dataURL),
+                                       runtime: runtime.path)))
+      }
+      return true
+    } catch { return false }
+  }
+
+  /// 端口上自己那份（`pid`，跑的是 `codeDir`）应答了，探活是 `observedAt` 发出去的。按类型顶部那两条记账；
+  /// 记上了，比确认时刻早、同一份库的恢复点作废，这次切换的恢复事务（RuntimeRecovery.confirmed）也在同一把锁里了结。
+  /// 别的进程、过时的一眼、记着另一份库的账、跑的不是那次尝试那份运行时的都不算。尝试里的进程号还是 0 时，只有
+  /// `launchedHere`（调用方就是起这个进程、拿着它进程号的启动器）认它。返回这一眼记上了没有（没有记录可对也算）。
+  ///
+  /// 记下的「是哪份库」是这一刻数据根里那份，所以先要证明它就是这个进程开着的那份：它此刻还握着这份库的单实例锁
+  /// （server 开库之前就拿锁，一直握到退出；app 起的服务都写锁）。它已经退了、握锁的是别人，这一眼就说明不了眼前
+  /// 这份库 —— 不管记录里记的是「那时没有库」、没记、还是同一份 —— 一律不记。
+  /// 从查锁到落账都在服务记录锁里，换库的两处（导入发布 DataImport.publish、回退换回迁移前的库
+  /// RuntimeRecovery.restoreBeforeAdoption）也在这把锁里换、换之前在锁里重查没人握着库锁：查过锁之后库换不上来，
+  /// 换上来之后握着锁的也不会是换之前就开着别的库的那个进程。锁的顺序一律是启动锁 → 服务记录锁。
+  @discardableResult
+  static func confirmServing(pid: Int?, codeDir: String? = nil, observedAt: Date, launchedHere: Bool = false) -> Bool {
+    guard let pid, pid > 1 else { return false }
+    return (try? locked { () -> Bool in
+      guard let holder = DatabaseFile.liveHolder(in: NaviConfig.dataURL), Int(holder.pid) == pid else {
+        RuntimeLog.record("server.confirm_deferred", ["serverPid": pid, "step": "database"])
+        return false
+      }
+      let database = DatabaseFile.identity(in: NaviConfig.dataURL)
+      guard let record = read() else {
+        RuntimeRecovery.confirmed(codeDir: codeDir)
+        return true
+      }
+      let confirmed: ServerRecord
+      // 那时没有库（"none"）：库就是它建的（它握着眼前这份库的锁，见上）。
+      if let attempt = record.attempt, attempt.database == "none" || !DatabaseFile.contradicts(attempt.database, database),
+         attempt.pid == pid || (attempt.pid == 0 && launchedHere),
+         attempt.runtime == nil || codeDir.map({ NaviHealth.samePath($0, attempt.runtime!) }) ?? true {
+        confirmed = ServerRecord(pid: pid, bundleVersion: attempt.bundleVersion,
+                                 confirmedAt: max(record.confirmedAt ?? .distantPast, attempt.startedAt), database: database)
+      } else if record.pid == pid, !DatabaseFile.contradicts(record.database, database),
+                observedAt > (record.attempt?.startedAt ?? .distantPast) {
+        confirmed = ServerRecord(pid: pid, bundleVersion: record.bundleVersion,
+                                 confirmedAt: max(record.confirmedAt ?? .distantPast, observedAt), attempt: record.attempt,
+                                 database: database)
+      } else { return false }
+      guard RuntimeStore.follow(codeDir) else {
+        RuntimeLog.record("server.confirm_deferred", ["serverPid": pid, "step": "runtime"])
+        return false
+      }
+      do { try save(confirmed) } catch {
+        RuntimeLog.record("server.confirm_deferred", ["serverPid": pid, "step": "record"])
+        return false
+      }
+      DatabaseBackup.dropReleasedPoints()
+      RuntimeRecovery.confirmed(codeDir: codeDir)
+      return true
+    }) ?? false
   }
 
   static func read() -> ServerRecord? {
@@ -43,14 +151,56 @@ struct ServerRecord: Codable {
     return try? JSONDecoder().decode(ServerRecord.self, from: data)
   }
 
+  /// 原样换回一份（回退到迁移前时，换回切换之前那一份）。
+  static func replace(with record: ServerRecord) throws {
+    try locked { try save(record) }
+  }
+
+  /// 服务记录和恢复点清单的读改写都在这把锁里（跨进程，同一进程里的几个线程也互斥）。不可重入。锁里的活
+  /// 都很短（最长是切一次 current），等满 `timeout` 还拿不到就是持有者卡住了：抛错，不跟着它一起卡。
+  static func locked<T>(timeout: TimeInterval = 15, _ body: () throws -> T) throws -> T {
+    let fd = open(lockURL.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+    guard fd >= 0 else { throw SQLiteFile.Failure("打不开服务记录锁（\(String(cString: strerror(errno)))）") }
+    defer { close(fd) }
+    let deadline = Date().addingTimeInterval(timeout)
+    while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+      guard errno == EWOULDBLOCK || errno == EINTR else {
+        throw SQLiteFile.Failure("拿不到服务记录锁（\(String(cString: strerror(errno)))）")
+      }
+      guard Date() < deadline else {
+        throw SQLiteFile.Failure("服务记录锁（\(lockURL.path)）被另一处占着 \(Int(timeout)) 秒没放，这一次没做。")
+      }
+      Thread.sleep(forTimeInterval: 0.05)
+    }
+    return try body()
+  }
+
+  private static func with(attempt: Attempt) -> ServerRecord {
+    let record = read()
+    return ServerRecord(pid: record?.pid ?? 0, bundleVersion: record?.bundleVersion ?? "unknown",
+                        confirmedAt: record?.confirmedAt, attempt: attempt, database: record?.database)
+  }
+
   private static func save(_ record: ServerRecord) throws {
     try JSONEncoder().encode(record).write(to: url, options: .atomic)
   }
 
+  /// 正在应答的这个进程是哪一版 app 起的：在服务的那一份，或者这一次起出来、还没来得及确认的那个。认不出是 nil。
+  private static func version(servingPID pid: Int?) -> String? {
+    guard let pid, pid > 1, let record = read() else { return nil }
+    if let attempt = record.attempt, attempt.pid == pid { return attempt.bundleVersion }
+    return record.pid == pid ? record.bundleVersion : nil
+  }
+
+  /// 正在应答的这份（pid）就是这一版 app 起的。认不出是 false（不知道）。
+  static func servesThisBuild(pid: Int?) -> Bool {
+    version(servingPID: pid) == NaviConfig.bundleVersion
+  }
+
   /// 正在应答的这份（pid）是不是由别的构建号的 app 起的；是就返回那个构建号。
   static func staleVersion(servingPID pid: Int?) -> String? {
-    guard let pid, let record = read(), record.pid == pid, record.bundleVersion != NaviConfig.bundleVersion else { return nil }
-    return record.bundleVersion
+    guard let version = version(servingPID: pid), version != NaviConfig.bundleVersion else { return nil }
+    return version
   }
 }
 
@@ -140,6 +290,23 @@ enum ServerShutdown {
       didSignal()
       return waitGone(pid, timeout: timeout)
     }
+  }
+
+  enum HolderStop { case stopped, stillRunning, changed }
+
+  /// 用户在「服务没有应答」那一屏点了「停掉它」（`force`：它不理会、再点了「强制结束」）。只停认过的那一个进程：
+  /// 它还活着、还握着这份库的锁、这会儿还是没应答；换了人或者缓过来了，一律不停（`changed`，回去重新认）。
+  /// SIGTERM 要它自己的事件循环转起来才会处理，真卡死的进程等不到 —— 那时如实说（`stillRunning`），SIGKILL 由用户再点。
+  static func stopUnresponsive(_ holder: LockHolder, force: Bool, timeout: TimeInterval = 10) -> HolderStop {
+    guard DatabaseFile.liveHolder(in: NaviConfig.dataURL) == holder else { return .changed }
+    if case .navi(let instance) = NaviHealth.probeSync(), instance.pid == Int(holder.pid) { return .changed }
+    if kill(holder.pid, force ? SIGKILL : SIGTERM) != 0 { return errno == ESRCH ? .stopped : .changed }
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+      if !holder.isAlive { return .stopped }
+      Thread.sleep(forTimeInterval: 0.2)
+    }
+    return .stillRunning
   }
 
   private static func waitGone(_ pid: Int, timeout: TimeInterval) -> Result {

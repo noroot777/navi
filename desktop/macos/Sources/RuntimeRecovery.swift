@@ -31,21 +31,26 @@ enum RuntimeRecovery {
           NaviHealth.samePath(record.next, NaviConfig.targetRuntimeURL.path) else {
       throw SQLiteFile.Failure("新版切换恢复记录未定稿，未解除回退暂停")
     }
-    try RuntimeStore.activate(NaviConfig.targetRuntimeURL)
+    RuntimeStore.launchTarget()
     if FileManager.default.fileExists(atPath: pauseURL.path) { try FileManager.default.removeItem(at: pauseURL) }
   }
 
   static func record(previous: String, backup: URL?, finalized: Bool = false) throws {
     guard RuntimeStore.contains(previous) else { throw SQLiteFile.Failure("旧运行时身份不符") }
-    let record = Record(previous: NaviHealth.realPath(previous), next: NaviHealth.realPath(NaviConfig.targetRuntimeURL.path),
-                        backup: backup?.path, server: ServerRecord.read(), finalized: finalized)
-    try JSONEncoder().encode(record).write(to: url, options: .atomic)
+    // 跟确认（ServerRecord.confirmServing 里的 `confirmed`）在同一把锁里：迟到的确认删不到之后才记的这一份，
+    // 记下的「切换前在服务的那一份」也是这一刻的。
+    try ServerRecord.locked {
+      let record = Record(previous: NaviHealth.realPath(previous), next: NaviHealth.realPath(NaviConfig.targetRuntimeURL.path),
+                          backup: backup?.path, server: ServerRecord.read(), finalized: finalized)
+      try JSONEncoder().encode(record).write(to: url, options: .atomic)
+    }
   }
 
-  static func confirmed(_ instance: NaviInstance) {
-    guard instance.isOurs, let code = instance.codeDir,
-          let data = try? Data(contentsOf: url), let record = try? JSONDecoder().decode(Record.self, from: data),
-          NaviHealth.samePath(record.next, code) else { return }
+  /// 新版（`codeDir` 就是这次切换的目标）在这份库上应答了：切换了结。只由 ServerRecord.confirmServing 在它那把
+  /// 锁里、认准这一眼算数之后调。
+  static func confirmed(codeDir: String?) {
+    guard let code = codeDir, let data = try? Data(contentsOf: url),
+          let record = try? JSONDecoder().decode(Record.self, from: data), NaviHealth.samePath(record.next, code) else { return }
     try? FileManager.default.removeItem(at: url)
   }
 
@@ -64,14 +69,20 @@ enum RuntimeRecovery {
       defer { try? FileManager.default.removeItem(at: stage) }
       try SQLiteFile.snapshot(from: URL(fileURLWithPath: backup), to: stage)
       try SQLiteFile.snapshot(from: database, to: database.appendingPathExtension("failed-" + UUID().uuidString))
-      guard rename(stage.path, database.path) == 0 else { throw SQLiteFile.Failure("无法发布恢复后的数据库") }
-      for suffix in ["-wal", "-shm", "-journal"] { try? FileManager.default.removeItem(atPath: database.path + suffix) }
+      // 换库在服务记录锁里、换之前重查没人握着库锁（见 ServerRecord.confirmServing）。
+      try ServerRecord.locked {
+        if let holder = DatabaseFile.liveHolder(in: NaviConfig.dataURL) {
+          throw SQLiteFile.Failure("还有服务进程 \(holder.pid) 开着库，未自动覆盖数据库；迁移前恢复点仍保留。")
+        }
+        guard rename(stage.path, database.path) == 0 else { throw SQLiteFile.Failure("无法发布恢复后的数据库") }
+        for suffix in ["-wal", "-shm", "-journal"] { try? FileManager.default.removeItem(atPath: database.path + suffix) }
+      }
     }
     let previous = URL(fileURLWithPath: record.previous, isDirectory: true)
     let pause = Pause(previous: record.previous, version: record.server?.bundleVersion ?? "unknown", reason: reason)
     try JSONEncoder().encode(pause).write(to: pauseURL, options: .atomic)
     try RuntimeStore.activate(previous)
-    if let server = record.server { try JSONEncoder().encode(server).write(to: ServerRecord.url, options: .atomic) }
+    if let server = record.server { try ServerRecord.replace(with: server) }
     try FileManager.default.removeItem(at: url)
     return previous
   }

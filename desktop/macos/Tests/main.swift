@@ -23,6 +23,9 @@ func outcomeCode(_ outcome: ServerLauncher.Outcome) -> Int32 {
   case .occupied(let explanation):
     print("OCCUPIED: \(explanation)")
     return 2
+  case .unresponsive(let holder, let explanation):
+    print("UNRESPONSIVE \(holder.pid): \(explanation)")
+    return 4
   case .failed(let reason):
     print("FAILED: \(reason)")
     return 1
@@ -119,11 +122,11 @@ if mode == "deeplink" {
     NaviInstance(pid: 1, id: "i", dataDir: "/d", codeDir: "/c", localOnly: localOnly, desktop: true, tag: nil, windowPort: 1)
   }
   require(!ServedInstance.networkPending, "unknown service is not reported as pending")
-  ServedInstance.observe(served(false))
+  ServedInstance.observe(served(false), askedAt: Date())
   require(ServedInstance.networkPending, "local-only wanted, service listens everywhere: pending")
-  ServedInstance.observe(served(true))
+  ServedInstance.observe(served(true), askedAt: Date())
   require(!ServedInstance.networkPending, "service started local-only matches")
-  ServedInstance.observe(served(false))
+  ServedInstance.observe(served(false), askedAt: Date())
   ServedInstance.forget()
   require(!ServedInstance.networkPending, "forgotten service is unknown again")
   print("DEEPLINK OK")
