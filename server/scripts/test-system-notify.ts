@@ -5,7 +5,8 @@
 //    续聊挂了放回原 done，不说「完成了」；记底之后、头一次全量对账之前收拾出来的中断（启动恢复），全量对账照推，
 //    也不提前推；已验收任务的续聊在重启时挂了，全量对账也找得到它；记底时有任务读不清（讨论记录打不开），别的任务照常
 //    推，它读得清了只补记不补推；记底时正在续聊、早就审过的任务，续聊停下来不把老审查结论当新的推；
-// ② 新任务：跑完等验收推一条，重复对账不再推；
+// ② 新任务：跑完等验收推一条，重复对账不再推；对账读现状的半路上任务刚好完成（视图读到在跑、身份读到已完成），
+//    那次完成照推，不先记进账吞掉；
 // ③ 停下来提问推一条，带上问题；跑挂了（中断）推一条；验收落章推一条，「等你验收」那件事没了不另推；
 // ④ 验证没过、验收前置命令没过各推一条；门禁通过不单推；同一版重新验证又没过再推，同一版的「等你验收」只说一次；
 // ⑤ 回合锁还占着（这一轮还在结算）先不推，锁放开自己再对一次；
@@ -159,6 +160,48 @@ try {
   assert.deepEqual(await reconcile("t1"), [], "重复对账不再推");
   await db.insert(tasks).values(task({ id: "t1b", title: "一眨眼就干完了", status: "done", doneSeq: 1, endedAt: at() }) as never);
   assert.deepEqual(kinds(await reconcile("t1b")), [["t1b", "accept"]], "新任务头一眼就是跑完了：推");
+
+  // 读现状的半路上完成：视图那一读拿到 running 之后，另一处落 done#1（不等这边，自己去写）；身份那一读等它写完再读
+  // （最多等一会儿：写要是排在这边的写锁后面，就等不到）
+  await db.insert(tasks).values(task({ id: "race", title: "读的时候完成了", status: "running" }) as never);
+  const select = db.select.bind(db);
+  let landed!: () => void;
+  const completed = new Promise<void>((resolve) => { landed = resolve; });
+  let viewRead = false;
+  (db as { select: unknown }).select = (fields?: Record<string, unknown>) => {
+    const builder = select(fields as never) as any;
+    const gate = fields === undefined && !viewRead ? "view" : fields && "doneSeq" in fields ? "facts" : null;
+    if (gate === "view") viewRead = true;
+    if (!gate) return builder;
+    const from = builder.from.bind(builder);
+    builder.from = (...args: unknown[]) => {
+      const query = from(...args);
+      const where = query.where.bind(query);
+      query.where = (...conds: unknown[]) => new Proxy(where(...conds), {
+        get(target, prop, receiver) {
+          if (prop !== "then") return Reflect.get(target, prop, receiver);
+          return (ok: (rows: unknown) => unknown, bad: (error: unknown) => unknown) => (async () => {
+            if (gate === "facts") await Promise.race([completed, sleep(100)]);
+            const rows = await target;
+            if (gate === "view") void set("race", { status: "done", doneSeq: 1, endedAt: at() }).then(() => landed());
+            return rows;
+          })().then(ok, bad);
+        },
+      });
+      return query;
+    };
+    return builder;
+  };
+  let raced: Notice[];
+  try {
+    raced = await reconcile("race");
+  } finally {
+    (db as { select: unknown }).select = select;
+  }
+  assert.deepEqual(raced, [], "读到的是同一刻的在跑");
+  await completed;
+  assert.deepEqual(kinds(await reconcile("race")), [["race", "accept"]], "那次完成照推，没被先记进账");
+  assert.deepEqual(await reconcile("race"), [], "不重复");
 
   // ── ③ 提问、中断、验收落章 ─────────────────────────────────────────────
   await db.insert(tasks).values(task({ id: "t2", title: "要拍板", status: "running" }) as never);
