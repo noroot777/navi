@@ -26,6 +26,10 @@ export const NAVI_HEADERS = {
   hostToken: "x-navi-host-token",
   /** 这个请求是发给哪一台实例的（同端口换了实例时据此拒收）。 */
   instance: "x-navi-instance",
+  /** MCP 每次调用的请求号：同一次调用重试时原样带上，服务端按它只执行一次（server/src/request-receipts.ts）。 */
+  requestId: "x-navi-request-id",
+  /** 响应头：这一份服务按请求号记账（`recorded`）或这是记下的那份答复（`replayed`）。 */
+  requestReceipt: "x-navi-request-receipt",
 } as const satisfies Record<string, NaviHeaderName>;
 
 /** 同一个头的各代名字，新名在前：`x-navi-turn-token` → `["x-navi-turn-token", "x-ash-turn-token"]`。 */

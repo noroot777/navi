@@ -2,10 +2,14 @@
 // 这个不对称是刻意的，别顺手统一掉。
 //
 // 两个消费者：
-// ① `mcp/src/index.ts` 的 `call()`：拿到的是 Node 抛的 error code，在**自己进程里**
-//    退避重试，覆盖「server 在重启、MCP 还活着」。它对**所有工具**一视同仁（包括
-//    `dispatch` 这种非幂等的），所以只敢认 `UNDELIVERED_NET_CODES` 那三个码——
-//    ECONNREFUSED 意味着根本没人监听，请求一个字节都没发出去。
+// ① `mcp/src/runtime.ts` 的 `request()`：拿到的是 Node 抛的 error code，在**自己进程里**
+//    退避重试，覆盖「server 在重启、MCP 还活着」。分两档：
+//    · `UNDELIVERED_NET_CODES`（ECONNREFUSED…）：根本没人监听，请求一个字节都没发出去，谁都能重试；
+//    · `AMBIGUOUS_NET_CODES`（ECONNRESET、对端关闭…）：连上了又断，**可能已经执行**。只有服务端
+//      按请求号记账（`server/src/request-receipts.ts`：执行过的原样回放记下的答复，执行到一半
+//      被停掉的交卷端点重做、其余如实答「不确定」）时重试才不会把 `dispatch` 这类做两遍 ——
+//      所以 MCP 只在见过这份服务的记账回执头之后、或者撞上的是交卷端点（`isTurnReportPath`，
+//      重做一遍结果不变）时才重试这一档。
 // ② `server/src/mcp-handoff.ts` 的补捞：拿到的是 agent 输出流里记下的**错误文本**
 //    （"Transport closed"…），在回合结算时替 agent 重放，覆盖「MCP 进程被杀」——
 //    ①那套救不了这种，因为重试的代码跟着一起死了。它可以宽到 `UNDELIVERED_PHRASES`
@@ -27,6 +31,23 @@
  * 注释：Node 26 下 `http://localhost:<关闭端口>` 抛的是 AggregateError。
  */
 export const UNDELIVERED_NET_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]);
+
+/**
+ * 「送到了一半」：连接建立过、请求可能已经在服务端执行，然后连接断了（服务在处理中被停掉、
+ * 被强杀，或者响应没写完）。undici 报对端关闭是 `UND_ERR_SOCKET`。重试它的前提见文件头 ①。
+ */
+export const AMBIGUOUS_NET_CODES = new Set(["ECONNRESET", "EPIPE", "ECONNABORTED", "UND_ERR_SOCKET", "UND_ERR_CLOSED"]);
+
+/**
+ * 交卷那几个端点（report_stage / complete_task / pause_task / ask_question）：把 agent 已经做出的判断
+ * 写回本任务自己的状态，写同一个值，重做一遍结果不变。执行到一半被停机打断时，服务端按请求号认出来
+ * 就在新服务上重做（request-receipts.ts），MCP 撞上「送到了一半」也敢重试它们。
+ *
+ * 跟 `REPLAYABLE_MCP_TOOLS` 比多了 `ask`：那份是回合结算时替 agent 补录，agent 早已绕过去收尾了；
+ * 这里是 agent 还卡在这次调用上等答复，重做的就是它此刻要的那一个问题。
+ */
+const TURN_REPORT_PATH = /^(?:\/api)?\/tasks\/[^/?]+\/(?:stage|complete|pause|ask)(?:\?|$)/;
+export const isTurnReportPath = (path: string): boolean => TURN_REPORT_PATH.test(path);
 
 // 各家 CLI 在 MCP 通道断掉时写进事件流的说法。全部小写后做子串匹配。
 // codex(rmcp) 实测：`tool call failed for \`navi/report_stage\`\n\nCaused by:\n    Transport closed`
