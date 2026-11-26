@@ -89,7 +89,7 @@ export function terminalScreenView(terminal: Terminal) {
     core._bufferService.isUserScrolling = buffer.ydisp < frame.base;
     core.coreService.isCursorHidden = frame.cursorHidden;
     core.coreService.isCursorInitialized = true;
-    Object.assign(core.coreService.decPrivateModes, frame.modes, { synchronizedOutput: false });
+    Object.assign(core.coreService.decPrivateModes, frame.modes);
     if (core.coreMouseService.activeProtocol !== frame.mouseProtocol) core.coreMouseService.activeProtocol = frame.mouseProtocol;
     if (core.coreMouseService.activeEncoding !== frame.mouseEncoding) core.coreMouseService.activeEncoding = frame.mouseEncoding;
     terminal.options.cursorStyle = frame.cursorStyle;

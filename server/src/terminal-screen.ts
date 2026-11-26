@@ -2,6 +2,9 @@ import type { Terminal } from "@xterm/headless";
 import type { ScreenLine, ScreenPresentation, TerminalScreenFrame, XtermScreenBuffer, XtermScreenLine } from "@navi/shared/terminal-screen";
 import type { TerminalTheme } from "@navi/shared/terminal-themes";
 
+const SYNCHRONIZED_OUTPUT_MODE = 2026;
+const SYNCHRONIZED_OUTPUT_TIMEOUT_MS = 1000;
+
 type ScreenCore = {
   _bufferService: { buffer: XtermScreenBuffer; buffers: {
     alt: XtermScreenBuffer;
@@ -44,10 +47,12 @@ export function createTerminalScreen(
   let previousBuffer: XtermScreenBuffer | undefined;
   let previousList: XtermScreenBuffer["lines"] | undefined;
   let cachedLines: ScreenLine[] = [];
+  const cachedLinks = new Map<number, string>();
   let normalList: XtermScreenBuffer["lines"] | undefined;
   let trim: { dispose(): void } | undefined;
   let discarded = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let syncTimeout: ReturnType<typeof setTimeout> | undefined;
   let exitCode: number | undefined;
   let failed = false;
   let finished = false;
@@ -75,9 +80,14 @@ export function createTerminalScreen(
     return [...urls];
   };
 
-  function capture(): void {
+  const isSynchronized = () => core.coreService.decPrivateModes.synchronizedOutput;
+
+  function commit(): void {
     if (timer) clearTimeout(timer);
     timer = undefined;
+    if (isSynchronized()) return;
+    clearTimeout(syncTimeout);
+    syncTimeout = undefined;
     const buffer = core._bufferService.buffer;
     const alternate = buffer === core._bufferService.buffers.alt;
     const presentation: ScreenPresentation = {
@@ -97,9 +107,15 @@ export function createTerminalScreen(
       nextLines.push(line);
       if (full || JSON.stringify(line) !== JSON.stringify(cachedLines[row + drop])) lines.push([row, line]);
     }
+    const links = linksFor(lines);
+    if (full) cachedLinks.clear();
+    for (const id of cachedLinks.keys()) {
+      if (!core._oscLinkService.getLinkData(id)) cachedLinks.delete(id);
+    }
+    for (const [id, uri] of links) cachedLinks.set(id, uri);
     const frame: TerminalScreenFrame = {
       ...presentation, seq: (previous?.seq ?? 0) + 1, cols: terminal.cols, rows: terminal.rows,
-      base: buffer.ybase, length: nextLines.length, discarded, drop, full, lines, links: linksFor(lines),
+      base: buffer.ybase, length: nextLines.length, discarded, drop, full, lines, links,
       exitCode, error: failed || undefined,
     };
     previous = frame;
@@ -110,12 +126,34 @@ export function createTerminalScreen(
     for (const listener of listeners) listener(frame);
   }
 
+  const syncStart = terminal.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
+    if (params.includes(SYNCHRONIZED_OUTPUT_MODE) && !isSynchronized()) {
+      commit();
+      syncTimeout = setTimeout(forceCommit, SYNCHRONIZED_OUTPUT_TIMEOUT_MS);
+    }
+    return false;
+  });
+
+  function forceCommit(): void {
+    core.coreService.decPrivateModes.synchronizedOutput = false;
+    commit();
+  }
+
   let finalFrame: TerminalScreenFrame | undefined;
   const snapshot = () => {
     if (finalFrame) return finalFrame;
-    if (!previous || timer) capture();
+    if (!previous || timer) commit();
     const lines = cachedLines.map((line, row): [number, ScreenLine] => [row, line]);
-    return { ...previous!, full: true, drop: 0, lines, links: linksFor(lines) };
+    return { ...previous!, full: true, drop: 0, lines, links: [...cachedLinks] };
+  };
+
+  const schedule = (resized = false) => {
+    if (finished) return;
+    geometryChanged ||= resized;
+    if (isSynchronized()) return;
+    clearTimeout(syncTimeout);
+    syncTimeout = undefined;
+    if (timer === undefined) timer = setTimeout(commit, 16);
   };
 
   return {
@@ -125,24 +163,21 @@ export function createTerminalScreen(
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
-    schedule(resized = false) {
-      if (finished) return;
-      geometryChanged ||= resized;
-      if (timer === undefined) timer = setTimeout(capture, 16);
-    },
+    schedule,
     finish(code: number) {
       if (finished) return;
       exitCode = code;
-      capture();
+      forceCommit();
       finalFrame = snapshot();
       finished = true;
       trim?.dispose();
       activation.dispose();
+      syncStart.dispose();
       previousBuffer = previousList = normalList = undefined;
     },
     fail() {
       failed = true;
-      if (timer === undefined) timer = setTimeout(capture, 16);
+      schedule();
     },
   };
 }

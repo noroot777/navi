@@ -430,8 +430,29 @@ async function runBrowser() {
     assert.ok(sent === expected, JSON.stringify({ actualLength: sent.length, expectedLength: expected.length, mismatch,
       actual: sent.slice(mismatch, mismatch + 60), expected: expected.slice(mismatch, mismatch + 60) }));
     assert.ok(inputs.slice(start).every((entry) => Buffer.byteLength(entry.data) <= 64 * 1024));
+    const beforeInterrupt = inputs.length;
     await page.keyboard.press("Control+c");
+    await waitFor(() => inputs.slice(beforeInterrupt).some((entry) => entry.data.includes("\x03")), "large paste interrupted");
     console.log("PASS: vi editing, silent history replay, live replies, multiline backspace and large Unicode paste");
+
+    await input.focus();
+    manager.write(first, projectId, [
+      "printf '\\033[2J\\033[H\\137VISIBLE_SYNC__\\033[?2026h\\033[2J\\033[H\\137PARTIAL_SYNC__\\033[6n'",
+      "IFS= read -rst 2 -d R reply && printf '\\r\\n\\137SYNC_QUERY_OK__'",
+      "read -r commit",
+      "printf '\\033[2J\\033[H\\137COMMITTED_SYNC__\\033[?2026l\\r\\n'",
+    ].join("; ") + "\r");
+    await waitFor(() => outputOf(first).includes("\r\n_SYNC_QUERY_OK__"), "query answered during synchronized output");
+    await waitFor(() => viewport.innerText().then((text) => text.includes("_VISIBLE_SYNC__")), "last committed frame is visible");
+    await outlastPageTimers(page, 60);
+    assert.match(await viewport.innerText(), /_VISIBLE_SYNC__/);
+    assert.doesNotMatch(await viewport.innerText(), /_PARTIAL_SYNC__|_SYNC_QUERY_OK__/);
+    await viewport.screenshot({ path: "/tmp/navi-terminal-sync-held.png" });
+    manager.write(first, projectId, "\r");
+    await waitFor(() => viewport.innerText().then((text) => text.includes("_COMMITTED_SYNC__")), "completed frame is visible");
+    assert.doesNotMatch(await viewport.innerText(), /_PARTIAL_SYNC__|_SYNC_QUERY_OK__/);
+    await viewport.screenshot({ path: "/tmp/navi-terminal-sync-committed.png" });
+    console.log("PASS: synchronized redraw remains hidden while terminal queries still receive replies");
 
     for (const automatic of [false, true]) {
       const mode = automatic ? "RECONNECT" : "REOPEN";
