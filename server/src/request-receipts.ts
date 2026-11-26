@@ -41,13 +41,17 @@ const READS = new Set(["GET", "HEAD", "OPTIONS"]);
  *  · complete  交出哨兵结果那一笔把请求号写在同一条认领语句里（monitor-turn-handoff.ts），重进时交回同一份；
  *              落确认那一笔是给同一列写一个时刻、清掉系统自己写的等待，重做结果不变
  *  · pause     交出哨兵结果同上；写检查点那一笔在同一个事务里写下答复（task-resume-prompt.ts），走不到这里
- *  · ask       挂问题那一笔在同一个事务里写下答复（task-question.ts），走不到这里；没提交就照常挂
- * 上报阶段（stage）不在这里：审查结论那条线有轮次、裁定和终局校验，认不出自己做过的那一笔，重进会被当成
- * 第二次上报拒掉，如实答「不确定」更对。
+ *  · ask       挂问题那一笔在同一个事务里写下答复（task-question.ts），走不到这里
+ *  · stage     阶段与自由审查结论那一笔都在同一个事务里写下答复（task-stage.ts、free-workflow.ts），走不到这里
+ * 「同一个事务里写下答复」的那几条，走到这里就说明业务那一笔没提交（提交了答复一定在），重进就是第一次做。
+ * 其余端点不在这里：没有这样的凭据，重进可能做第二遍。
  */
-const RECOVERABLE = /^\/api\/tasks\/[^/]+\/(?:complete|pause|ask)$/;
+const RECOVERABLE = /^\/api\/tasks\/[^/]+\/(?:complete|pause|ask|stage)$/;
 
 export const REQUEST_OUTCOME_UNKNOWN = "这次调用在上一份服务停下时还没处理完，执行到哪一步不确定，没有替你重做："
+  + "先核对现状（如 get_task）再决定要不要重新发起";
+
+export const WRONG_LEDGER = "这次调用当初记在另一本账上，重试打到的服务换了一份库，这里没有执行它；原来那一次执行了没有不确定："
   + "先核对现状（如 get_task）再决定要不要重新发起";
 
 type Stored = { fingerprint: string; status: number | null; contentType: string | null; body: string | null; effect: string | null };
@@ -135,6 +139,12 @@ export function requestReceipts(): MiddlewareHandler {
     const id = readHeader((name) => c.req.header(name), NAVI_HEADERS.requestId);
     if (!id) return next();
     if (!VALID_ID.test(id)) return c.json({ error: "请求号格式不对，请求未执行" }, 400);
+    // 重发的调用带着它当初记在哪本账上（mcp/src/runtime.ts）：不是这一本，这里没有它的记录，执行就可能是第二遍。
+    const expected = readHeader((name) => c.req.header(name), NAVI_HEADERS.requestLedger);
+    if (expected && !READS.has(c.req.method) && expected !== await ledgerId()) {
+      c.header(NAVI_HEADERS.requestReceipt, await ledgerId());
+      return c.json({ error: WRONG_LEDGER, outcome: "unknown" }, 409);
+    }
     if (READS.has(c.req.method)) {
       await next();
       c.header(NAVI_HEADERS.requestReceipt, await ledgerId());

@@ -73,6 +73,7 @@ import { REVIEW_SWEEP_REMINDER } from "./review-sweep.js";
 import { id, now } from "./util.js";
 import type { Actor } from "./auth/context.js";
 import { canUseOwned } from "./auth/owned.js";
+import { markRequestEffect, type RequestEffect } from "./request-receipts.js";
 
 type ReviewRunRow = typeof freeReviewRuns.$inferSelect;
 
@@ -256,6 +257,8 @@ export async function reportFreeReviewConclusion(
     bySessionRecovery?: boolean; expectedTask?: ConclusionTask; expectedDirectionToken?: string | null;
     /** report_stage 的 `recurs`（同类问题承接，见 review-recurrence.ts）：读不懂的一条都不落，从不因它拒收结论。 */
     recurs?: unknown;
+    /** 这次调用的请求号与答复（request-receipts.ts）：跟结论那一笔在同一个事务里落库。 */
+    effect?: (review: { runId: string; round: number }) => RequestEffect;
   } = {},
 ): Promise<{ runId: string; round: number } | null> {
   const run = await reviewingRun(taskId);
@@ -302,6 +305,8 @@ export async function reportFreeReviewConclusion(
     if (evidence?.settlement && currentRound.conclusion !== stage) throw new Error("本轮已进入结算，不能更改结论");
     await transaction.update(freeReviewRounds).set({ conclusion: stage, carries: carries.length ? carries : null })
       .where(eq(freeReviewRounds.id, round.id));
+    const effect = opts.effect?.({ runId: run.id, round: run.currentRound });
+    if (effect) await markRequestEffect(transaction, effect.request, effect.answer);
   });
   bus.publish({ type: "task.review", taskId });
   return { runId: run.id, round: run.currentRound };

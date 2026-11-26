@@ -74,18 +74,19 @@ export function ambiguousCode(e: unknown): string | null {
 }
 
 // 这份服务记的是哪一本账(server/src/request-receipts.ts):带请求号的答复都带着账本号,随库走。
-// 「送到了一半」的写请求只在重发之前**再核对一次**对面还是这本账才重发 —— 执行过的那边回放记下的答复,
-// 执行到一半被停掉的按端点处置;换成了不记账的老版本服务、或者换了一份库,重发就可能做两遍,如实说不确定。
-// 只记「见过」不够(第 1 轮审查 N2):见过之后服务可能被换掉,重试打到的已经不是那一份。
-let ledger: string | null = null;
-let ledgerAsked = false;
+// `undefined` = 还不知道,`null` = 对面不记账(老版本服务)。
+//
+// 每一次写调用**开发之前**就绑定它记在哪本账上(`expected`),之后只认这一个,不认别的调用后来改写的全局值
+// (第 2 轮审查 N1:并发的读请求拿到换库后的账本号,会让断在半路的那一次以为对面还是原来那本)。绑定的账本号随
+// 请求头发过去,服务端账本对不上就不执行(换了库);老版本服务不认这个头,所以重发之前另外先问一次对面记不记账。
+let ledger: string | null | undefined;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const baseHeaders = (requestId: string): Record<string, string> =>
   ({ [NAVI_HEADERS.client]: "mcp", [NAVI_HEADERS.requestId]: requestId });
 
-/** 问一次对面记的是哪本账:`null` = 不记账,`undefined` = 这会儿没人答(在重启)。 */
+/** 问一次对面记的是哪本账:`null` = 不记账,`undefined` = 这会儿没人答(在重启、在初始化)。 */
 async function askLedger(): Promise<string | null | undefined> {
   try {
     const res = await fetch(`${BASE}/api/health`, { headers: baseHeaders(randomUUID()) });
@@ -97,12 +98,13 @@ async function askLedger(): Promise<string | null | undefined> {
   }
 }
 
-/** 重发之前:对面还是不是那本账。没人答就等到 deadline。 */
-async function sameLedger(deadline: number): Promise<boolean> {
+/** 一直问到有人答,或者到 deadline(返回 `undefined`)。没人答是等待,不是「问过了」(第 2 轮审查 F2)。 */
+async function waitLedger(deadline: number): Promise<string | null | undefined> {
   for (let delay = 400; ;) {
     const seen = await askLedger();
-    if (seen !== undefined) return seen !== null && seen === ledger;
-    if (Date.now() >= deadline) return false;
+    if (seen !== undefined) return seen;
+    if (Date.now() >= deadline) return undefined;
+    console.error(`[navi-mcp] 账本号暂时问不到 — server 可能在重启，${delay}ms 后再问`);
     await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
     delay = Math.min(delay * 2, 5_000);
   }
@@ -116,19 +118,27 @@ async function sameLedger(deadline: number): Promise<boolean> {
 // `complete_task` 走 HTTP —— 正好撞上重启那几秒就会硬失败,于是「进程活下来了、
 // 成果却丢了」。重试把这个窗口抹平。
 //
-// 每次调用带一个请求号,重试原样带上。「送到了一半」(服务在处理中被停掉)的读请求照常重试;写请求只在
-// 知道这份服务的账本号、而且每次重发之前核对过对面还是那本账时才重发(见 `ledger`)。头一次写之前先问一次
-// 账本号,不然进程起来后的第一笔写就没有凭据。不重发时如实说「不确定执行了没有」,不说成连不上。
+// 每次调用带一个请求号,重试原样带上。「送到了一半」(服务在处理中被停掉)的读请求照常重试;写请求只在它绑定
+// 了一本账、而且每次重发之前问过对面还是那本账时才重发(见 `ledger`)。不重发时如实说「不确定执行了没有」,
+// 不说成连不上。
 async function request(method: string, path: string, body: unknown, directionToken: string): Promise<string> {
   const deadline = Date.now() + RECONNECT_WINDOW_MS;
   const requestId = randomUUID();
   const write = method !== "GET";
-  if (write && !ledgerAsked) {
-    const seen = await askLedger();
-    if (seen !== undefined) { ledgerAsked = true; ledger = seen; }
-  }
-  let delay = 400;
   let lastCode = "";
+  const unreachable = (e?: unknown) => new Error(
+    `连不上 Navi server (${BASE})${lastCode ? `（已重试 ${Math.round(RECONNECT_WINDOW_MS / 1000)}s，${lastCode}）` : ""}，`
+    + `确认它在运行（npm start）。${e ? `原始错误：${e instanceof Error ? e.message : String(e)}` : ""}`,
+  );
+  // 头一次写之前先拿到账本号:不然断在半路时这一次没有凭据可核对,只能报不确定。
+  if (write && ledger === undefined) {
+    const seen = await waitLedger(deadline);
+    if (seen === undefined) { lastCode = "账本号问不到"; throw unreachable(); }
+    ledger ??= seen;
+  }
+  let expected = write ? ledger ?? null : null;
+  let rebound = false;
+  let delay = 400;
   // 有一次断在半路就记下：之后哪怕一直连不上，也不能说成「没执行」。
   let halfway = "";
   let res: Response;
@@ -139,8 +149,11 @@ async function request(method: string, path: string, body: unknown, directionTok
   );
   for (;;) {
     // 断在半路之后的每一次重发(中间撞上的是连不上也一样:连上的可能已经是另一份服务)都先核对账本。
-    if (halfway && write && !(await sameLedger(deadline))) {
-      throw unknown(ledger ? "，重试打到的服务不是记着这次调用的那一份（没起来、换了版本或换了库），没有替你重发" : "");
+    if (halfway && write) {
+      const seen = expected ? await waitLedger(deadline) : null;
+      if (!expected || seen !== expected) {
+        throw unknown(expected ? "，重试打到的服务不是记着这次调用的那一份（没起来、换了版本或换了库），没有替你重发" : "");
+      }
     }
     try {
       const headers = baseHeaders(requestId);
@@ -148,6 +161,7 @@ async function request(method: string, path: string, body: unknown, directionTok
       if (SOURCE_TASK_ID) headers[NAVI_HEADERS.sourceTaskId] = SOURCE_TASK_ID;
       if (TURN_TOKEN) headers[NAVI_HEADERS.turnToken] = TURN_TOKEN;
       if (directionToken) headers[NAVI_HEADERS.directionToken] = directionToken;
+      if (expected) headers[NAVI_HEADERS.requestLedger] = expected;
       res = await fetch(`${BASE}/api${path}`, {
         method,
         headers,
@@ -158,20 +172,25 @@ async function request(method: string, path: string, body: unknown, directionTok
         throw new Error("服务正在切换或停止，请求未执行", { cause: { code: "NAVI_RUNTIME_UNDELIVERED" } });
       }
       const seen = res.headers.get(NAVI_HEADERS.requestReceipt);
-      if (seen) { ledger = seen; ledgerAsked = true; }
+      if (seen) ledger = seen;
+      // 对面换了一本账、没有执行这一次(server/src/request-receipts.ts 的 WRONG_LEDGER):还没断过的话,这一次在哪
+      // 都没执行过,改绑到新的那本重发;断过的话原来那次执行没执行不确定,照服务端那句话报给调用方。
+      if (res.status === 409 && seen && expected && seen !== expected && !halfway && !rebound) {
+        await res.body?.cancel();
+        expected = seen;
+        rebound = true;
+        continue;
+      }
       // 读响应体也在重试圈里:服务在写响应那一下被停掉,断在这里跟断在发请求时是同一种「送到了一半」。
       text = await res.text();
       break;
     } catch (e) {
       const half = ambiguousCode(e);
       if (half) halfway = half;
-      const code = retryableCode(e) ?? (half && (!write || ledger) ? half : null);
+      const code = retryableCode(e) ?? (half && (!write || expected) ? half : null);
       if (!code || Date.now() >= deadline) {
-        const waited = lastCode ? `（已重试 ${Math.round(RECONNECT_WINDOW_MS / 1000)}s，${lastCode}）` : "";
-        if (halfway) throw unknown(waited, e);
-        throw new Error(
-          `连不上 Navi server (${BASE})${waited}，确认它在运行（npm start）。原始错误：${e instanceof Error ? e.message : String(e)}`,
-        );
+        if (halfway) throw unknown(lastCode ? `（已重试 ${Math.round(RECONNECT_WINDOW_MS / 1000)}s，${lastCode}）` : "", e);
+        throw unreachable(e);
       }
       lastCode = code;
       // stderr 才是 MCP 的日志通道(stdout 是协议帧,写脏了会直接搞崩会话)。
