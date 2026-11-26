@@ -71,24 +71,14 @@ import { extractReportFindings } from "./review-history.js";
 import { parseCarries } from "./review-recurrence.js";
 import { REVIEW_SWEEP_REMINDER } from "./review-sweep.js";
 import { id, now } from "./util.js";
+import { freeReviewOutcome } from "./free-review-outcome.js";
 import type { Actor } from "./auth/context.js";
 import { canUseOwned } from "./auth/owned.js";
 import { markRequestEffect, type RequestEffect } from "./request-receipts.js";
 
 type ReviewRunRow = typeof freeReviewRuns.$inferSelect;
 
-export { freeWorkflowState };
-export function freeReviewOutcome(input: {
-  turnOk: boolean;
-  conclusion: string | null;
-  currentRound: number;
-  retryLimit: number;
-}): "failed" | "passed" | "repair" | "exhausted" {
-  if (!input.turnOk || (input.conclusion !== "verified" && input.conclusion !== "verify_failed")) return "failed";
-  if (input.conclusion === "verified") return "passed";
-  return input.currentRound <= input.retryLimit ? "repair" : "exhausted";
-}
-
+export { freeWorkflowState, freeReviewOutcome };
 // 唯一的「活」状态是 reviewing（审查旁路回合正在跑）。修复中/等待复审这些叙事不落库，
 // 由「任务在跑 + 预约槽」推导（见 shared/free-workflow.ts 状态注释）。
 /** 审查旁路回合是否正在进行（验收等不可逆操作要等它结束）。 */

@@ -3,7 +3,8 @@
 // 钉住的几件事：
 // ① 记底：头一回启用时已有的待验收、失败都只记底，不补推；记底时还在跑的之后跑完照推；记底时正在续聊的已完成任务，
 //    续聊挂了放回原 done，不说「完成了」；记底之后、头一次全量对账之前收拾出来的中断（启动恢复），全量对账照推，
-//    也不提前推；已验收任务的续聊在重启时挂了，全量对账也找得到它；
+//    也不提前推；已验收任务的续聊在重启时挂了，全量对账也找得到它；记底时有任务读不清（讨论记录打不开），别的任务照常
+//    推，它读得清了只补记不补推；记底时正在续聊、早就审过的任务，续聊停下来不把老审查结论当新的推；
 // ② 新任务：跑完等验收推一条，重复对账不再推；
 // ③ 停下来提问推一条，带上问题；跑挂了（中断）推一条；验收落章推一条，「等你验收」那件事没了不另推；
 // ④ 验证没过、验收前置命令没过各推一条；门禁通过不单推；同一版重新验证又没过再推，同一版的「等你验收」只说一次；
@@ -14,12 +15,15 @@
 // ⑨ 被停下推一条，不重复：落了 canceled 的、续聊被停放回原 done 的、失败任务上续聊被停的（不再说「中断了」）、
 //    分组暂停的；停完重新排上、还没开新回合，不再说一遍；
 // ⑩ 完成之后再派审：审查没通过推「审查没通过」；审着的时候完成的那一版，审查通过才推「审查通过，等你验收」；
-//    不在等验收的任务（暂停着）上派的审：最后没过推「审查没通过」，过了推「审查通过」，各一条；
+//    不在等验收的任务（暂停着）上派的审：最后没过推「审查没通过」，过了推「审查通过」，各一条；自动修复复审的链：
+//    转修复（收尾还没挂上续审、挂上之后）、续审在跑（finishedAt 还留着上一轮的）都不推，最后一轮没过才推，同一条链
+//    再审一轮又没过再推；等验收的任务在转修复那一下也不推「审查没通过，等你决定」；
 // ⑪ 团队调度台：回合挂了回到待命，不说「完成了」，说「这一轮中断了」；正常收口的回合才是新的一版；
 // ⑫ 多人模式：被移出项目的成员收不到那个项目里的通知（一条一条推，过滤器逐件核可见性）；有权限的成员，任务头一回
-//    经过过滤器（归属缓存是冷的，比如重启后收拾出来的中断）也照推。
+//    经过过滤器（归属缓存是冷的，比如重启后收拾出来的中断）也照推；
+// ⑬ 重启：记过底不重记，记底之后的新事照推；账的记法变了按没记过底重记，老写法的账不当成新事。
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ServerEvent } from "@navi/shared";
@@ -38,14 +42,17 @@ try {
   const { db, ensureSchema } = await import("../src/db/index.js");
   const { projects, tasks, sessions, sessionTurns } = await import("../src/db/schema.js");
   const { acceptGateRuns } = await import("../src/db/schema-accept-gate.js");
-  const { freeReviewRuns } = await import("../src/db/schema-free-workflow.js");
+  const { freeReviewRuns, freeWorkflowStates } = await import("../src/db/schema-free-workflow.js");
+  const { regressionEvidence } = await import("../src/db/schema-regression-evidence.js");
+  const { readMeta, writeMeta } = await import("../src/im/meta.js");
+  const { imOutcomes } = await import("../src/db/schema-im.js");
   const { claimOwnTurn, releaseTurn } = await import("../src/turn-lock.js");
   const { SystemNotifier } = await import("../src/system-notify.js");
   const { setTaskStatus } = await import("../src/status.js");
   const { makeEventFilter } = await import("../src/auth/event-filter.js");
   const { SINGLE_USER_ID } = await import("../src/auth/context.js");
   const { settleTaskStatus } = await import("../src/settle-status.js");
-  const { eq } = await import("drizzle-orm");
+  const { and, eq } = await import("drizzle-orm");
 
   await ensureSchema();
   mkdirSync(join(stage, "repo"), { recursive: true });
@@ -74,6 +81,10 @@ try {
     return take();
   };
   const kinds = (notices: Notice[]) => notices.map((notice) => [notice.taskId, notice.kind]);
+  const review = (id: string, taskId: string, status: string, finished: boolean) => ({
+    id, taskId, reviewerName: "审查者", agentType: "codex", checkMode: "free", targetKind: "workspace", status,
+    createdAt: at(), updatedAt: at(), finishedAt: finished ? at() : null,
+  });
 
   // ── ① 记底 ─────────────────────────────────────────────────────────────
   await db.insert(tasks).values(task({ id: "old-done", title: "早就干完了", status: "done", doneSeq: 1, endedAt: old, createdAt: old }) as never);
@@ -85,8 +96,15 @@ try {
     id: "old-accepted", title: "验收过了", status: "done", doneSeq: 1, stage: "accepted", acceptanceId: "acc-0",
     acceptedMergeMethod: "fast_forward", acceptedMergeCommit: "def", endedAt: old, createdAt: old,
   }) as never);
+  await db.insert(tasks).values(task({ id: "old-duet", title: "旧讨论", mode: "duet", status: "awaiting_review", createdAt: old }) as never);
+  mkdirSync(join(stage, "runs", "old-duet", "transcript.jsonl"), { recursive: true }); // 讨论记录读不了（EISDIR）
+  await db.insert(tasks).values(task({
+    id: "old-reviewed", title: "审过又在续聊", status: "running", followUpFrom: "done", doneSeq: 1, workflowMode: "free", mode: "single", createdAt: old,
+  }) as never);
+  await db.insert(freeReviewRuns).values({ ...review("r-old", "old-reviewed", "passed", true), createdAt: old, updatedAt: old, finishedAt: old } as never);
   await notifier.baseline();
   assert.deepEqual(take(), [], "记底：已有的待验收、失败都不补推");
+  assert.deepEqual(JSON.parse((await readMeta("system-notify-unbaselined"))!), ["old-duet"], "读不清的那一个记下来，别的照记");
   await notifier.baseline();
   assert.deepEqual(take(), [], "记过底不再记");
 
@@ -100,6 +118,22 @@ try {
   await notifier.full();
   assert.deepEqual(kinds(take()), [["old-crashed", "failed"], ["old-accepted", "interrupted"]],
     "启动收拾出来的中断照推；已验收任务的续聊挂了也找得到");
+
+  await db.insert(tasks).values(task({ id: "fresh", title: "记底之后跑完的", status: "done", doneSeq: 1, endedAt: at() }) as never);
+  notifier.mark("fresh");
+  await sleep(500);
+  await notifier.run(async () => {});
+  assert.deepEqual(kinds(take()), [["fresh", "accept"]], "有任务记底时没读清：不挡别的任务");
+
+  await set("old-reviewed", { status: "paused", followUpFrom: null });
+  assert.deepEqual(await reconcile("old-reviewed"), [], "记底时在续聊：启动前的老审查结论不当成新的");
+
+  rmSync(join(stage, "runs", "old-duet", "transcript.jsonl"), { recursive: true });
+  writeFileSync(join(stage, "runs", "old-duet", "transcript.jsonl"), `${JSON.stringify({ type: "duet.gate", open: true, version: 1 })}\n`);
+  assert.deepEqual(await reconcile("old-duet"), [], "读得清了：记底前就在的闸口只补记，不补推");
+  assert.deepEqual(JSON.parse((await readMeta("system-notify-unbaselined"))!), [], "补记过了");
+  await set("old-duet", { duetGateVersion: 2 });
+  assert.deepEqual(kinds(await reconcile("old-duet")), [["old-duet", "duet_gate"]], "补记之后照常比");
 
   await set("old-running", { status: "done", doneSeq: 1, endedAt: at() });
   assert.deepEqual(kinds(await reconcile("old-running")), [["old-running", "accept"]], "记底时在跑、之后跑完：推");
@@ -268,10 +302,6 @@ try {
   assert.equal(paused[0]!.body, "已暂停");
 
   // ── ⑩ 后来派的审查 ─────────────────────────────────────────────────────
-  const review = (id: string, taskId: string, status: string, finished: boolean) => ({
-    id, taskId, reviewerName: "审查者", agentType: "codex", checkMode: "free", targetKind: "workspace", status,
-    createdAt: at(), updatedAt: at(), finishedAt: finished ? at() : null,
-  });
   await db.insert(tasks).values(task({ id: "t8", title: "后派审查", status: "running", workflowMode: "free", mode: "single" }) as never);
   await reconcile("t8");
   await set("t8", { status: "done", doneSeq: 1, endedAt: at() });
@@ -302,12 +332,79 @@ try {
     await reconcile(id);
     await db.insert(freeReviewRuns).values(review(`r-${id}`, id, "reviewing", false) as never);
     assert.deepEqual(await reconcile(id), [], "审着：不推");
-    await db.update(freeReviewRuns).set({ status, finishedAt: at(), updatedAt: at() }).where(eq(freeReviewRuns.id, `r-${id}`));
+    // stopped 落在最后一轮（第 2 轮 / 最多 2 轮）才是用完了
+    await db.update(freeReviewRuns).set({ status, currentRound: 2, finishedAt: at(), updatedAt: at() }).where(eq(freeReviewRuns.id, `r-${id}`));
     const concluded = await reconcile(id);
     assert.deepEqual(kinds(concluded), [[id, kind]], `暂停着的任务，审查最后 ${status}：推一条`);
     assert.equal(concluded[0]!.body, body);
     assert.deepEqual(await reconcile(id), [], "不重复");
   }
+
+  // 自动修复复审的链（最多 2 轮）：结算先落 stopped，收尾再挂修复和续审预约
+  const settleRound = async (runId: string, taskId: string, round: number, status: string) => {
+    await db.update(freeReviewRuns).set({ status, currentRound: round, finishedAt: at(), updatedAt: at() }).where(eq(freeReviewRuns.id, runId));
+    await db.insert(regressionEvidence).values({
+      directory: `dir-${runId}`, taskId, generation: `${round}`, excludedMonitors: [],
+      finalization: { kind: "free", payload: JSON.stringify({ run: { id: runId } }), done: [], steps: [] },
+    } as never).onConflictDoUpdate({ target: regressionEvidence.directory, set: {
+      generation: `${round}`, finalization: { kind: "free", payload: JSON.stringify({ run: { id: runId } }), done: [], steps: [] },
+    } as never });
+  };
+  const finalize = async (runId: string, taskId: string, armed: boolean) => {
+    await db.update(regressionEvidence).set({
+      finalization: { kind: "free", payload: JSON.stringify({ run: { id: runId } }), done: [], steps: [], completed: true },
+    } as never).where(eq(regressionEvidence.directory, `dir-${runId}`));
+    await db.insert(freeWorkflowStates).values({ taskId, reviewArmed: armed, updatedAt: at() } as never)
+      .onConflictDoUpdate({ target: freeWorkflowStates.taskId, set: { reviewArmed: armed, updatedAt: at() } });
+  };
+  /** 续审：同一条链放回 reviewing、轮数加一，finishedAt 不清（free-review-round.ts nextRound），预约被消费。 */
+  const nextRound = async (runId: string, taskId: string, round: number) => {
+    await db.update(freeReviewRuns).set({ status: "reviewing", currentRound: round, updatedAt: at() }).where(eq(freeReviewRuns.id, runId));
+    await db.update(freeWorkflowStates).set({ reviewArmed: false, updatedAt: at() }).where(eq(freeWorkflowStates.taskId, taskId));
+  };
+  await db.insert(tasks).values(task({ id: "t11", title: "自动复审", status: "paused", workflowMode: "free", mode: "single" }) as never);
+  await reconcile("t11");
+  await db.insert(freeReviewRuns).values(review("r-t11", "t11", "reviewing", false) as never);
+  await reconcile("t11");
+  await settleRound("r-t11", "t11", 1, "stopped");
+  assert.deepEqual(await reconcile("t11"), [], "第 1 轮没过、收尾还没挂上修复：不推");
+  await finalize("r-t11", "t11", true);
+  assert.deepEqual(await reconcile("t11"), [], "转修复、等续审：不推");
+  await nextRound("r-t11", "t11", 2);
+  assert.deepEqual(await reconcile("t11"), [], "续审在跑（finishedAt 还是上一轮的）：不推");
+  await settleRound("r-t11", "t11", 2, "stopped");
+  const exhausted = await reconcile("t11");
+  assert.deepEqual(kinds(exhausted), [["t11", "review_failed"]], "最后一轮没过：推");
+  assert.equal(exhausted[0]!.body, "审查没通过");
+  await finalize("r-t11", "t11", false);
+  assert.deepEqual(await reconcile("t11"), [], "不重复");
+  await nextRound("r-t11", "t11", 3);
+  assert.deepEqual(await reconcile("t11"), [], "同一条链再审一轮：审着不推");
+  await settleRound("r-t11", "t11", 3, "stopped");
+  await finalize("r-t11", "t11", false);
+  assert.deepEqual(kinds(await reconcile("t11")), [["t11", "review_failed"]], "同一条链又没过：是新的一次结论");
+
+  await db.insert(tasks).values(task({ id: "t12", title: "完成就审", status: "running", workflowMode: "free", mode: "single" }) as never);
+  await db.insert(freeWorkflowStates).values({ taskId: "t12", reviewArmed: true, updatedAt: at() } as never);
+  await reconcile("t12");
+  await set("t12", { status: "done", doneSeq: 1, endedAt: at() });
+  assert.deepEqual(await reconcile("t12"), [], "完成了、预约着审查：不推");
+  await db.insert(freeReviewRuns).values(review("r-t12", "t12", "reviewing", false) as never);
+  await db.update(freeWorkflowStates).set({ reviewArmed: false }).where(eq(freeWorkflowStates.taskId, "t12"));
+  assert.deepEqual(await reconcile("t12"), [], "审着：不推");
+  await settleRound("r-t12", "t12", 1, "stopped");
+  assert.deepEqual(await reconcile("t12"), [], "转修复那一下：不推「审查没通过，等你决定」");
+  await finalize("r-t12", "t12", true);
+  await set("t12", { status: "running", followUpFrom: "done" });
+  assert.deepEqual(await reconcile("t12"), [], "修复在跑：不推");
+  await set("t12", { status: "done", doneSeq: 2, followUpFrom: null, endedAt: at() });
+  assert.deepEqual(await reconcile("t12"), [], "修完了、等续审：不推");
+  await nextRound("r-t12", "t12", 2);
+  await settleRound("r-t12", "t12", 2, "passed");
+  await finalize("r-t12", "t12", false);
+  const repaired = await reconcile("t12");
+  assert.deepEqual(kinds(repaired), [["t12", "accept"]]);
+  assert.equal(repaired[0]!.body, "审查通过，等你验收");
 
   // ── ⑪ 团队调度台 ───────────────────────────────────────────────────────
   await db.insert(tasks).values(task({ id: "team", title: "团队", mode: "team", status: "idle" }) as never);
@@ -369,6 +466,23 @@ try {
   await owner2.refresh();
   assert.ok(owner2.allow(cold[0]!), "归属缓存是冷的：有权限照推，不丢这一次");
   owner2.stop();
+
+  // ── ⑬ 重启 ─────────────────────────────────────────────────────────────
+  const restarted = new SystemNotifier((notice) => seen.push(notice));
+  await db.insert(tasks).values(task({ id: "t13", title: "重启前后跑完的", status: "done", doneSeq: 1, endedAt: at() }) as never);
+  await restarted.baseline();
+  await restarted.run(() => restarted.reconcile(["t13"]));
+  assert.deepEqual(kinds(take()), [["t13", "accept"]], "记过底不重记：记底之后的新事照推");
+  // 老写法的账：审查结论只认链和落成什么
+  await db.update(imOutcomes).set({ value: "r-t10:passed" })
+    .where(and(eq(imOutcomes.appId, "navi:system-notify"), eq(imOutcomes.taskId, "t10"), eq(imOutcomes.kind, "reviewed")));
+  await writeMeta("system-notify-format", "1");
+  const upgraded = new SystemNotifier((notice) => seen.push(notice));
+  await upgraded.baseline();
+  await upgraded.run(() => upgraded.reconcile(["t10"]));
+  assert.deepEqual(take(), [], "账的记法变了：重记一遍，不把老结论当新的");
+  restarted.stop();
+  upgraded.stop();
 
   notifier.stop();
   console.log("test-system-notify: ok");

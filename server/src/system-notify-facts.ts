@@ -18,9 +18,11 @@
 //   stop           被停下的那一次：认那个被停的回合自己（session_turns.outcome = stopped；续聊被停、原来的状态放回去，分组暂停，
 //                  调度台被停回到待命，跑着被停落 canceled 都是它）；没有被停的回合（排着就被取消了）才认 canceled 那一下的落位。
 //                  同一次停止只记一样，不重复说。
-//   reviewed       最近一条工作区审查链的最终结论（通过 / 没通过，链收口了才有）。审查结论是它自己的事，不看任务此刻停在哪：
-//                  暂停着、失败着的任务上派的审，最后一轮没过也得说（第 5 轮审查 1）。此刻正等验收时由 accept 说（它的身份里
-//                  带着这个结论，措辞是「审查没通过，等你决定」），这里只记账，不说第二遍。
+//   reviewed       最近一条工作区审查链的最终结论（free-review-outcome.ts reviewChainVerdict：通过 / 没给出结论 / 修的次数
+//                  用完还没过；转修复、等续审的那几轮不是结论）。审查结论是它自己的事，不看任务此刻停在哪：暂停着、失败着的
+//                  任务上派的审，最后一轮没过也得说（第 5 轮审查 1）。此刻正等验收时由 accept 说（它的身份里带着这个结论，
+//                  措辞是「审查没通过，等你决定」），这里只记账，不说第二遍。任务还在跑、又预约了下一次审查时先不说也不记
+//                  （later），落定了再说；但记底时照记，不然启动前的老结论之后会被当成新的。
 //   result/gate/review  结局账，同 im/outcomes.ts。review 那一样只记账（候选查找 staleOutcomeTasks 按它对账），话由 reviewed 说。
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { TaskNotifyKind } from "@navi/shared";
@@ -31,6 +33,7 @@ import type { TaskView, Turn } from "./im/attention.js";
 import { acceptedLabel, acceptSubtitle, KIND_LABEL } from "./im/cards.js";
 import { outcomesOf } from "./im/outcomes.js";
 import { scrubTitle } from "./im/scrub.js";
+import { reviewChainVerdict } from "./free-review-outcome.js";
 import { humanGateOf, NO_GATE } from "./task-human-gate.js";
 import { isSharedTeamWorker } from "./task-result-version.js";
 
@@ -38,18 +41,20 @@ export type Said = { kind: TaskNotifyKind; body: string };
 /**
  * 账上的一样：哪一种、此刻是哪一回、变了要说什么（null = 只记账）。
  * whenSaid = 只在要说话的时候（或者账上还没有这一样时）记，见文件头 accept。
+ * later = 这件事已经有了、此刻还不能说：账先不动，能说了再比（记底照记）。
+ * at = 这件事发生的时刻：记底那会儿没读清的任务，后来补记时据此分出记底之后才发生的（system-notify.ts）。
  */
-export type Entry = { kind: string; value: string; said: Said | null; whenSaid?: true };
+export type Entry = { kind: string; value: string; said: Said | null; whenSaid?: true; later?: true; at?: string };
 
 /** 视图之外要现读的几样。 */
 export interface Facts {
   doneSeq: number;
   verifyRounds: number;
   humanGate: string;
-  /** 最近一次（工作区）审查：出了结论才有 status。 */
-  review: { id: string; status: string; finished: boolean } | null;
+  /** 最近一条（工作区）审查链落下的最终结论；链还没完 = null。at = 落下的时刻。 */
+  review: { identity: string; verdict: "passed" | "failed" | "exhausted"; at: string } | null;
   /** 最近一个回合（单飞会话、团队调度台）。 */
-  lastTurn: { id: string; outcome: string | null } | null;
+  lastTurn: { id: string; outcome: string | null; endedAt: string | null } | null;
   /** 真完成过几次（见文件头 accept）。 */
   completions: string;
 }
@@ -65,20 +70,24 @@ export async function factsOf(taskIds: string[]): Promise<Map<string, Facts>> {
   }).from(tasks).where(inArray(tasks.id, taskIds));
   for (const row of rows) {
     const [turn, review, completions] = await Promise.all([
-      db.select({ id: sessionTurns.id, outcome: sessionTurns.outcome }).from(sessionTurns)
+      db.select({ id: sessionTurns.id, outcome: sessionTurns.outcome, endedAt: sessionTurns.endedAt }).from(sessionTurns)
         .innerJoin(sessions, and(eq(sessions.id, sessionTurns.sessionId), inArray(sessions.role, OWN_ROLES)))
         .where(eq(sessionTurns.taskId, row.id)).orderBy(desc(sessionTurns.startedAt)).limit(1),
-      db.select({ id: freeReviewRuns.id, status: freeReviewRuns.status, finishedAt: freeReviewRuns.finishedAt }).from(freeReviewRuns)
+      db.select({
+        id: freeReviewRuns.id, status: freeReviewRuns.status, currentRound: freeReviewRuns.currentRound,
+        retryLimit: freeReviewRuns.retryLimit, finishedAt: freeReviewRuns.finishedAt, updatedAt: freeReviewRuns.updatedAt,
+      }).from(freeReviewRuns)
         .where(and(eq(freeReviewRuns.taskId, row.id), eq(freeReviewRuns.targetKind, "workspace")))
         .orderBy(desc(freeReviewRuns.createdAt)).limit(1),
       row.mode === "team" && !row.parentId ? teamCompletions(row.id) : Promise.resolve(`done#${row.doneSeq}`),
     ]);
     const latest = review.at(0);
+    const verdict = latest ? reviewChainVerdict(latest) : null;
     out.set(row.id, {
       doneSeq: row.doneSeq,
       verifyRounds: row.verifyRounds,
       humanGate: humanGateOf(row),
-      review: latest ? { id: latest.id, status: latest.status, finished: !!latest.finishedAt } : null,
+      review: verdict ? { ...verdict, at: latest!.finishedAt ?? latest!.updatedAt } : null,
       lastTurn: turn.at(0) ?? null,
       completions,
     });
@@ -103,7 +112,7 @@ async function teamCompletions(leadId: string): Promise<string> {
 function acceptIdentity(facts: Facts): string {
   const result = facts.completions;
   const gate = facts.humanGate === NO_GATE ? "" : `|${facts.humanGate}`;
-  const review = facts.review?.finished ? `|review:${facts.review.id}:${facts.review.status}` : "";
+  const review = facts.review ? `|review:${facts.review.identity}` : "";
   return `${result}${gate}${review}`;
 }
 
@@ -130,29 +139,36 @@ export async function entriesOf(view: TaskView, facts: Facts): Promise<Entry[]> 
     const restored = turn.kind === "failed" && last?.outcome === "stopped";
     entries.push({ kind: `turn:${turn.kind}`, value: turn.generation, said: restored ? null : turnWords(view, turn) });
   }
+  const at = last?.endedAt ?? undefined;
   if (last?.outcome === "failed") {
     const settledAsFailure = task.status === "failed" || task.status === "canceled";
     entries.push({
-      kind: "interrupt", value: last.id,
+      kind: "interrupt", value: last.id, at,
       said: settledAsFailure ? null : { kind: "interrupted", body: task.status === "done" ? "这一轮中断了，结果还是上一版" : "这一轮中断了" },
     });
   }
   const stopped = { kind: "stopped" as const, body: task.status === "paused" ? "已暂停" : "已停止" };
   // 认那个被停的回合；没有（排着就被取消了）才认 canceled 那一下的落位。先认落位的话，停完又重新排上、还没开新回合时
   // 身份就从落位换成了回合，同一次停止说两遍。
-  if (last?.outcome === "stopped") entries.push({ kind: "stop", value: `turn:${last.id}`, said: stopped });
+  if (last?.outcome === "stopped") entries.push({ kind: "stop", value: `turn:${last.id}`, said: stopped, at });
   else if (task.status === "canceled") entries.push({ kind: "stop", value: `canceled:${task.endedAt ?? task.updatedAt}`, said: stopped });
-  // 审查链收口了：任务还在跑（收口之后马上又开了一轮）先不看，落定了再说
-  if (settled && facts.review?.finished) {
-    const passed = facts.review.status === "passed";
+  if (facts.review) {
     entries.push({
-      kind: "reviewed", value: `${facts.review.id}:${facts.review.status}`,
-      said: turn?.kind === "accept" ? null : passed ? { kind: "review_passed", body: "审查通过" } : { kind: "review_failed", body: "审查没通过" },
+      kind: "reviewed", value: facts.review.identity, at: facts.review.at,
+      // 任务还在跑（收口之后马上又开了一轮）、又预约了下一次审查：落定了再说
+      ...(!settled || view.review.pending ? { later: true as const } : {}),
+      said: turn?.kind === "accept" ? null : REVIEW_WORDS[facts.review.verdict],
     });
   }
   for (const outcome of await outcomesOf(view)) entries.push({ kind: outcome.kind, value: outcome.value, said: outcomeWords(view, outcome) });
   return entries;
 }
+
+const REVIEW_WORDS: Record<NonNullable<Facts["review"]>["verdict"], Said> = {
+  passed: { kind: "review_passed", body: "审查通过" },
+  exhausted: { kind: "review_failed", body: "审查没通过" },
+  failed: { kind: "review_failed", body: "审查没能给出结论" },
+};
 
 function turnWords(view: TaskView, turn: Turn): Said {
   switch (turn.kind) {

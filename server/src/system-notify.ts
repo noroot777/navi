@@ -13,6 +13,9 @@
 // 记底：头一回启用时不把历史上的待验收、失败补推一遍 —— 启动时、**在收拾上一个进程留下的任务之前**（main.ts），把全部任务
 // 此刻的样子记一遍底（baseline）。之后账上没有的任务就是新建的，它的头一眼就是它头一件事；启动收拾出来的中断、头几秒里
 // 跑完的，都是记底之后发生的，照常比、照常推。不靠水位、不靠这个进程收到过什么动静去猜「是不是新的」。
+// 记底按任务各记各的：有任务那一下读不清（讨论记录打不开），只把它记进 UNBASELINED，别的任务照常记完、照常推；它读得清
+// 了再补记 —— 补记那一下分不清的只记账不推，带着发生时刻、发生在记底之后的（审查结论、回合中断、被停）照推。不整份重记：
+// 重记会把记底之后别的任务上真发生的事也当成历史。账的记法（FORMAT）变了等于没记过底，重记一遍。
 //
 // 全量对账（启动几秒后、之后定时）找候选：此刻可能要人管的状态，加上上次全量对账之后改过的任务、有回合收口的任务，
 // 加上结局账对不上的。事件丢了、订阅之前发生的，都在这里补上。头一次全量对账之前收到的动静先攒着，跟它一起算，
@@ -36,6 +39,11 @@ import { entriesOf, factsOf, type Entry } from "./system-notify-facts.js";
 
 export const SINK = "navi:system-notify";
 const BASELINED = "system-notify-baselined";
+/** 账的记法：哪一样认什么身份。改了身份的写法就加一，启动时按没记过底重记，不然老写法的账一比全是「新的」。 */
+const FORMAT_KEY = "system-notify-format";
+const FORMAT = "2";
+/** 记底时没读清、还没补记的任务。 */
+const UNBASELINED = "system-notify-unbaselined";
 /** 上一次全量对账开始的时刻：这之后改过的任务下一次全量对账都带上。 */
 const SWEPT = "system-notify-swept";
 const BATCH = 40;
@@ -52,6 +60,9 @@ export class SystemNotifier {
   private settling = new Set<string>();
   /** 头一次全量对账之前：动静只攒着。 */
   private held = true;
+  /** 记底的时刻和还没补记的任务（baseline 之后才有）。 */
+  private baselinedAt: string | null = null;
+  private unbaselined = new Set<string>();
 
   constructor(private readonly publish: (notice: Notice) => void = (notice) => bus.publish(notice)) {}
 
@@ -86,22 +97,31 @@ export class SystemNotifier {
     this.timer = null;
   }
 
-  /** 头一回启用：全部任务（归档的、团队执行者也算）此刻的样子只记账、不推。已经记过就什么都不做。 */
+  /** 头一回启用（或账的记法变了）：全部任务（归档的、团队执行者也算）此刻的样子只记账、不推。已经记过就只读回进度。 */
   async baseline(): Promise<void> {
-    if (await readMeta(BASELINED)) return;
+    if (this.baselinedAt) return;
+    const done = await readMeta(BASELINED);
+    if (done && await readMeta(FORMAT_KEY) === FORMAT) {
+      this.unbaselined = new Set(JSON.parse(await readMeta(UNBASELINED) ?? "[]") as string[]);
+      this.baselinedAt = done;
+      return;
+    }
     const at = now();
     await reviewOutcomesSince();
     const all = await db.select({ id: tasks.id }).from(tasks);
-    // 有任务没记上就不算记完：标了「记过底」，没记上的那几个下次头一眼会被当成新事，把历史推一遍。下次全量对账再记
     const missed = await this.run(() => this.reconcile(all.map((row) => row.id), { quiet: true }));
-    if (missed) throw new Error(`系统通知记底时 ${missed} 个任务没记上，下次再记`);
+    if (missed.length) console.warn(`[navi] 系统通知记底时 ${missed.length} 个任务没读清，读得清了再补记`);
+    this.unbaselined = new Set(missed);
+    await writeMeta(UNBASELINED, JSON.stringify(missed));
     await writeMeta(SWEPT, at);
+    await writeMeta(FORMAT_KEY, FORMAT);
     await writeMeta(BASELINED, at);
+    this.baselinedAt = at;
   }
 
   /** 启动几秒后、定时：把可能要人管的任务对一遍。 */
   async full(): Promise<void> {
-    // 记底没记完就一直攒着：账上缺的任务头一眼会被当成新事。下一次定时再记
+    // 记底本身出错（库写不进）就一直攒着：没记过底，账上缺的任务头一眼都会被当成新事。下一次定时再记
     await this.baseline();
     try {
       await this.sweep();
@@ -130,6 +150,7 @@ export class SystemNotifier {
     const disputes = (await openDisputeTargets()).map((target) => target.taskId);
     const ids = [...new Set([
       ...candidates.map((row) => row.id), ...closed.map((row) => row.id), ...disputes, ...await staleOutcomeTasks(SINK), ...this.dirty,
+      ...this.unbaselined,
     ])];
     this.dirty.clear();
     await this.run(() => this.reconcile(ids));
@@ -138,28 +159,40 @@ export class SystemNotifier {
 
   /**
    * quiet = 只记账不推（记底）。一个任务记完账就把它那几条推出去，一个任务出错只记一句、不连累别的：先把一批都记了账
-   * 再一起推的话，后面一个出错，前面记过账的就再也推不出去了（下一次对账身份已经一样）。返回出错的个数。
+   * 再一起推的话，后面一个出错，前面记过账的就再也推不出去了（下一次对账身份已经一样）。返回没对上的任务。
    */
-  async reconcile(taskIds: string[], { quiet = false }: { quiet?: boolean } = {}): Promise<number> {
+  async reconcile(taskIds: string[], { quiet = false }: { quiet?: boolean } = {}): Promise<string[]> {
     const ids = await withTeamLeads(taskIds);
-    let failed = 0;
+    const failed: string[] = [];
     for (let i = 0; i < ids.length; i += BATCH) {
       const batch = ids.slice(i, i + BATCH);
-      const [views, facts] = await Promise.all([viewsOf(batch), factsOf(batch)]);
+      let views: Awaited<ReturnType<typeof viewsOf>>, facts: Awaited<ReturnType<typeof factsOf>>;
+      try {
+        [views, facts] = await Promise.all([viewsOf(batch), factsOf(batch)]);
+      } catch (error) {
+        failed.push(...batch);
+        console.error("[navi] 系统通知对账出错:", error);
+        continue;
+      }
       // 不在 Map 里 = 这一下看不清现状（im/attention.ts viewsOf）：什么都没记，算没对上
-      failed += batch.filter((taskId) => !views.has(taskId)).length;
+      failed.push(...batch.filter((taskId) => !views.has(taskId)));
       for (const [taskId, view] of views) {
         try {
           const fact = facts.get(taskId);
+          const mode = quiet ? "quiet" : this.unbaselined.has(taskId) ? "catchup" : "live";
           if (!view || !fact) {
             await db.delete(imOutcomes).where(and(eq(imOutcomes.appId, SINK), eq(imOutcomes.taskId, taskId)));
-            continue;
+          } else {
+            const entries = await entriesOf(view, fact);
+            if (mode === "live" && this.stillSettling(taskId, view, entries)) continue;
+            for (const notice of await this.advance(view, entries, mode)) this.publish(notice);
           }
-          const entries = await entriesOf(view, fact);
-          if (!quiet && this.stillSettling(taskId, view, entries)) continue;
-          for (const notice of await this.advance(view, entries, quiet)) this.publish(notice);
+          if (mode === "catchup") {
+            this.unbaselined.delete(taskId);
+            await writeMeta(UNBASELINED, JSON.stringify([...this.unbaselined]));
+          }
         } catch (error) {
-          failed += 1;
+          failed.push(taskId);
           console.error(`[navi] 系统通知对账出错 task=${taskId}:`, error);
         }
       }
@@ -181,20 +214,26 @@ export class SystemNotifier {
     return true;
   }
 
-  /** 把账改成此刻的样子，返回该弹的那几条。 */
-  private async advance(view: TaskView, entries: Entry[], quiet: boolean): Promise<Notice[]> {
+  /**
+   * 把账改成此刻的样子，返回该弹的那几条。quiet = 记底，只记账；catchup = 记底时没读清的任务头一回补记：带着发生时刻、
+   * 发生在记底之后的照常比、照常说，其余只记账（分不清是记底前还是记底后的，按历史算）。
+   */
+  private async advance(view: TaskView, entries: Entry[], mode: "quiet" | "catchup" | "live"): Promise<Notice[]> {
     const task = view.task;
-    const silent = quiet || view.teamWorker || !!task.archived || task.handoff?.direction === "out";
+    const silent = view.teamWorker || !!task.archived || task.handoff?.direction === "out";
+    const since = this.baselinedAt ?? "";
     return db.transaction(async (tx) => {
       const known = new Map((await tx.select().from(imOutcomes)
         .where(and(eq(imOutcomes.appId, SINK), eq(imOutcomes.taskId, task.id)))).map((row) => [row.kind, row.value]));
       const out: Notice[] = [];
       for (const entry of entries) {
         if (known.get(entry.kind) === entry.value) continue;
-        if (entry.whenSaid && !entry.said && known.has(entry.kind)) continue;
+        const history = mode === "quiet" || (mode === "catchup" && !(entry.at && entry.at > since));
+        if (!history && entry.later) continue;
+        if (!history && entry.whenSaid && !entry.said && known.has(entry.kind)) continue;
         await tx.insert(imOutcomes).values({ appId: SINK, taskId: task.id, kind: entry.kind, value: entry.value, updatedAt: now() })
           .onConflictDoUpdate({ target: [imOutcomes.appId, imOutcomes.taskId, imOutcomes.kind], set: { value: entry.value, updatedAt: now() } });
-        if (silent || !entry.said) continue;
+        if (history || silent || !entry.said) continue;
         out.push(noticeOf(view, entry.said.kind, `${entry.kind}:${entry.value}`, entry.said.body));
       }
       return out;
