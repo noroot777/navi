@@ -97,11 +97,14 @@ extension BrowserWindowController {
   private func showUnresponsive(_ holder: LockHolder, detail: String, force: Bool) {
     let retry = OfflineView.Action(title: "重试") { [weak self] in self?.loadHome() }
     let stop = OfflineView.Action(title: force ? "强制结束" : "停掉它") { [weak self] in
-      self?.offlineView.show(title: "正在停止 Navi 服务", detail: "进程 \(holder.pid)", busy: true)
+      guard let self else { return }
+      offlineView.show(title: "正在停止 Navi 服务", detail: "进程 \(holder.pid)", busy: true)
+      // 停的这十秒里它可能缓过来、窗口已经接上了（健康轮询 → loadHome）：那时迟到的结果不再动这一屏。
+      let generation = connectionGeneration
       DispatchQueue.global(qos: .userInitiated).async {
         let result = ServerShutdown.stopUnresponsive(holder, force: force)
-        DispatchQueue.main.async {
-          guard let self else { return }
+        DispatchQueue.main.async { [weak self] in
+          guard let self, self.connectionGeneration == generation else { return }
           guard case .stillRunning = result else { self.loadHome(); return }
           self.showUnresponsive(holder, detail: "进程 \(holder.pid) 收到停止信号后 10 秒还在，多半是卡死了、处理不了信号。\n\n"
             + "「强制结束」会立刻杀掉它（kill -9），它来不及收尾。", force: true)

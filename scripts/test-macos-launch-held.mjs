@@ -7,9 +7,9 @@
 // 端口上摆一个假的「旧服务」（独立进程，像真 server 一样在数据根里写单实例锁，health 按文件答 ok / 不应答），
 // 自带运行时是假的（node 就是跑测试的 node，server 几行：被锁挡下 / 起来就退）。
 // 覆盖：锁的持有者活着、一时不应答 → 不起、等它缓过来、记录不变；端口关着也一样；等满时限 → 如实说是谁，
-// 「停掉它」只停那一个、它缓过来就不停、不理 SIGTERM 时再给强制结束；起出来被锁挡下 → 记录退回原样、旧版照样
-// 认得出、这次留的底不算恢复点；自己没起来 → 撤掉 pid、留着「这一版起过」；闸在等着换掉旧服务时端口上已经是
-// 这一版起的那份 → 不再接管它。
+// 「停掉它」只停那一个、它缓过来就不停、不理 SIGTERM 时再给强制结束；起出来的那份没服务过就退了（被锁挡下 /
+// 自己没起来 / 等满时限之后才退）→ 在服务的那一份一字不动、旧版照样认得出，这一次只记成一次没成的尝试（留的底
+// 照常固定，下一版起之前不重备）；闸在等着换掉旧服务时端口上已经是这一版起的那份 → 不再接管它。
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
@@ -50,7 +50,7 @@ const healthFile = join(temporary, "health.txt");
 const setHealth = (value) => writeFileSync(healthFile, value);
 const impactFile = join(temporary, "impact.json");
 const setImpact = (value) => writeFileSync(impactFile, JSON.stringify(value));
-/** 新起的那一份怎么死：refuse（库锁被 holder.json 里那个进程拿着）/ crash。 */
+/** 新起的那一份怎么死：refuse（库锁被 holder.json 里那个进程拿着）/ crash / linger（不应答，过一会儿才退）。 */
 const newServerMode = join(temporary, "new-server-mode.txt");
 const holderFile = join(temporary, "holder.json");
 /** 新起的那一份每起一次记一行 pid。 */
@@ -65,7 +65,9 @@ symlinkSync(process.execPath, join(runtime, "node/bin/node"));
 copyFileSync(join(root, "scripts/start-detached.mjs"), join(runtime, "scripts/start-detached.mjs"));
 writeFileSync(join(runtime, "server/dist/index.js"), `const fs=require('node:fs'),path=require('node:path');
 fs.appendFileSync(${JSON.stringify(spawned)},process.pid+'\\n');
-if(fs.readFileSync(${JSON.stringify(newServerMode)},'utf8')==='refuse'){
+const mode=fs.readFileSync(${JSON.stringify(newServerMode)},'utf8');
+if(mode==='linger'){setTimeout(()=>process.exit(1),3500);return;}
+if(mode==='refuse'){
   // 它查过之后、这一份拿锁之前，旧服务把锁拿走了：这一份被挡下，一个字节没碰库。
   const holder=JSON.parse(fs.readFileSync(${JSON.stringify(holderFile)},'utf8'));
   fs.writeFileSync(path.join(process.env.NAVI_DATA_DIR,'navi.db.navi.lock'),JSON.stringify({version:1,...holder,token:'held'}));
@@ -204,35 +206,65 @@ await withTestResources(async () => {
   await stop(holder);
   console.log("PASS: a closed port with a live lock holder is not a reason to start another server either");
 
-  // ── 起出来那份被锁挡下（锁在查过之后才被拿走）：记录退回原样、旧版照样认得出、这次留的底不算恢复点 ──
+  // ── 起出来那份被锁挡下（锁在查过之后才被拿走）：在服务的那一份不动、旧版照样认得出，接着等它 ──
   reset();
   setHealth("hang");
   holder = await startHolder({ lock: false });
   writeFileSync(holderFile, JSON.stringify({ pid: holder.pid, processStartedAtMs: holder.startedAt }));
   writeFileSync(newServerMode, "refuse");
   await drive(["record", String(holder.pid), OLD]);
-  const original = readFileSync(recordFile, "utf8");
   result = await drive(["launch", "3"]);
   assert.equal(spawnedPids().length, 1, result.out);
   assert.match(result.out, new RegExp(`LAUNCH unresponsive ${holder.pid}`), "and then it waits for the holder instead\n" + result.out);
-  assert.equal(readFileSync(recordFile, "utf8"), original, "the record is back to what it was before the launch");
+  assert.equal(record().pid, holder.pid, "the serving identity is untouched");
+  assert.equal(record().bundleVersion, OLD);
+  assert.deepEqual(record().attempt, { pid: spawnedPids()[0], bundleVersion: "dev" }, "the spawn is only an attempt");
   assert.equal(await staleness(holder.pid), OLD, "the old service is still recognised as stale");
   assert.equal(backups().length, 1, "fixture: the launch backed up before spawning");
-  assert.deepEqual(await pins(), [], "a backup taken while another server kept writing is no recovery point");
+  assert.deepEqual(await pins(), backups(), "whether the attempt touched the database is not guessed: the backup stays pinned");
   await stop(holder);
-  console.log("PASS: a spawn refused by the lock leaves the service record as it was and its backup unpinned");
+  console.log("PASS: a spawn refused by the lock leaves the serving identity as it was");
 
-  // ── 自己没起来（没人握着锁）：撤掉这个从没服务过的 pid，留着「这一版起过」 ──
+  // ── 起出来那份等满时限都没应答、之后才退：同样只是一次没成的尝试；旧服务缓过来后再确认，那次尝试作废 ──
+  reset();
+  setHealth("hang");
+  holder = await startHolder({ lock: false });
+  writeFileSync(newServerMode, "linger");
+  await drive(["record", String(holder.pid), OLD]);
+  result = await drive(["launch", "2"]);
+  assert.match(result.out, /LAUNCH failed .*2 秒内没应答/, result.out);
+  const [lingering] = spawnedPids();
+  for (let i = 0; i < 100 && spawnSync("kill", ["-0", String(lingering)]).status === 0; i++) await delay(100);
+  assert.notEqual(spawnSync("kill", ["-0", String(lingering)]).status, 0, "fixture: the spawned server exited after the launcher gave up");
+  assert.equal(record().pid, holder.pid);
+  assert.equal(record().bundleVersion, OLD);
+  assert.equal(await staleness(holder.pid), OLD, "an exit nobody waited for does not cost the old service its version");
+  setHealth("ok");
+  result = await drive(["launch", "5"]);
+  assert.match(result.out, /LAUNCH ready/, result.out);
+  assert.deepEqual(spawnedPids(), [lingering], "the recovered old service is adopted, nothing new is started");
+  assert.equal(record().attempt, undefined, "confirming the serving process drops the failed attempt");
+  assert.equal(record().bundleVersion, OLD);
+  assert.equal(await staleness(holder.pid), OLD);
+  await stop(holder);
+  console.log("PASS: a spawn that exits after the launcher stopped waiting is reconciled by the record itself");
+
+  // ── 自己没起来（没人握着锁）：在服务的那一份不动；「这一版起过」记在尝试里，下一版起之前照常重备、这一版再起不重备 ──
   reset();
   writeFileSync(newServerMode, "crash");
   await drive(["record", "4242", OLD]);
   result = await drive(["launch", "3"]);
   assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
   assert.equal(spawnedPids().length, 1);
-  assert.equal(record().pid, 0, "no pid that never served");
-  assert.equal(record().bundleVersion, "dev", "this build had its go at the database: the next build backs up again");
+  assert.equal(record().pid, 4242, "no pid that never served becomes the serving identity");
+  assert.equal(record().bundleVersion, OLD);
+  assert.deepEqual(record().attempt, { pid: spawnedPids()[0], bundleVersion: "dev" }, "this build had its go at the database");
   assert.deepEqual(await pins(), backups(), "the pre-migration backup stays pinned");
-  console.log("PASS: a server that exits on its own leaves only the attempt marker, not its pid");
+  assert.equal(backups().length, 1);
+  result = await drive(["launch", "3"]);
+  assert.match(result.out, /LAUNCH failed/, result.out);
+  assert.equal(backups().length, 1, "the same build trying again needs no second backup");
+  console.log("PASS: a server that exits on its own leaves only an attempt, not a serving identity");
 
   // ── 闸在等着换掉旧服务，端口上已经是这一版起的那份：不再接管、不停它 ──
   reset();

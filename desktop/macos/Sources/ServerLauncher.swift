@@ -71,7 +71,10 @@ final class ServerLauncher {
   func ensureRunningSync(timeout: TimeInterval) -> Outcome {
     do {
       if NaviConfig.isLocal {
-        if try RuntimeRecovery.paused() == nil { try RuntimeStore.prepare() }
+        // 只把这一版的运行时发布进数据根，不切 current：current 跟着确认在服务的那一份走（RuntimeStore.follow）——
+        // 端口上还是旧服务时（在等它缓过来、在等安全接管），新开的 MCP 也该用旧服务那一版。还没有 current（第一次
+        // 用外置运行时）时没有「旧的」可留，直接指向这一版，mcp.sh 才有东西可起。
+        if try RuntimeRecovery.paused() == nil { try RuntimeStore.prepare(activate: !RuntimeStore.hasCurrent) }
       }
     }
     catch { return .failed(error.localizedDescription) }
@@ -103,18 +106,13 @@ final class ServerLauncher {
     do {
       pause = try RuntimeRecovery.paused()
       runtime = pause.map { URL(fileURLWithPath: $0.previous) } ?? NaviConfig.targetRuntimeURL
-      if pause != nil || RuntimeStore.destination != nil { try RuntimeStore.activate(runtime) }
+      // 回退暂停里起的是要回到的那一版，current 先指回它。别的情形 current 等新起的那份应答了再跟过去（settle /
+      // waitReady → RuntimeStore.follow）：它没起来，current 就还指着原来那一版，不用事后再退。
+      if pause != nil { try RuntimeStore.activate(runtime) }
     }
     catch { return .failed("无法启用新版运行时，未启动服务：\(error.localizedDescription)") }
     let version = pause?.version ?? NaviConfig.bundleVersion
-    // 起之前的记录原样留一份：起出来的进程一次都没应答就退了，记录里不能留下它（见下面）。
-    let recordBeforeLaunch = ServerRecord.snapshot()
-    let backup: URL?
-    switch Self.backUpBeforeMigration(version: version) {
-    case .refused(let failure): return .failed(failure)
-    case .backedUp(let made): backup = made
-    }
-    let recordBeforeSpawn = ServerRecord.snapshot()
+    if let failure = Self.backUpBeforeMigration(version: version) { return .failed(failure) }
     let parts = ["node/bin/node", "server/dist/index.js", "scripts/start-detached.mjs"].map { runtime.appendingPathComponent($0) }
     if let missing = parts.first(where: { !FileManager.default.fileExists(atPath: $0.path) }) {
       return .failed("app 里自带的 Navi 不完整（缺 \(missing.path)）。重新装一次 Navi.app。")
@@ -127,36 +125,25 @@ final class ServerLauncher {
     switch spawnDetached(runtime: runtime) {
     case .failure(let reason): return .failed(reason)
     case .success(let pid):
-      // 进程一起来就记下 pid：这个启动器等不到它应答（被退掉、超时）也不要紧，之后谁看到它应答
-      // 都能认出是它、替它确认（见 settle）。
+      // 进程一起来就记下 pid（记在这一次尝试里，不碰在服务的那一份）：这个启动器等不到它应答（被退掉、超时、
+      // 端口被人抢了）也不要紧，之后谁看到它应答都能认出是它、替它确认（见 settle）；它一直没应答，就只是一次
+      // 没成的尝试，端口上原来那份照样认得出是哪一版起的。
       ServerRecord.write(pid: Int(pid), version: version)
       RuntimeLog.record("server.spawn", ["serverPid": Int(pid), "version": version])
       let outcome = waitReady(pid: pid, timeout: timeout)
       if case .failed(let startupFailure) = outcome, kill(pid, 0) != 0, errno == ESRCH {
-        // 它一次都没应答就退了：记录里不能留下这个从没服务过的进程 —— 留着的话，端口上之后应答的那份
-        // （pid 对不上）就再也认不出是哪一版起的（ServerRecord.staleVersion）。
+        // 它退了，这份库这会儿却握在另一个活着的服务手里（在上面那次查过之后才出现的）：不在它底下拿恢复点
+        // 覆盖库，接着等它。它这一次有没有动过库这里不猜 —— 恢复点照常固定着，等下一次确认才作废。
         if let holder = DatabaseFile.liveHolder(in: NaviConfig.dataURL), holder.pid != pid {
-          // 被另一个还活着的服务的单实例锁挡下了（它在上面那次查过之后才拿到锁）：这一份没碰过库，「这一版
-          // 要起了」也不算数，记录退回起之前；这次留的底也不是这一次的（那份服务之后还在写库），不固定。
-          // 运行时的 current 不用退：不在回退暂停里时它在 prepare 那一步就已经指着这一版（新开的 MCP 跟新版），
-          // 暂停时指着的本来就是要回到的那一版。接着等那份服务。
-          ServerRecord.restore(recordBeforeLaunch)
-          if let backup { DatabaseBackup.unpin(backup) }
           RuntimeLog.record("server.spawn_refused", ["serverPid": Int(pid), "holderPid": Int(holder.pid)])
           return waitForLockHolder(timeout: timeout) ?? outcome
         }
-        // 自己没起来（启动失败、迁移失败）：pid 撤掉，「这一版起过」那一笔留着 —— 它可能已经动过库，
-        // 下一版起之前要照常再备一份（backUpBeforeMigration）。
-        ServerRecord.restore(recordBeforeSpawn)
         do {
           if pause == nil, let previous = try RuntimeRecovery.restoreBeforeAdoption(reason: startupFailure) {
             switch spawnDetached(runtime: previous) {
             case .failure(let reason): return .failed("已恢复迁移前数据库，但旧服务启动失败：\(reason)")
             case .success(let previousPID):
-              if let record = ServerRecord.read() {
-                try JSONEncoder().encode(ServerRecord(pid: Int(previousPID), bundleVersion: record.bundleVersion,
-                                                     confirmedAt: record.confirmedAt)).write(to: ServerRecord.url, options: .atomic)
-              }
+              if let record = ServerRecord.read() { ServerRecord.write(pid: Int(previousPID), version: record.bundleVersion) }
               let restored = waitReady(pid: previousPID, timeout: timeout)
               if case .ready = restored {
                 let version = ServerRecord.read()?.bundleVersion ?? "unknown"
@@ -179,35 +166,28 @@ final class ServerLauncher {
   ///  · 这一次已经备过（UpdateGate 装更新前留的、仍固定着的恢复点，见 DatabaseBackup.covers）。
   /// 其余的 —— 退出时没过闸就被 Sparkle 装上了、`build.sh --install`、手动换了 app、导入来的库 ——
   /// 在这里补一份。备份不成、或者记不下「这一版要起了」就不起：库原样留着，配上旧版 app 还能回去。
-  private static func backUpBeforeMigration(version: String) -> BackupStep {
+  /// 返回 nil = 可以起。
+  private static func backUpBeforeMigration(version: String) -> String? {
     do {
-      guard try DatabaseFile.existing(in: NaviConfig.dataURL) != nil else { return .backedUp(nil) }
+      guard try DatabaseFile.existing(in: NaviConfig.dataURL) != nil else { return nil }
     } catch {
-      return .refused("数据根里的库认不准（\(error.localizedDescription)），没备份、也没起服务。照提示处理好再点「重试」（docs/rename-db.md）。")
+      return "数据根里的库认不准（\(error.localizedDescription)），没备份、也没起服务。照提示处理好再点「重试」（docs/rename-db.md）。"
     }
-    let lastServedBy = ServerRecord.read()?.bundleVersion ?? "unknown"
-    var made: URL?
+    let lastServedBy = ServerRecord.read()?.lastHandedTo ?? "unknown"
     do {
       if lastServedBy != version && !DatabaseBackup.covers(lastServedBy: lastServedBy) {
-        made = try DatabaseBackup.beforeUpdate(fromVersion: lastServedBy)
+        try DatabaseBackup.beforeUpdate(fromVersion: lastServedBy)
       }
     } catch {
-      return .refused("这一版要在库上做迁移，迁移前先备份库没成功（\(error.localizedDescription)），所以没起服务、库没动过。\n"
-        + "腾出空间 / 修好权限后点「重试」；要回到旧版，把旧版 app 装回来就行（README「回到旧版」）。")
+      return "这一版要在库上做迁移，迁移前先备份库没成功（\(error.localizedDescription)），所以没起服务、库没动过。\n"
+        + "腾出空间 / 修好权限后点「重试」；要回到旧版，把旧版 app 装回来就行（README「回到旧版」）。"
     }
     do {
       try ServerRecord.writeAttempt(version: version)
     } catch {
-      return .refused("记不下这一次要起的是哪一版（\(NaviConfig.dataURL.path)：\(error.localizedDescription)），所以没起服务、库没动过。修好权限 / 腾出空间后点「重试」。")
+      return "记不下这一次要起的是哪一版（\(NaviConfig.dataURL.path)：\(error.localizedDescription)），所以没起服务、库没动过。修好权限 / 腾出空间后点「重试」。"
     }
-    return .backedUp(made)
-  }
-
-  private enum BackupStep {
-    /// 可以起。带着这一次留的底（不用留是 nil）。
-    case backedUp(URL?)
-    /// 不起，带着说给用户听的原因。
-    case refused(String)
+    return nil
   }
 
   /// 端口上没人应答（连不上 / 答不上来），可这份库的单实例锁还握在一个活着的服务进程手里：多半就是它，一时
@@ -238,6 +218,7 @@ final class ServerLauncher {
       // 不管服务是谁起的、谁先看到它起来，确认都在这一处（窗口、登录项、另一个窗口的重试都经过这里）。
       if NaviConfig.isLocal {
         RuntimeRecovery.confirmed(instance)
+        RuntimeStore.follow(instance)
         RuntimeStore.reclaimAfterConfirmation(instance)
         ServerRecord.confirmServing(pid: instance.pid)
         ServedInstance.observe(instance)
@@ -307,6 +288,7 @@ final class ServerLauncher {
       let probe = NaviHealth.probeSync()
       if case .navi(let instance) = probe, instance.isOurs, instance.pid == Int(pid) {
         RuntimeRecovery.confirmed(instance)
+        RuntimeStore.follow(instance)
         RuntimeStore.reclaimAfterConfirmation(instance)
         ServerRecord.confirmServing(pid: Int(pid))
         ServedInstance.observe(instance)

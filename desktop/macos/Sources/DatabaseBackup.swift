@@ -116,7 +116,7 @@ enum DatabaseBackup {
 
   private struct Pin: Codable {
     let file: String
-    /// 留它的时候库最后一次交给哪一版起（ServerRecord 的构建号；没有记录是 "unknown"）。
+    /// 留它的时候库最后一次交给哪一版起（ServerRecord.lastHandedTo；没有记录是 "unknown"）。
     let lastServedBy: String
     let since: Date
   }
@@ -148,7 +148,7 @@ enum DatabaseBackup {
       try? FileManager.default.removeItem(at: partial)
       throw error
     }
-    let pin = Pin(file: target.lastPathComponent, lastServedBy: ServerRecord.read()?.bundleVersion ?? "unknown", since: Date())
+    let pin = Pin(file: target.lastPathComponent, lastServedBy: ServerRecord.read()?.lastHandedTo ?? "unknown", since: Date())
     try JSONEncoder().encode(validPins() + [pin]).write(to: pinsURL, options: .atomic)
     prune(dir)
     return target
@@ -162,14 +162,6 @@ enum DatabaseBackup {
   /// 这一次（库最后交给 `lastServedBy` 那一版起）是不是已经备过了。
   static func covers(lastServedBy version: String) -> Bool {
     validPins().contains { $0.lastServedBy == version }
-  }
-
-  /// 这一份不再是恢复点（留它之后库还在被别的服务写，它不是哪一次迁移前的底）：回到普通轮换里，文件留着。
-  static func unpin(_ backup: URL) {
-    let pins = validPins()
-    let kept = pins.filter { $0.file != backup.lastPathComponent }
-    guard kept.count != pins.count else { return }
-    try? JSONEncoder().encode(kept).write(to: pinsURL, options: .atomic)
   }
 
   /// 有一份服务在这份库上真起来了（迁移跑完了）：恢复点回到普通轮换里。删不掉也不要紧 ——

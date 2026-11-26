@@ -188,7 +188,8 @@ final class UpdateGate {
     if case .update = purpose, RuntimeStore.destination != nil {
       DispatchQueue.global(qos: .userInitiated).async { [self] in
         let result: Result<Int32, Error> = Result {
-          try RuntimeStore.prepare()
+          // 换 app 之前把这一版的运行时发布出去就够了，current 照旧跟着在服务的那一份（见 ServerLauncher）。
+          try RuntimeStore.prepare(activate: !RuntimeStore.hasCurrent)
           return try RuntimeStore.lockForReplacement()
         }
         DispatchQueue.main.async {
@@ -420,7 +421,7 @@ final class UpdateGate {
     }
     if let recovery {
       do {
-        try RuntimeStore.prepare()
+        try RuntimeStore.prepare(activate: !RuntimeStore.hasCurrent)
         guard let next = RuntimeStore.destination, RuntimeStore.contains(next.path) else {
           throw SQLiteFile.Failure("新版运行时未完整准备，未停止旧服务")
         }

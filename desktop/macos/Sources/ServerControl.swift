@@ -1,19 +1,29 @@
 import Foundation
 import Darwin
 
-/// 「这份库最后交给哪一版 app 起、那一份起来过没有」。在数据根里记一笔 pid + 构建号：
+/// 「这份库最后交给哪一版 app 起、那一份起来过没有」。在数据根里记两件事，分开存：
 ///
-///  · 起服务**之前**先记下构建号（pid 还是 0）—— 写不进去就不起：恢复点认「这一次备过没有」靠的
-///    就是它（DatabaseBackup.covers），起了却没记下，下一版就会把一份过时的底当成这一次的。
-///  · 进程起来了补上 pid。
-///  · 端口上应答的正是记录里那个进程（`confirmServing`）= 这一版在这份库上起来过、迁移跑完了：
-///    记下确认时间，恢复点随之作废。不管是起它的那个启动器等到的，还是之后重开 app、登录项、
-///    另一个窗口看到的，都走这一处。
+///  · **在服务的那一份**（`pid` + `bundleVersion`）：确认应答过的那个进程、是哪一版 app 起的。只有确认
+///    （`confirmServing`）会改它 —— 起服务的人自己说了不算。
+///  · **这一次起服务**（`attempt`）：起之前先记下构建号（pid 还是 0；写不进去就不起），进程起来了补上 pid。
+///    它应答了（不管是起它的那个启动器等到的，还是之后重开 app、登录项、另一个窗口看到的）才升成在服务的那一份。
+///    没应答就退了、等超时了、端口被别人抢了，它都只是一次没成的尝试，留在 `attempt` 里，在服务的那一份原样不动。
 ///
-/// 换了新版 app（Sparkle 装完重开、`build.sh --install`）再连上时，pid 还是那个、构建号却不是
-/// 自己 = 服务还在跑旧版代码，而且它后面才加载的模块已经是新版的文件了 —— 两版混着跑。见
-/// UpdateGate 的 `.staleServer`。记录里的 pid 对不上就是「不知道」，不当成旧版。
+/// 分开存是因为起服务的结局启动器自己说不准：被锁挡下、迟迟才退、起了一半又换了人……要是起之前就拿新进程
+/// 盖掉在服务的那一份，任何一条没对上账的路都会让端口上那份旧服务从此「pid 对不上 = 不知道是谁」。
+///
+/// 库最后交给了哪一版（`lastHandedTo`）：有一次尝试就是那一版 —— 它可能已经动过库（迁移不可逆），恢复点认
+/// 「这一次备过没有」靠的就是它（DatabaseBackup.covers）。在服务的那一份之后又被确认（旧服务缓过来了、接着写库），
+/// 那次尝试就作废：库最后是那一份在写，下一次起之前要照常再备一份。
+///
+/// 换了新版 app（Sparkle 装完重开、`build.sh --install`）再连上时，在服务的那一份构建号不是自己 = 服务还在跑
+/// 旧版代码。见 UpdateGate 的 `.staleServer`。pid 对不上就是「不知道」，不当成旧版。
 struct ServerRecord: Codable {
+  struct Attempt: Codable {
+    let pid: Int
+    let bundleVersion: String
+  }
+
   static let fileName = ".mac-server.json"
   static var url: URL { NaviConfig.dataURL.appendingPathComponent(fileName) }
 
@@ -21,28 +31,32 @@ struct ServerRecord: Codable {
   let bundleVersion: String
   /// 最近一次确认有服务在这份库上起来过的时间（比它早的恢复点作废）。
   var confirmedAt: Date? = nil
+  /// 还没确认应答过的那一次起服务。
+  var attempt: Attempt? = nil
+
+  /// 库最后交给了哪一版 app（见类型顶部）。
+  var lastHandedTo: String { attempt?.bundleVersion ?? bundleVersion }
 
   /// 要起服务了：先记下是这一版。写不进去抛错，调用方就别起。
   static func writeAttempt(version: String = NaviConfig.bundleVersion) throws {
-    try save(ServerRecord(pid: 0, bundleVersion: version, confirmedAt: read()?.confirmedAt))
+    try save(with(attempt: Attempt(pid: 0, bundleVersion: version)))
   }
 
+  /// 起出来的进程号。
   static func write(pid: Int, version: String = NaviConfig.bundleVersion) {
-    try? save(ServerRecord(pid: pid, bundleVersion: version, confirmedAt: read()?.confirmedAt))
+    try? save(with(attempt: Attempt(pid: pid, bundleVersion: version)))
   }
 
-  /// 端口上自己那份应答了：是记录里那个进程，就确认它起来过。
+  /// 端口上自己那份应答了：是这一次起出来的那个，就升成在服务的那一份；是在服务的那一份，就再确认一次（它之前
+  /// 那次没成的尝试随之作废）。别的进程不算。
   static func confirmServing(pid: Int?) {
-    guard let pid, pid > 1, let record = read(), record.pid == pid else { return }
-    try? save(ServerRecord(pid: record.pid, bundleVersion: record.bundleVersion, confirmedAt: Date()))
+    guard let pid, pid > 1, let record = read() else { return }
+    if let attempt = record.attempt, attempt.pid == pid {
+      try? save(ServerRecord(pid: pid, bundleVersion: attempt.bundleVersion, confirmedAt: Date()))
+    } else if record.pid == pid {
+      try? save(ServerRecord(pid: pid, bundleVersion: record.bundleVersion, confirmedAt: Date()))
+    } else { return }
     DatabaseBackup.releaseRecoveryPoints()
-  }
-
-  /// 记录文件此刻原样的内容（没有是 nil）。起出来的进程一次都没应答就退了时拿它放回去（ServerLauncher）。
-  static func snapshot() -> Data? { try? Data(contentsOf: url) }
-
-  static func restore(_ snapshot: Data?) {
-    if let snapshot { try? snapshot.write(to: url, options: .atomic) } else { try? FileManager.default.removeItem(at: url) }
   }
 
   static func read() -> ServerRecord? {
@@ -50,20 +64,32 @@ struct ServerRecord: Codable {
     return try? JSONDecoder().decode(ServerRecord.self, from: data)
   }
 
+  private static func with(attempt: Attempt) -> ServerRecord {
+    let record = read()
+    return ServerRecord(pid: record?.pid ?? 0, bundleVersion: record?.bundleVersion ?? "unknown",
+                        confirmedAt: record?.confirmedAt, attempt: attempt)
+  }
+
   private static func save(_ record: ServerRecord) throws {
     try JSONEncoder().encode(record).write(to: url, options: .atomic)
   }
 
-  /// 正在应答的这份（pid）就是这一版 app 起的：记录里那个进程、构建号是自己。记录对不上是 false（不知道）。
+  /// 正在应答的这个进程是哪一版 app 起的：在服务的那一份，或者这一次起出来、还没来得及确认的那个。认不出是 nil。
+  private static func version(servingPID pid: Int?) -> String? {
+    guard let pid, pid > 1, let record = read() else { return nil }
+    if let attempt = record.attempt, attempt.pid == pid { return attempt.bundleVersion }
+    return record.pid == pid ? record.bundleVersion : nil
+  }
+
+  /// 正在应答的这份（pid）就是这一版 app 起的。认不出是 false（不知道）。
   static func servesThisBuild(pid: Int?) -> Bool {
-    guard let pid, let record = read() else { return false }
-    return record.pid == pid && record.bundleVersion == NaviConfig.bundleVersion
+    version(servingPID: pid) == NaviConfig.bundleVersion
   }
 
   /// 正在应答的这份（pid）是不是由别的构建号的 app 起的；是就返回那个构建号。
   static func staleVersion(servingPID pid: Int?) -> String? {
-    guard let pid, let record = read(), record.pid == pid, record.bundleVersion != NaviConfig.bundleVersion else { return nil }
-    return record.bundleVersion
+    guard let version = version(servingPID: pid), version != NaviConfig.bundleVersion else { return nil }
+    return version
   }
 }
 

@@ -327,7 +327,29 @@ enum RuntimeStore {
     if activate { prepared = true }
   }
 
+  /// 数据根里已经有 current 指针（指着一份发布过的运行时）。
+  static var hasCurrent: Bool { currentID.map { contains(root.appendingPathComponent($0).path) } ?? false }
+
+  private static var currentID: String? {
+    try? FileManager.default.destinationOfSymbolicLink(atPath: root.appendingPathComponent("current").path)
+  }
+
+  /// current 跟着确认在服务的那一份走：新开的 MCP（mcp.sh）用的就是端口上那份服务的那一版。端口上是数据根里
+  /// 发布过的某一版、而 current 指着别处才改；包内旧布局起的服务不在仓库里，不动。
+  static func follow(_ instance: NaviInstance) {
+    guard instance.isOurs, let code = instance.codeDir, contains(code) else { return }
+    let runtime = URL(fileURLWithPath: NaviHealth.realPath(code), isDirectory: true)
+    guard currentID != runtime.lastPathComponent else { return }
+    try? select(runtime)
+  }
+
+  /// 把 current 指过去，并记下这一次起服务用的是它（`restored`，NaviConfig.runtimeURL）。
   static func activate(_ runtime: URL) throws {
+    try select(runtime)
+    restored = runtime
+  }
+
+  private static func select(_ runtime: URL) throws {
     guard contains(runtime.path) else { throw SQLiteFile.Failure("恢复运行时身份不符") }
     let process = Process()
     process.executableURL = NaviConfig.bundledRuntimeURL.appendingPathComponent("node/bin/node")
@@ -338,7 +360,6 @@ enum RuntimeStore {
     try process.run()
     process.waitUntilExit()
     guard process.terminationStatus == 0 else { throw SQLiteFile.Failure("恢复运行时校验失败") }
-    restored = runtime
   }
 
   static func reclaim() {
