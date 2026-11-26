@@ -4,7 +4,8 @@ import WebKit
 /// 窗口在线之后端口换了人：页面得撤掉、盖上说明，自己那份回来再回到原路由。
 ///
 /// 真的 BrowserWindowController（窗口不上屏），服务是测试脚本摆的假应答者。协议走 stdin/stdout：
-/// 页面载好打印 `LOADED <url>`。短时探活超时后确认原文档还在。读到 `FLIPPED` 后，`reload` 模式
+/// 页面载好打印 `LOADED <url>`。短时探活超时后确认原文档还在；`unresponsive` 模式探活一直超时，
+/// 读到 `STALLED` 前页面一刻都不许被盖上，之后确认原文档还在。读到 `FLIPPED` 后，`reload` 模式
 /// 当场刷新一次 —— 定时认人调得很慢，验的是导航那一道；`watch` 模式什么都不做，验定时那一道。
 /// 撤下后打印 `BLANKED …`，再读到 `BACK` 后等页面回来打印 `RESTORED <url>`，读到 `DONE` 退出。
 func runInstanceGuardProbe(mode: String) -> Never {
@@ -84,7 +85,14 @@ func runInstanceGuardProbe(mode: String) -> Never {
     say("CONTENT_RECOVERED \(webView.url!.path)")
     exit(0)
   }
-  if mode != "unresponsive" {
+  if mode == "unresponsive" {
+    spin(until: {
+      require(controller.offlineView.isHidden && webView.url?.path == "/route/abc",
+              "a guard probe that only timed out must leave the page in place")
+      return received("STALLED")
+    }, "the sustained stall")
+    say("RETAINED \(readPage("window.guardProbeMarker"))")
+  } else {
     if mode == "reload" {
       spin(until: { received("STALL") }, "the stalled navigation probe")
       controller.reloadPage(nil)
