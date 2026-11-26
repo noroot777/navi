@@ -6,6 +6,7 @@
 // 拆文件不能拆掉那个视图。
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import type { ReviewNoVerdict } from "@navi/shared/timeline-notice";
+import type { ReviewRanOn } from "@navi/shared/free-workflow";
 import type { Client } from "./node-sqlite-client.js";
 
 /**
@@ -211,6 +212,8 @@ export const freeReviewRounds = sqliteTable(
     // 这一轮落 error 且没结论时判出的原因（review-no-verdict.ts）。每个审查回合收尾都按那一回合
     // 重写一次（续本轮之后又断了，原因换成新那一次的），null = 没判过 / 老行。
     noVerdict: text("no_verdict", { mode: "json" }).$type<ReviewNoVerdict>(),
+    // 这一轮实际跑在哪个模型、哪档智能水平上（派发那一刻解析，free-review-round.ts）。null = 老行，没记过。
+    ranOn: text("ran_on", { mode: "json" }).$type<ReviewRanOn>(),
     startedAt: text("started_at").notNull(),
     endedAt: text("ended_at"),
   },
@@ -330,7 +333,7 @@ export async function ensureFreeWorkflowSchema(client: Client): Promise<void> {
       dispute_reason TEXT, dispute_defer_reason TEXT, dispute_at TEXT,
       dispute_resolution TEXT, dispute_resolved_at TEXT, dispute_resolution_note TEXT,
       dispute_deferred_task_id TEXT, dispute_superseded_at TEXT, dispatch TEXT,
-      history_refs TEXT, carries TEXT, breaker_epoch INTEGER, no_verdict TEXT,
+      history_refs TEXT, carries TEXT, breaker_epoch INTEGER, no_verdict TEXT, ran_on TEXT,
       started_at TEXT NOT NULL, ended_at TEXT
     );
     CREATE UNIQUE INDEX IF NOT EXISTS free_review_rounds_run_round_idx
@@ -399,6 +402,8 @@ export async function ensureFreeWorkflowSchema(client: Client): Promise<void> {
     "ALTER TABLE free_review_rounds ADD COLUMN breaker_epoch INTEGER",
     // 这一轮没结论的原因（review-no-verdict.ts）；老行留 null，界面照老样子显示。
     "ALTER TABLE free_review_rounds ADD COLUMN no_verdict TEXT",
+    // 这一轮跑在哪个模型上；老行留 null，界面只能退回 run 上的覆盖值。
+    "ALTER TABLE free_review_rounds ADD COLUMN ran_on TEXT",
     // 内容锚点（审查开始时 / 驳回时）；老行留 null = 退回只比 HEAD + 干净。
     "ALTER TABLE free_review_rounds ADD COLUMN reviewed_fingerprint TEXT",
     "ALTER TABLE free_review_rounds ADD COLUMN disputed_fingerprint TEXT",

@@ -48,6 +48,7 @@ export type {
   FreeWorkflowExecutionStatus,
   FreeWorkflowState,
   ReviewerProfile,
+  ReviewRanOn,
   TaskWorkflowMode,
 } from "./free-workflow.ts";
 // 执行器覆盖的继承规则住在 ./executor-overrides.ts,走 "@navi/shared/executors"

@@ -314,6 +314,13 @@ export async function launchReviewRound(
         .where(and(eq(freeReviewRounds.runId, run.id), eq(freeReviewRounds.round, run.currentRound)));
     }
   }
+  // 这一轮是哪个模型审的：覆盖值常空着（跟随执行器），按起跑同一套优先级解析好记在这一轮上 —— 执行器之后
+  // 换了模型，老记录也不跟着变。收窄口径同 orchestrator（审查回合不带 actingUserId，退回任务归属人）。
+  const ranOn = await (await import("./executors/index.js")).effectiveRunConfig({ executorId: run.executorId,
+    type: run.agentType as AgentType, model: run.model, reasoningEffort: run.reasoningEffort,
+    ...await (await import("./auth/dispatch-gate.js")).executorOwnerScope(task.ownerUserId) });
+  await db.update(freeReviewRounds).set({ ranOn })
+    .where(and(eq(freeReviewRounds.runId, run.id), eq(freeReviewRounds.round, run.currentRound)));
   const prompt = await freeReviewPrompt(task, run, run.currentRound, project?.repoPath ?? "(项目已不存在)");
   // 重跑分两档，差别不在按钮而在**送进去的那句话**：上下文还在就只说「接着做」（一条崩在
   // 10M token 上的审查，重来一次就是再烧 10M）；上下文是空的才把任务书整份重发。

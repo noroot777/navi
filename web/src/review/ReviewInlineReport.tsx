@@ -8,7 +8,7 @@ import { useLeftDrawer, type LeftDrawerEntry } from "../components/LeftDrawer.ts
 import { InspTool } from "../inspector/parts.tsx";
 
 export function ReviewInlineReport({ meta, entry, children, screenshots, after }: {
-  /** 第一行那段灰字：检查类型、起止。没有就只剩行尾那颗图标。 */
+  /** 第一行那段灰字：检查类型、起止（放不下就折行，不截掉）。没有就只剩行尾那颗图标。 */
   meta?: ReactNode;
   /** 铺到左侧抽屉里的那一屉；这一处没有抽屉可开（只读视图）时那颗图标不出。 */
   entry: LeftDrawerEntry;
@@ -24,7 +24,7 @@ export function ReviewInlineReport({ meta, entry, children, screenshots, after }
     <ImagePreviewGroup isolated>
       <div className="insp-report">
         <p className="insp-report__meta">
-          <span className="insp-cut">{meta}</span>
+          <span className="insp-report__meta-text">{meta}</span>
           {drawer && (
             <InspTool label="在左侧铺开看" placement="left" aria-pressed={wide} onClick={() => (wide ? drawer.close() : drawer.open(entry))}>
               <ArrowsOutSimple size={14} aria-hidden="true" />

@@ -561,6 +561,20 @@ export interface FreeReviewRound {
    * 或者是加这一项之前的老记录（界面照老样子显示）。
    */
   noVerdict?: ReviewNoVerdict;
+  /**
+   * 这一轮实际跑在哪个模型、哪档智能水平上（派这一轮那一刻解析好记下的，见 `ReviewRanOn`）。
+   * 省略 = 加这一项之前的老记录，说不出就不说：别拿执行器此刻的配置去补，那可能早就改过了。
+   */
+  ranOn?: ReviewRanOn;
+}
+
+/**
+ * run 上的 model/reasoningEffort 是覆盖值，空着 = 跟随执行器，光看它说不出是哪个模型审的。这里是按起跑同一套
+ * 优先级（覆盖 → 执行器 profile → 供应商默认）解析出来的结果；null = 跟随 CLI 自己的默认。
+ */
+export interface ReviewRanOn {
+  model: string | null;
+  reasoningEffort: string | null;
 }
 
 export interface FreeReviewRun {

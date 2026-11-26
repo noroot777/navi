@@ -16,7 +16,7 @@ import { useFreeReviewRepair } from "./FreeReviewRepairButton.tsx";
 import { FreeReviewRoundBody } from "./FreeReviewRoundBody.tsx";
 import { FreeReviewRoundsDialog } from "./FreeReviewRoundsDialog.tsx";
 import { freeReviewView, reviewLocked } from "./freeReviewCopy.ts";
-import { deferOnly, durationText, noVerdictText, reviewKey, reviewRoundLabel, reviewRoundTone } from "./freeReviewRounds.ts";
+import { deferOnly, durationText, noVerdictText, reviewKey, reviewModelText, reviewRoundLabel, reviewRoundTone } from "./freeReviewRounds.ts";
 import type { ReviewRetryAction } from "../task-detail/turnRetry.ts";
 import { useFreeWorkflowState } from "./useFreeWorkflowState.ts";
 import { FreeReviewDiscussion, discussionKey } from "./FreeReviewDiscussion.tsx";
@@ -332,7 +332,8 @@ export function FreeReviewPane({ task, onOpenReview, onOpenTask, notify, reviewR
         key={key}
         data-record={key}
         title={title}
-        sub={[run.reviewerName, took].filter(Boolean).join(" · ")}
+        // 一行只放区分得开各轮的：哪个模型审的、审了多久。说不出模型（跟随 CLI 默认）才退回审查者名字。
+        sub={[reviewModelText(run, round) ?? run.reviewerName, took].filter(Boolean).join(" · ")}
         status={reviewRoundLabel(round)}
         tone={reviewRoundTone(round)}
         open={openKeys.has(key)}
