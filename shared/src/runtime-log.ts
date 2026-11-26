@@ -365,6 +365,8 @@ export function sanitizeWebEvent(
     // 页面自己因为上限没报的详情（报错、断线）有几条：不报可以，不报了要说。
     case "page.skipped":
       set("count", count(event.count, 1_000_000));
+      // 发出去没送到的条数：里面可能有载入 / 重载 / 崩溃。
+      set("unsent", count(event.unsent, 1_000_000));
       break;
   }
   return out as Omit<RuntimeLogRecord, "at" | "src" | "pid">;

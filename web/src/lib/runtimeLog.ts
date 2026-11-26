@@ -34,6 +34,8 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 let errorsSent = 0;
 /** 因为上限没报的详情（报错超过 MAX_ERRORS、攒着没发的超过 MAX_PENDING_DETAILS）：下一批里带上个数。 */
 let skipped = 0;
+/** 发出去没送到的（服务不在、被拒）：里面可能有状态变化，下一批里带上个数。 */
+let unsent = 0;
 const seenErrors = new Set<string>();
 let crashReported = false;
 
@@ -62,9 +64,10 @@ const load = randomId();
 const isState = (pending: Pending) => WEB_STATE_EVENTS.includes(pending.event.ev);
 
 function send(events: Pending[], keepalive: boolean): void {
-  if (skipped) {
-    events.push({ event: { ev: "page.skipped", count: skipped }, t: Date.now() });
+  if (skipped || unsent) {
+    events.push({ event: { ev: "page.skipped", count: skipped, unsent }, t: Date.now() });
     skipped = 0;
+    unsent = 0;
   }
   if (!events.length) return;
   const ordered = [...events.filter(isState), ...events.filter((pending) => !isState(pending))];
@@ -77,9 +80,21 @@ function post(events: Pending[], keepalive: boolean): void {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ events: events.map(({ event, t }) => ({ ...event, tab, load, shell, ago: Math.max(0, Date.now() - t) })) }),
     keepalive,
-  }).catch(() => {
-    /* 服务正好不在：这几条就丢了，日志本来就是尽力而为 */
-  });
+  }).then((response) => {
+    if (!response.ok) lost(events);
+  }, () => lost(events));
+}
+
+/** 服务正好不在、或者被拒：这几条不重发（日志尽力而为），只在下一批里说一声丢了几条（丢失说明本身带的个数照记）。 */
+function lost(events: Pending[]): void {
+  for (const { event } of events) {
+    if (event.ev === "page.skipped") {
+      skipped += Number(event.count ?? 0);
+      unsent += Number(event.unsent ?? 0);
+    } else {
+      unsent += 1;
+    }
+  }
 }
 
 function flush(keepalive = false): void {
@@ -107,6 +122,8 @@ function errorFields(error: unknown): Record<string, unknown> {
 function reportError(kind: "error" | "rejection" | "boundary", error: unknown): void {
   if (errorsSent >= MAX_ERRORS) {
     skipped += 1;
+    // 没有别的事件也要把这个个数发出去。
+    timer ??= setTimeout(() => flush(), FLUSH_MS);
     return;
   }
   const fields = errorFields(error);

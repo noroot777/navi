@@ -287,11 +287,16 @@ export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummar
   if (!counts.mac && !counts.win) notes.push("没有桌面壳的运行日志：用的是浏览器，或桌面 app 还是旧版本。");
   // 页面那边的记录没收下的（journal.ts 限流 / 超长、routes.ts 一批超额 / 认不出 / 没看）：其中可能有状态变化，
   // 次数就只是下限，明说。开始丢的那一刻就有 `log.dropping`，带个数的 `log.dropped` 要等下一条同类事件才写。
-  const lost = sorted.filter((r) => (r.ev === "log.dropped" || r.ev === "log.dropping" || r.ev === "log.too_long") && r.src === "web" && mayHoldState(String(r.of)));
-  if (lost.length) {
-    const counted = lost.filter((r) => r.ev !== "log.dropping").reduce((sum, r) => sum + Number(r.count ?? 1), 0);
-    notes.push(`页面那边有${counted ? `至少 ${counted} 条` : "一些"}记录没记下来（超过上限或者认不出），其中可能有载入 / 重载 / 崩溃，页面看到的次数只是下限。`);
+  const isLoss = (r: RuntimeLogRecord) => r.ev === "log.dropped" || r.ev === "log.dropping" || r.ev === "log.too_long";
+  const lost = sorted.filter((r) => isLoss(r) && r.src === "web" && mayHoldState(String(r.of)));
+  const unsent = sorted.filter((r) => r.ev === "page.skipped").reduce((sum, r) => sum + Number(r.unsent ?? 0), 0);
+  if (lost.length || unsent) {
+    const counted = lost.filter((r) => r.ev !== "log.dropping").reduce((sum, r) => sum + Number(r.count ?? 1), 0) + unsent;
+    notes.push(`页面那边有${counted ? `至少 ${counted} 条` : "一些"}记录没记下来（超过上限、认不出或者没送到），其中可能有载入 / 重载 / 崩溃，页面看到的次数只是下限。`);
   }
+  // 服务端自己的记录也按事件限流（journal.ts）：卡顿、报错被挡掉过，上面那些次数同样只是下限。
+  const serverLost = [...new Set(sorted.filter((r) => isLoss(r) && r.src === "server").map((r) => String(r.of)))];
+  if (serverLost.length) notes.push(`服务端有记录超过每分钟上限没记下来（${serverLost.slice(0, 4).join("、")}），卡顿、报错等次数只是下限。`);
   const skipped = sorted.filter((r) => r.ev === "page.skipped").reduce((sum, r) => sum + Number(r.count ?? 0), 0);
   if (skipped) notes.push(`页面自己因为上限少报了 ${skipped} 条报错 / 断线记录（载入、重载、崩溃不受这个上限）。`);
 

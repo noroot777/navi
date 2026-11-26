@@ -7,7 +7,11 @@
 //     （`page.presented`）或者退出，算一次——这是壳自己一条线上的事。壳里的页面再载进来（`page.boot`）不另算。
 //   · 页面只数壳看不见的：崩到错误屏（`page.crash`）、页面自己发起的整页重载（`page.reload`）；浏览器里
 //     （没有壳）再加上被整页刷新进来（`page.boot` nav=reload）。同一次载入（`load`）里的几条算一次，刷新进来的
-//     那一页 `prev` 指着已经算过的那一次载入就不另算——这是页面自己一条线上的事。
+//     那一页 `prev` 指着的那一次载入也是这一次——这是页面自己一条线上的事。**按身份分组，不按到达顺序**：
+//     页面事件的时间是服务端收到时倒推的（网络慢的那一批会晚），旧页的重载可能排在新页的载入之后
+//     （第 6 轮复审实测：同一次刷新算成了两次）。所以每条页面观察先算出它属于哪一次载入（崩溃 / 重载是它
+//     自己的 `load`，刷新进来的是它的 `prev`），同一次载入的放一起，跟谁先到无关；刷新进来那一页自己的
+//     `load` 不并进来，它之后再出事是新的一次。
 //   · 服务重启不单独算「闪一下」：没有窗口看见就没有闪。它进「服务重启」清单，并作为**时间上附近的记录**附在
 //     附近那一次的证据里（classify 里统一标「按时间对上」）。
 import type { RuntimeLogRecord } from "@navi/shared/runtime-log";
@@ -42,25 +46,21 @@ export function groupOccurrences(sorted: RuntimeLogRecord[]): Occurrence[] {
 
   for (const r of sorted) {
     if (r.src === "web") {
-      const key = loadKey(r);
-      if (r.ev === "page.crash" || r.ev === "page.reload") {
-        const known = key ? counted.get(key) : undefined;
-        if (known) known.seen.push(r);
-        else {
-          const occurrence = create(r);
-          if (key) {
-            occurrence.loads.add(key);
-            counted.set(key, occurrence);
-          }
-        }
-      } else if (r.ev === "page.boot" && r.nav === "reload" && r.shell !== "mac" && r.shell !== "win") {
-        const prev = prevKey(r);
-        if (prev && counted.has(prev)) counted.get(prev)!.seen.push(r);
-        else {
-          const occurrence = create(r);
-          // 刷新之前那一页报过的错，拿来解释这次刷新。
-          if (prev) occurrence.loads.add(prev);
-        }
+      // 这条观察属于哪一次载入；没有标识的老记录各自成一次。
+      const owner = r.ev === "page.crash" || r.ev === "page.reload" ? { key: loadKey(r) }
+        : r.ev === "page.boot" && r.nav === "reload" && r.shell !== "mac" && r.shell !== "win" ? { key: prevKey(r) }
+        : null;
+      if (!owner) continue;
+      const known = owner.key ? counted.get(owner.key) : undefined;
+      if (known) {
+        known.seen.push(r);
+        continue;
+      }
+      const occurrence = create(r);
+      if (owner.key) {
+        // 那一次载入里报过的错，拿来解释这一次。
+        occurrence.loads.add(owner.key);
+        counted.set(owner.key, occurrence);
       }
       continue;
     }

@@ -95,7 +95,7 @@ const SCHEMA: Record<string, Record<string, Check>> = {
   "log.dropped": { of: shape(EVENT_NAME), count: num },
   "log.dropping": { of: shape(EVENT_NAME) },
   "log.too_long": { of: shape(EVENT_NAME) },
-  "page.skipped": { tab: hex(12, 12), load: hex(12, 12), shell: oneOf(SHELLS), count: num },
+  "page.skipped": { tab: hex(12, 12), load: hex(12, 12), shell: oneOf(SHELLS), count: num, unsent: num },
   // 页面（见 sanitizeWebEvent；标识收下时已换成摘要）
   "page.boot": { tab: hex(12, 12), load: hex(12, 12), prev: hex(12, 12), shell: oneOf(SHELLS), nav: oneOf(NAV_TYPES), hidden: bool, sincePrevMs: num },
   "page.error": { tab: hex(12, 12), load: hex(12, 12), shell: oneOf(SHELLS), kind: oneOf(ERROR_KINDS), ...ERROR_FIELDS },

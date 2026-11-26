@@ -190,6 +190,17 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.deepEqual(batches[0]!.slice(0, 2), ["page.boot", "page.crash"], "状态排在最前");
   assert.equal(posted.length, 1 + 10 + 22 + 1 + 1, "分批发完，一条不少");
   assert.deepEqual(posted.filter((event) => event.ev === "page.skipped").map((event) => event.count), [2], "超过额度没报的报错留下个数");
+  // 发出去没送到（服务不在 / 被拒）：下一批里说一声丢了几条。
+  const realFetch = globalThis.fetch;
+  Object.assign(globalThis, { fetch: async () => new Response("{}", { status: 401 }) });
+  page.reportEventsConnection(false);
+  page.reportPageReload("reclaim");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  Object.assign(globalThis, { fetch: realFetch });
+  page.reportEventsConnection(true);
+  page.reportPageReload("reclaim");
+  assert.deepEqual(posted.filter((event) => event.ev === "page.skipped").at(-1), { ev: "page.skipped", count: 0, unsent: 2, tab: posted[0]!.tab, load: posted[0]!.load, shell: "browser", ago: 0 },
+    JSON.stringify(posted.at(-1)));
   for (const name of ["location", "sessionStorage", "document", "window", "fetch"]) Reflect.deleteProperty(globalThis, name);
 
   // 服务端：老页面一批塞得比上限多时，先收状态、再收详情，没收的记个数。
@@ -455,6 +466,21 @@ function serverLines(): Array<Record<string, unknown>> {
     W(101, "page.boot", { nav: "reload", tab: "t1", load: "l2", prev: "l1" }),
   ], []);
   assert.deepEqual(retried.incidents.map((i) => i.summary), ["页面整页重载：在加载失败提示上点了刷新"]);
+
+  // 到达顺序不改变次数：页面事件的时间是服务端收到时倒推的，旧页的重载 / 崩溃可能排在新页的载入之后。
+  // 刷新进来那一页之后自己再崩，是新的一次。
+  const lateReload = analyzeRuntimeLog([
+    W(100, "page.boot", { nav: "reload", tab: "t1", load: "l2", prev: "l1" }),
+    W(101, "page.reload", { reason: "error-screen", tab: "t1", load: "l1" }),
+    W(200, "page.boot", { nav: "reload", tab: "t2", load: "m2", prev: "m1" }),
+    W(201, "page.crash", { name: "TypeError", tab: "t2", load: "m1" }),
+    W(300, "page.crash", { name: "TypeError", tab: "t2", load: "m2" }),
+  ], []);
+  assert.deepEqual(lateReload.incidents.map((i) => i.summary), ["页面整页重载：在错误屏上点了重新载入", "页面脚本出错，整页换成了错误屏", "页面脚本出错，整页换成了错误屏"],
+    JSON.stringify(lateReload.incidents.map((i) => i.summary)));
+  // 服务端自己的记录被限流过：次数只是下限。
+  const serverThrottled = analyzeRuntimeLog([S(100, "loop.stall", { n: 1, ms: 2000, from: at(98) }), S(110, "log.dropping", { of: "loop.stall" })], []);
+  assert.ok(serverThrottled.notes.some((note) => note.includes("服务端") && note.includes("loop.stall") && note.includes("下限")), JSON.stringify(serverThrottled.notes));
 
   // 同一个标签页隔几秒刷新三次、两个标签页各出一次事——每一次都要在。
   const thrice = analyzeRuntimeLog([1, 2, 3].map((n) => W(100 + n * 4, "page.boot", { nav: "reload", tab: "t1", load: `l${n}`, prev: `l${n - 1}` })), []);
