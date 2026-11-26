@@ -210,7 +210,8 @@ final class WindowChrome: NSObject, WKScriptMessageHandler {
   """#
 }
 
-private final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
+/// 弱引用转一道：userContentController 强持有 handler，直接交 handler 会连着 webView 成环。
+final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
   private weak var target: WKScriptMessageHandler?
   init(_ target: WKScriptMessageHandler) { self.target = target }
 

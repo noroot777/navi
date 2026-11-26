@@ -1,4 +1,5 @@
 import { mkdtemp, rm, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
@@ -16,6 +17,7 @@ import { taskFileRoot } from "../file-browser.js";
 import { withoutTurnIdentity } from "../turn-identity.js";
 import { ChatBoundaryError, readOnlyChatTool, watchChatWorkspace, type ChatWorkspaceObserver } from "./boundary.js";
 import { registerShutdownCleanup } from "../shutdown-resources.js";
+import { waitServiceThaw } from "../runtime-handover-state.js";
 
 export interface ChatInvocation {
   text: string;
@@ -94,11 +96,15 @@ export async function invokeChat(member: ChatMember, owner: string | null, promp
   let handle: ReturnType<typeof executor.run> | undefined;
   let guard: ChatWorkspaceObserver | undefined;
   let releaseShutdown: (() => void) | undefined;
+  let settle!: () => void;
+  const settled = new Promise<void>((resolve) => { settle = resolve; });
   const abort = () => handle?.kill();
   try {
     // 观察者只记录变更、不中止（原因见 boundary.ts 顶部）；可归因的只读约束由下面
     // consume 里的工具事件闸门执行。临时目录一次一清，没有可观察的项目。
     if (!temporary && purpose !== "side") guard = await watchChatWorkspace(cwd);
+    // 服务冻着（准备重启，见 restart-freeze.ts）就先不拉起：等完到登记 shutdown 资源之间没有 await。
+    await waitServiceThaw(() => signal.aborted);
     signal.throwIfAborted();
     handle = executor.run({
       cwd,
@@ -108,8 +114,13 @@ export async function invokeChat(member: ChatMember, owner: string | null, promp
       env: withoutTurnIdentity({ ...env }),
     });
     signal.addEventListener("abort", abort, { once: true });
+    // 编号是这一次执行的，不是成员的：同一个成员前台回复、后台摘要可以同时跑，前一份结束后一份接上也不是同一份；
+    // 重启确认按编号比「多出了谁」（restart-freeze.ts）。
+    const run = randomUUID();
+    // 关服排空时停掉并等下面的 finally 收完尾（kill + cleanup，shutdown-resources.ts）；exit 那一下兜底。
     releaseShutdown = registerShutdownCleanup(
-      () => [{ kind: "chat", id: member.id, label: `聊天执行 ${member.agentType}`, projectId }], abort,
+      () => [{ kind: "chat", id: run, label: `聊天执行 ${member.agentType}`, projectId }], abort,
+      async () => { abort(); await settled; },
     );
     const consume = async () => {
       let text = "";
@@ -173,11 +184,13 @@ export async function invokeChat(member: ChatMember, owner: string | null, promp
     return { text, degraded, notice: guard ? changeNotice(await guard.settle()) : undefined };
   } finally {
     signal.removeEventListener("abort", abort);
-    releaseShutdown?.();
     try {
       handle?.kill();
       await handle?.cleanup?.();
     } finally {
+      // 收完尾才撤关服那份责任：撤得早，这一下和退出之间就没人管它了。
+      releaseShutdown?.();
+      settle();
       guard?.close();
       if (temporary) await rm(cwd, { recursive: true, force: true });
     }

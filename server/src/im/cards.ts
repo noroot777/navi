@@ -205,7 +205,7 @@ export function turnCard(view: TaskView, turn: Turn, ctx: CardContext, envelope:
 }
 
 /** 待验收卡的副标题：审过的说审查的结论，「完成了」只留给没审过的。 */
-function acceptSubtitle(turn: Extract<Turn, { kind: "accept" }>): string {
+export function acceptSubtitle(turn: Extract<Turn, { kind: "accept" }>): string {
   if (turn.release) return "停在「等我点头」，等你放行";
   if (turn.reviewPassed) return "审查通过，等你验收";
   if (turn.reviewFailed && !turn.reviewStale) return "审查没通过，等你决定";

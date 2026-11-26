@@ -4,7 +4,7 @@ import { tasks } from "./db/schema.js";
 import { taskFileRoot, type WorkspaceRoot } from "./file-browser.js";
 import { claimIdleWorkspaceTurns, claimWorkspaceTurn, heldForAcceptance, isTurnClaimed } from "./runs.js";
 import { isolatedWorkspaceOwner, workspaceParticipants, type WorkspacePeer } from "./task-workspace.js";
-import { RuntimeHandoverBlockedError } from "./runtime-handover-state.js";
+import { ServiceFrozenError } from "./runtime-handover-state.js";
 
 // ── 「能不能动这个任务的工作目录」的公共门禁 ─────────────────────────────────
 //
@@ -144,7 +144,7 @@ export async function claimWorkspaceWrite(options: WorkspaceClaimOptions): Promi
     return release;
   } catch (error) {
     release?.();
-    if (error instanceof RuntimeHandoverBlockedError) throw options.archivedError(error.message);
+    if (error instanceof ServiceFrozenError) throw options.archivedError(error.message);
     throw error;
   }
 }

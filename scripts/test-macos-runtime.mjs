@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
-import { sealRuntime, installRuntime, verifyRuntime } from "../desktop/macos/scripts/runtime-store.mjs";
+import { sealRuntime, installRuntime, verifyRuntime } from "../desktop/shared/runtime-store.mjs";
 import { runTestProcess } from "./test-process.mjs";
 import { spawnTestFixture } from "./test-process-scope.mjs";
 import { withTestResources } from "./test-process-resources.mjs";
@@ -22,7 +22,7 @@ if (process.platform !== "darwin") {
     const payload = join(app, "Contents/Resources/app");
     const next = join(temporary, "build/Navi.app");
     const nextPayload = join(next, "Contents/Resources/app");
-    const runtimeTool = join(root, "desktop/macos/scripts/runtime-store.mjs");
+    const runtimeTool = join(root, "desktop/shared/runtime-store.mjs");
     const binary = join(temporary, "runtime-driver");
     const ready = join(temporary, "ready.json");
     const activity = join(temporary, "activity");
@@ -112,7 +112,7 @@ setInterval(() => fs.writeFileSync(${JSON.stringify(activity)}, fs.readFileSync(
 
     const mac = join(root, "desktop/macos");
     await runTestProcess("swiftc", ["-swift-version", "5",
-      ...["NaviConfig", "NaviHealth", "DataImport", "DatabaseBackup", "LegacyIdentity", "LoginService", "RestartImpact", "ServerControl", "ServerLauncher", "ServerStartLock", "UpdateGate", "RuntimeRecovery", "BundleRuntimeUse"]
+      ...["NaviConfig", "NaviHealth", "RuntimeLog", "DataImport", "DatabaseBackup", "LegacyIdentity", "LoginService", "RestartImpact", "ServerControl", "ServerLauncher", "ServerStartLock", "UpdateGate", "RuntimeRecovery", "BundleRuntimeUse"]
         .map((name) => join(mac, `Sources/${name}.swift`)),
       join(mac, "Tests/Runtime/main.swift"), "-o", binary], { cwd: root, encoding: "utf8", timeout: 120_000 });
     const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(NAVI|ASH|HARNESS)_/.test(name)));
@@ -178,13 +178,13 @@ setInterval(() => fs.writeFileSync(${JSON.stringify(activity)}, fs.readFileSync(
     setOptions({ impact: { ...empty, resumes: [{ id: "team", title: "active team" }] } });
     assert.match(await drive("update", url()), /PROCEED/);
     process.kill(service.pid, 0);
-    assert.match(await drive("stale", url()), /WAITING 切换新版服务/);
+    assert.match(await drive("stale", url()), /WAITING 等待安全切换新版服务/);
     process.kill(service.pid, 0);
     assert.equal(existsSync(requests), false, "known team blockers must never request a lease");
     console.log("✓ 团队回合不阻止 Sparkle 换 app，服务接管延后且不弹强制中断选项");
 
     setOptions({ impact: empty, gatewayUnavailable: true });
-    assert.match(await drive("stale", url()), /WAITING 切换新版服务/);
+    assert.match(await drive("stale", url()), /WAITING 等待安全切换新版服务/);
     assert.equal(existsSync(requests), false, "disabled gateway without tasks must remain a side-effect-free wait");
     process.kill(service.pid, 0);
     setOptions({});
@@ -213,14 +213,19 @@ setInterval(() => fs.writeFileSync(${JSON.stringify(activity)}, fs.readFileSync(
     process.kill(service.pid, 0);
     setOptions({ rejectLease: true });
     rmSync(requests, { force: true });
-    assert.match(await drive("rejected", url()), /FAILED[\s\S]*RETRY explicit blocked/);
+    const rejected = await drive("rejected", url());
+    assert.doesNotMatch(rejected, /FAILED/);
+    assert.match(rejected, /PAUSED 重试切换新版服务…[\s\S]*ASK 就绪后自动切换\/强制切换服务…\/稍后[\s\S]*RETRY explicit blocked/);
     const attempts = readFileSync(requests, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.equal(attempts.filter((entry) => !entry.check && !entry.release).length, 2, "only an explicit retry may acquire again after execution refusal");
+    assert.equal(attempts.filter((entry) => !entry.check && !entry.release).length, 8,
+      "four silent automatic attempts, then only the explicit menu retry starts another bounded round");
     process.kill(service.pid, 0);
     setOptions({ expired: true });
-    assert.match(await drive("stale", url()), /FAILED[\s\S]*重试/);
+    const expired = await drive("stale", url());
+    assert.doesNotMatch(expired, /FAILED/);
+    assert.match(expired, /WAITING 重试切换新版服务…/);
     process.kill(service.pid, 0);
-    console.log("✓ 接管被拒或许可过期时旧服务继续运行");
+    console.log("✓ 接管被拒或许可过期时旧服务继续运行，静默重试有界后停在菜单重试，重试才再要许可");
 
     const backups = join(data, "backups");
     const savedBackups = join(data, "saved-backups");

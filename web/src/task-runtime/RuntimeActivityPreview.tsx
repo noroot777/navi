@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { CaretDown, CaretUp, Desktop, X } from "@phosphor-icons/react";
 import type { ComputerUseFrame } from "@navi/shared/task-runtime";
 import { HoverTip, useHoverTip } from "../components/HoverTip.tsx";
 import { attachmentView } from "../task-detail/utils.ts";
-import { useDismissable } from "../lib/useDismissable.ts";
 import type { TaskRuntime } from "./useTaskRuntime.ts";
 import { runtimeApi } from "./runtimeApi.ts";
 import { useComputerLivePreview } from "./useComputerLivePreview.ts";
@@ -16,16 +15,18 @@ function PreviewCard({ identity, aspectRatio, children }: {
   const [visibility, setVisibility] = useState(() => {
     try { return localStorage.getItem(key) || "open"; } catch { return "open"; }
   });
-  const containerRef = useRef<HTMLElement>(null);
   const collapsed = visibility === "collapsed";
   const changeVisibility = (next: string) => {
     setVisibility(next);
     try { localStorage.setItem(key, next); } catch {}
   };
-  useDismissable({ enabled: visibility !== "closed", containerRef, onClose: () => changeVisibility("closed"), closeOnOutside: false });
   if (visibility === "closed") return null;
-  return <aside ref={containerRef} className={`runtime-activity-preview${collapsed ? " is-collapsed" : ""}`} aria-label="电脑操作"
-    style={{ "--preview-aspect-ratio": aspectRatio } as CSSProperties}>
+  return <aside className={`runtime-activity-preview${collapsed ? " is-collapsed" : ""}`} aria-label="电脑操作"
+    style={{ "--preview-aspect-ratio": aspectRatio } as CSSProperties}
+    onKeyDown={(event) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault(); event.stopPropagation(); changeVisibility("closed");
+    }}>
     <header>{collapsed && <><Desktop size={14} aria-hidden="true" /><span>电脑操作</span></>}
       <button type="button" aria-label={collapsed ? "展开操作预览" : "收起操作预览"} aria-expanded={!collapsed} onClick={() => changeVisibility(collapsed ? "open" : "collapsed")}>
         {collapsed ? <CaretDown size={14} aria-hidden="true" /> : <CaretUp size={14} aria-hidden="true" />}
@@ -71,12 +72,14 @@ function ComputerSurface({ taskId, frame, onEnded, onAspectRatio }: {
 }
 
 function ComputerPreview({ taskId, frame }: { taskId: string; frame: ComputerUseFrame }) {
-  const [ended, setEnded] = useState(false);
+  const targetIdentity = JSON.stringify([frame.target?.application, frame.target?.windowTitle]);
+  const [capture, setCapture] = useState({ target: targetIdentity, ended: false });
   const [aspectRatio, setAspectRatio] = useState(1.6);
-  const onEnded = useCallback(() => setEnded(true), []);
-  if (ended) return null;
+  const onEnded = useCallback(() => setCapture((current) => current.target === targetIdentity ? { ...current, ended: true } : current), [targetIdentity]);
+  if (capture.target !== targetIdentity) setCapture({ target: targetIdentity, ended: false });
+  if (capture.target === targetIdentity && capture.ended) return null;
   return <PreviewCard identity={`${taskId}:${frame.sessionId}:${frame.turnStartedAt}`} aspectRatio={aspectRatio}>
-    <ComputerSurface key={`${frame.target?.application}:${frame.target?.windowTitle}`} taskId={taskId} frame={frame} onEnded={onEnded} onAspectRatio={setAspectRatio} />
+    <ComputerSurface key={targetIdentity} taskId={taskId} frame={frame} onEnded={onEnded} onAspectRatio={setAspectRatio} />
   </PreviewCard>;
 }
 

@@ -467,7 +467,7 @@ export async function settleTaskStatus(
     return { status: "paused", confirmedDone: false, nativeTurn };
   }
   if (goalTurn && !confirmed) {
-    await setStatus(taskId, "paused");
+    await setStatus(taskId, "paused", { goalStopped: true });
     return { status: "paused", note: "持续目标已停止，尚未收到完成确认。停止原因与目标状态见会话记录；使用 /goal 查看、/goal resume 续跑。", confirmedDone: false, nativeTurn };
   }
   if (nativeTurn) {

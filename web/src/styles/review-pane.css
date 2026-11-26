@@ -98,6 +98,36 @@
   margin: 2px 0 10px;
 }
 
+/* 点开的那一条浮成一张卡（同 .insp-card 的描边圆角），跟上下收着的几条一眼分得开；外扩 8px 跟行悬停的
+   底色同宽，卡里的字和收着那几行仍在一条竖线上。标题行贴着滚动区顶边停住：报告再长，也看得见读的是哪一轮、
+   随手就能收起。 */
+.insp-rec.is-open {
+  --rec-bg: var(--lifted);
+  margin: 6px -8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--rec-bg);
+  box-shadow: var(--surface-shadow);
+  padding: 0 8px;
+}
+
+.insp-rec.is-open > .insp-go {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  border-radius: calc(var(--r-md) - 1px) calc(var(--r-md) - 1px) 0 0;
+  background: var(--rec-bg);
+  box-shadow: 0 1px 0 var(--line);
+}
+
+.insp-rec.is-open > .insp-go:hover:not(:disabled) {
+  background: var(--hover-bg);
+}
+
+.insp-rec.is-open > .insp-rec__body {
+  margin: 10px 0 12px;
+}
+
 .insp-report {
   color: var(--ink);
   font-size: var(--t-xs);
@@ -113,8 +143,10 @@
   color: var(--muted);
 }
 
-.insp-report__meta > .insp-cut {
+.insp-report__meta-text {
+  min-width: 0;
   flex: 1 1 auto;
+  overflow-wrap: anywhere;
 }
 
 /* 报告正文：右侧面板里用小一号的正文字，不再是 10.5px 的灰字 */

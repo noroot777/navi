@@ -26,6 +26,7 @@ import { spawnWindowsPty, type TerminalProcess } from "./terminal-pty.js";
 import { withTerminalProtocol } from "./terminal-protocol.js";
 import { TerminalCapacity } from "./terminal-capacity.js";
 import { registerShutdownCleanup } from "./shutdown-resources.js";
+import { waitServiceThaw } from "./runtime-handover-state.js";
 import { terminalShutdownResources } from "./terminal-shutdown-resources.js";
 import {
   recordPorts, retainHistory, sessionAlive, sessionInfo, sessionRunning,
@@ -96,6 +97,7 @@ export class TerminalSessionManager {
   }
 
   async createAsync(projectId: string, cwd: string, options: CreateOptions = {}): Promise<TerminalSessionInfo> {
+    await waitServiceThaw(); // 冻着就先不起（restart-freeze.ts）；等完到占位之间没有 await
     if (!IS_WINDOWS) return this.create(projectId, cwd, options);
     return this.createReserved(projectId, cwd, options, this.reserve(projectId, options.command?.id ?? null));
   }
@@ -121,7 +123,7 @@ export class TerminalSessionManager {
     const reservation = this.capacity.reserve(projectId, commandId, replaceLive);
     let finish!: () => void;
     const done = new Promise<void>((resolve) => { finish = resolve; });
-    const creation = { projectId, reservation, controller: new AbortController(), done, finish };
+    const creation = { id: id(), projectId, reservation, controller: new AbortController(), done, finish };
     this.creations.add(creation);
     return creation;
   }
@@ -306,30 +308,25 @@ export class TerminalSessionManager {
     return session ? sessionInfo(session) : null;
   }
   screen(sessionId: string, projectId: string) {
-    const session = this.session(sessionId, projectId);
-    if (session) session.lastAccessedAt = Date.now();
-    return session?.process.screen;
+    return this.session(sessionId, projectId, true)?.process.screen;
   }
 
   eventsAfter(sessionId: string, projectId: string, seq: number): TerminalEvent[] | null {
-    const session = this.session(sessionId, projectId);
+    const session = this.session(sessionId, projectId, true);
     if (!session) return null;
-    session.lastAccessedAt = Date.now();
     return session.events.filter((event) => event.seq > seq);
   }
 
   subscribe(sessionId: string, projectId: string, listener: (event: TerminalEvent) => void): (() => void) | null {
-    const session = this.session(sessionId, projectId);
+    const session = this.session(sessionId, projectId, true);
     if (!session) return null;
-    session.lastAccessedAt = Date.now();
     session.listeners.add(listener);
     return () => session.listeners.delete(listener);
   }
 
   write(sessionId: string, projectId: string, data: string, focused?: boolean): boolean {
-    const session = this.session(sessionId, projectId);
+    const session = this.session(sessionId, projectId, true);
     if (!session) return false;
-    session.lastAccessedAt = Date.now();
     // 已退出的会话(常用命令跑完/被停,日志还挂着给人看)吞掉输入:进程都没了,写下去
     // 只会让 node-pty 抛错、前端弹「连接失败」——而用户只是在死 tab 里碰了下键盘。
     if (session.exitCode !== null) return true;
@@ -338,9 +335,8 @@ export class TerminalSessionManager {
   }
 
   resize(sessionId: string, projectId: string, cols: number, rows: number, theme?: TerminalTheme): boolean {
-    const session = this.session(sessionId, projectId);
+    const session = this.session(sessionId, projectId, true);
     if (!session) return false;
-    session.lastAccessedAt = Date.now();
     // 同上:对死 pty 调 resize 是 ioctl ENOTTY,不是调用方的错,静默成功。
     if (session.exitCode !== null) return true;
     try { session.process.resize(terminalSize(cols, 100, 20, 400), terminalSize(rows, 24, 5, 200), theme); } catch { /* pty died between checks */ }
@@ -648,10 +644,11 @@ export class TerminalSessionManager {
     return this.capacity.hasSlot(projectId, commandId, true);
   }
 
-  private session(sessionId: string, projectId?: string): TerminalSession | null {
+  private session(sessionId: string, projectId?: string, touch = false): TerminalSession | null {
     const session = this.sessions.get(sessionId) ?? null;
-    if (session && (!projectId || session.projectId === projectId)) return session;
-    return null;
+    if (!session || (projectId && session.projectId !== projectId)) return null;
+    if (touch) session.lastAccessedAt = Date.now();
+    return session;
   }
 
   /**

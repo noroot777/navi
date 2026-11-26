@@ -210,6 +210,8 @@ export type CreateOptions = {
 };
 
 export type TerminalCreation = {
+  /** 这一次创建自己的编号：重启确认按它比「多出了谁」，不能拿项目里的序号（前一个建完、后一个补上会被当成同一个）。 */
+  id: string;
   projectId: string;
   reservation: TerminalReservation;
   controller: AbortController;

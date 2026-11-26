@@ -2,7 +2,7 @@ import "./isolated-data.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { acquireRuntimeHandover } from "../src/runtime-handover.js";
-import { releaseRuntimeHandover, reserveRuntimeHandover, RuntimeHandoverBlockedError, runtimeHandoverActive, runtimeHandoverMatches } from "../src/runtime-handover-state.js";
+import { releaseRuntimeHandover, reserveRuntimeHandover, ServiceFrozenError, runtimeHandoverActive, runtimeHandoverMatches } from "../src/runtime-handover-state.js";
 import { claimAcceptanceHold, claimIdleWorkspaceTurns, claimOwnTurn, claimOwnTurnWhenReady, heldTurns, releaseTurn, whenTurnIdle, turnBusyText, tryClaimOwnTurn, turnIdentity } from "../src/turn-lock.js";
 import type { RestartImpact } from "../src/reattach.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -21,8 +21,10 @@ let transferredRan = false;
 const cancelTransferred = whenTurnIdle("survivor", () => { transferredRan = true; });
 const survivor = { id: "survivor", title: "still working", pid: process.pid };
 const impact = { ...empty, survives: [survivor], mcpDisrupted: [survivor] };
+// 第一次评估是拿许可之前的预检（无副作用，不冻结）；之后的几次都在许可之下，新起跑要被拦住。
+let assessed = 0;
 const accepted = await acquireRuntimeHandover(async () => {
-  assert.equal(claimOwnTurn("racing-start"), null);
+  if (assessed++ > 0) assert.equal(claimOwnTurn("racing-start"), null);
   return impact;
 }, heldTurns);
 assert.ok(accepted.lease);
@@ -74,7 +76,7 @@ console.log("✓ 启动器退出后接管许可自动过期，不留下永久冻
 
 const waitingLease = await acquireRuntimeHandover(async () => empty, heldTurns);
 assert.ok(waitingLease.lease);
-assert.equal(tryClaimOwnTurn("manual-run").kind, "handover");
+assert.equal(tryClaimOwnTurn("manual-run").kind, "frozen");
 let attempts = 0;
 let canceledRan = false;
 const cancelWaiting = whenTurnIdle("canceled-wait", () => { canceledRan = true; });
@@ -111,7 +113,7 @@ for (const claim of [
   const lease = reserveRuntimeHandover();
   assert.ok(lease);
   for (const ids of [[], ["partial-busy"], ["partial-busy", "partial-idle", "partial-idle"]]) {
-    assert.throws(() => claim(ids), RuntimeHandoverBlockedError);
+    assert.throws(() => claim(ids), ServiceFrozenError);
     assert.equal(turnIdentity("partial-idle"), null);
     assert.equal(turnIdentity("partial-busy"), busy);
   }
@@ -255,7 +257,7 @@ await withTestResources(async () => {
   assert.ok(topUpLease);
   const topUpWaiter = claimOwnTurnWhenReady("hold-worker");
   try {
-    assert.throws(() => topUpHold("hold-lead"), RuntimeHandoverBlockedError);
+    assert.throws(() => topUpHold("hold-lead"), ServiceFrozenError);
     const guard = await acceptanceGuard("hold-lead", "before_merge");
     assert.equal(guard.failure?.reason, "runtime_handover");
     assert.equal(guard.failure?.httpStatus, 409);
@@ -394,10 +396,17 @@ await withTestResources(async () => {
     agentPid: pid, agentStartedAt: inspectProcess(pid)?.startedAt, agentOutPath: output, agentErrPath: errors,
     agentRcPath: result, agentOffset: 0,
   });
-  const permit = await acquireRuntimeHandover(restartImpact, heldTurns);
-  assert.ok(permit.lease);
-  releaseRuntimeHandover(permit.lease);
+  // 起跑时会在输出旁落一份「这一轮依赖哪些服务通道」的记录（runtime-agent-channels.ts）；没有它接管闸按确认不了拦下。
+  const { runtimeChannelFile } = await import("../src/runtime-agent-channels.js");
+  writeFileSync(runtimeChannelFile(output), JSON.stringify({ version: 2, channels: [], unknown: false, stable: [] }));
+  // 先由这份服务接上它（接管闸要看得见输出消费屏障，runtime-eligibility.ts），再在许可之下确认接得了。
   const adopted = await reattachRunningTasks();
+  for (let attempt = 0; attempt < 100 && (await restartImpact()).runtimeHandover?.blocked.length; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const permit = await acquireRuntimeHandover(restartImpact, heldTurns);
+  assert.ok(permit.lease, JSON.stringify(permit));
+  releaseRuntimeHandover(permit.lease!);
   assert.ok(adopted.has("upgrade-survivor"));
   assert.equal(isRunning("upgrade-survivor"), true);
   assert.equal(turnIdentity("upgrade-survivor")?.token, "retained-turn-token");

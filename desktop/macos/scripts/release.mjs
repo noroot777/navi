@@ -30,7 +30,7 @@
 //    却指着别的提交，就拒发（GitHub 会沿用已有的 tag，Release 就对不上源码）。公开那一下连目标提交
 //    一起写（沿用的旧草稿可能记着别的提交），公开后再核对一遍 tag。
 import { spawnSync } from "node:child_process";
-import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
+import { createPrivateKey, createPublicKey } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +43,7 @@ import { itemDetails, LINK_COMMIT_PREFIX, readConfig as loadConfig } from "./rel
 import { GitHub, NO_TOKEN_HINT, resolveToken } from "./github.mjs";
 import { ensureSparkle } from "./sparkle.mjs";
 import { architectureConfig, publishedNames, releaseNames } from "./architecture.mjs";
+import { ReleaseStop, confirmDownloadable as confirmPublic, putOnRelease as putPackage } from "../../shared/release-publish.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MAC = resolve(HERE, "..");
@@ -51,7 +52,7 @@ const REPO = resolve(MAC, "../..");
 const CONFIG_PATH = readEnv(process.env, "NAVI_MAC_RELEASE_CONFIG") || join(MAC, "release.json");
 
 const say = (line) => process.stdout.write(`${line}\n`);
-class Stop extends Error {}
+const Stop = ReleaseStop;
 const die = (line) => { throw new Stop(line); };
 
 function run(command, args, opts = {}) {
@@ -218,8 +219,8 @@ async function main() {
   if (local) {
     copyFileSync(dmg, join(local, dmgName));
   } else {
-    const put = await putOnRelease(github, config, {
-      tag, commit, dmg, length,
+    const put = await putPackage(github, config, {
+      tag, commit, file: dmg, length, say,
       name: `Navi for macOS ${shortVersion}${config.architecture === "x64" ? " · Intel" : ""}`,
       body: `${notes.text}\n\n安装：下载 ${dmgName}，打开后把 Navi（Navi.app）拖进 Applications。第一次打开被系统拦住时的处理见 https://github.com/${config.releaseRepo}#下载-mac-版`
         + `\n\n装着改名前的 Ash.app：装法一样，装好打开一次 Navi，它会接过 Ash 的设置、数据和登录项，把 Ash.app 移到废纸篓。`,
@@ -228,7 +229,7 @@ async function main() {
   }
 
   // ── 6. 再更新 appcast ──
-  if (!local) await confirmDownloadable(url, dmg, length);
+  if (!local) await confirmPublic(url, dmg, length);
   if (!already) await publishAppcast({ github, config, local, remote, appcastPath, earlier, keyArgs, tool, notes, info, url, length, signature, commit });
   if (config.legacyAppcastPath) {
     const page = local ? url : `https://github.com/${config.releaseRepo}/releases/tag/${tag}`;
@@ -245,45 +246,6 @@ async function main() {
     say("  （raw.githubusercontent 有几分钟缓存，已装的 app 下一次定时检查或点「检查更新…」时就能看到）");
     say(`  ${channel}`);
   }
-}
-
-/**
- * 把 dmg 放到装包仓库的 Release 上，公开它，给出公开的下载地址。草稿阶段外面什么都看不见：建草稿、传包、
- * 经 API 下回来核对，任何一步失败都不留公开的东西。公开之后（包括公开请求发出去、却没收到答复）出的错
- * 都只能重跑往前补：重跑会认出已公开的 Release、沿用上面的附件。
- */
-async function putOnRelease(github, config, { tag, commit, dmg, length, name, body }) {
-  const repo = config.releaseRepo;
-  const target = await tagTarget(github, repo, commit, tag);
-  let release = await github.findRelease(repo, tag);
-  if (!release) {
-    say(`▶ 在 ${repo} 建草稿 Release ${tag}（tag 公开时打在构建提交 ${commit}）`);
-    release = await github.createDraftRelease(repo, { tag, target, name, body });
-  } else {
-    say(`▶ 沿用 ${repo} 里已有的${release.draft ? "草稿 " : " "}Release ${tag}`);
-  }
-  say(`▶ 传 ${basename(dmg)}（${(length / 1048576).toFixed(1)} MB）`);
-  const asset = await github.uploadAsset(release, dmg);
-  if (release.draft) {
-    const back = await github.downloadAsset(asset);
-    const want = createHash("sha256").update(readFileSync(dmg)).digest("hex");
-    const got = createHash("sha256").update(back).digest("hex");
-    if (back.length !== length || got !== want) die(`草稿里的 ${asset.name} 和本地这份不一样（${back.length} 字节，sha256 ${got}）：没有公开。`);
-    say(`▶ 公开 Release ${tag}`);
-    try {
-      release = await github.publishRelease(repo, release, target);
-    } catch (error) {
-      die(`公开 Release ${tag} 时出错（${error.message}）：它可能已经公开了。appcast 没有推；直接重跑，会认出它接着补。`);
-    }
-  }
-  const tagged = await github.tagCommit(repo, tag);
-  if (tagged !== target) {
-    die(`Release ${tag} 已经公开，但它的 tag 指着 ${tagged ?? "（没有）"}，不是构建提交 ${target}：appcast 没有推。`
-      + "请核查 Release 与源码提交，改用新版本发布，不要覆盖或删除已公开的历史包。");
-  }
-  const published = (release.assets || []).find((a) => a.name === asset.name);
-  if (!published) die(`公开后的 Release ${tag} 里找不到 ${asset.name}：appcast 没有推，重跑会接着补。`);
-  return { url: published.browser_download_url };
 }
 
 /** 新的一项排在最前、整份重签；正式发版带着读出时的 sha 提交回清单仓库。 */
@@ -352,21 +314,6 @@ async function publishLegacyFeed({ github, config, local, keyArgs, tool, notes, 
   }
 }
 
-/**
- * Release 的 tag 打在构建这份 app 的那个提交上（完整 sha）。装包仓库里还没有这个提交、或者同名 tag 已经
- * 指着别的提交，都停在这里 —— 此时什么都还没传。
- */
-async function tagTarget(github, repo, commit, tag) {
-  const sha = await github.commitSha(repo, commit);
-  if (!sha) die(`${repo} 里还没有提交 ${commit}（这份 app 就是从它构建的）：先 git push，再重跑（什么都还没传）。`);
-  const tagged = await github.tagCommit(repo, tag);
-  if (tagged && tagged !== sha) {
-    die(`${repo} 里已经有 tag ${tag}，指着 ${tagged.slice(0, 12)}，不是这份 app 的构建提交 ${sha.slice(0, 12)}：`
-      + "GitHub 会沿用已有的 tag，Release 就对不上源码。请提高版本号重新构建，不要改动已发布的 tag（什么都还没传）。");
-  }
-  return sha;
-}
-
 /** 更新说明：上一版以来这个仓库里的提交标题（上一版的提交找不到时取最近 15 条）。 */
 function releaseNotes(items, commit) {
   const since = previousCommit(items);
@@ -384,22 +331,6 @@ function notesFromText(text) {
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const paragraphs = text.trim().split(/\n\s*\n/).map((p) => `<p>${esc(p).replace(/\n/g, "<br>")}</p>`);
   return { text: text.trim(), html: paragraphs.join("") };
-}
-
-/** 传上去的包确实下得下来、大小和内容都对（feed 指向它之前最后一道确认）。 */
-async function confirmDownloadable(url, file, length) {
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const response = await fetch(url, { redirect: "follow" });
-    if (response.ok) {
-      const body = Buffer.from(await response.arrayBuffer());
-      const want = createHash("sha256").update(readFileSync(file)).digest("hex");
-      const got = createHash("sha256").update(body).digest("hex");
-      if (body.length === length && got === want) return;
-      die(`从 ${url} 下回来的包和本地这份不一样（${body.length} 字节，sha256 ${got}）`);
-    }
-    await new Promise((done) => setTimeout(done, 3000));
-  }
-  die(`${url} 一直下不下来：没有推 appcast。等 GitHub 那边好了重跑一次（会沿用同一个包）。`);
 }
 
 function makeKeys(config, tool) {

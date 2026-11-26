@@ -65,7 +65,7 @@ if mode == "health" {
   let probe = NaviHealth.probeSync()
   switch probe {
   case .down: print("DOWN")
-  case .unreachable(let why): print("UNREACHABLE \(why)")
+  case .unreachable(let why, _): print("UNREACHABLE \(why)")
   case .notNavi: print("NOT NAVI")
   case .navi: print(NaviHealth.isServing(probe) ? "READY" : "FOREIGN")
   }

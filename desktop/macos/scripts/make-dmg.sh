@@ -26,7 +26,7 @@ timed() {
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/navi-dmg.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
 # 卷里的名字固定叫 Navi.app（布局按这个名字摆图标），不管源目录叫什么。
-timed dmg.stage-copy /bin/cp -cRp "$APP" "$STAGE/Navi.app"
+timed dmg.stage-copy bash "$HERE/copy-app.sh" "$APP" "$STAGE/Navi.app"
 ln -s /Applications "$STAGE/Applications"
 cp "$HERE/../dmg/DS_Store" "$STAGE/.DS_Store"
 rm -f "$OUT"

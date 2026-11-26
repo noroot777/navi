@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { NODE_VERSION } from "../../shared/runtime-bundle.mjs";
 
-export const NODE_VERSION = "v26.13.1";
+// node 版本两个平台共用（desktop/shared/runtime-bundle.mjs）；这里是各架构 darwin 包的 sha256。
+export { NODE_VERSION };
 export const ARCHITECTURES = {
   arm64: { label: "Apple 芯片", swift: "arm64", checksum: "af6202f5370a3a5209e85dc543758dfd9f44c8726626a236730cd603a67a8559" },
   x64: { label: "Intel", swift: "x86_64", checksum: "2693310b2820f9350d29524f21344e1c623875bab773457d55b2aceb9670716f" },

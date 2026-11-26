@@ -112,14 +112,15 @@ enum ServerShutdown {
   }
 
   /// `target` 为 nil：用户在「确认不了」时点了「现在」—— 停那时候端口上自己那份，认不出是谁就不停。
-  static func stop(expecting target: ServiceTarget?, timeout: TimeInterval = 20, identity: ServiceRecoveryIdentity? = nil) -> Result {
+  static func stop(expecting target: ServiceTarget?, timeout: TimeInterval = 20, identity: ServiceRecoveryIdentity? = nil,
+                   beforeStop: () -> Bool = { true }, didSignal: () -> Void = {}) -> Result {
     if target == .remote { return .stopped(nil) }
     switch NaviHealth.probeSync() {
     case .down:
       // 没人在听了。评估过的那个进程要是还在（正在自己退出），等它退干净。
       guard case .ours(let pid) = target else { return .stopped(nil) }
       return waitGone(pid, timeout: timeout)
-    case .unreachable(let why):
+    case .unreachable(let why, _):
       return .changed("服务这会儿没有答复（\(why)）")
     case .notNavi(let what):
       return .changed("端口上的应答不像 Navi（\(what)）")
@@ -132,9 +133,11 @@ enum ServerShutdown {
       guard let pid = instance.pid, pid > 1 else { return .failed("服务没报自己的进程号，没法让它下线。") }
       if let target, target != .ours(pid: pid) { return .changed("服务换了一份（进程 \(pid)）") }
       guard let pid32 = Int32(exactly: pid) else { return .failed("服务的进程号不对：\(pid)") }
+      guard beforeStop() else { return .changed("切换已取消，旧服务未停止") }
       if kill(pid32, SIGTERM) != 0 && errno != ESRCH {
         return .failed("停不了服务进程 \(pid)：\(String(cString: strerror(errno)))")
       }
+      didSignal()
       return waitGone(pid, timeout: timeout)
     }
   }

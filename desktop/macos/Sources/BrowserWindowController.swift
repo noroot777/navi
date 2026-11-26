@@ -12,10 +12,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   var downloads: [ObjectIdentifier: DownloadTransaction] = [:]
   private var chrome: WindowChrome?
   var computerPreview: ComputerPreviewBridge?
+  private var notifications: SystemNotificationBridge?
   private var observations: [NSKeyValueObservation] = []
   private var healthTimer: Timer?
   private var guardTimer: Timer?
   private var guardProbing = false
+  private var unreachableProbes = 0
   /// 页面因为端口换了人被撤下时停在哪个路由，自己那份回来后回到那里。
   private var resumeURL: URL?
   /// 页面还没载进来时收到的 navi:// 链接要去的路由（DeepLink），下一次载页面时直接载到那里。
@@ -30,6 +32,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   private var handoff: Handoff?
   /// 主框架换过几次文档（见 `Handoff.document`）。
   private var documentSerial = 0
+  private enum DocumentPresentation { case invalid, committed, presented }
+  private var documentPresentation = DocumentPresentation.invalid
+  private(set) var connectionGeneration = 0
+  var hasPresentedPage: Bool { documentPresentation == .presented && offlineView.isHidden }
   /// 「正在启动」那一屏晚一点才盖上：服务本来就在时探一下只要几毫秒，不该闪一下。
   var pendingStartingScreen: DispatchWorkItem?
 
@@ -65,6 +71,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     window.delegate = self
     computerPreview = ComputerPreviewBridge(webView: webView, origin: NaviConfig.windowURL, local: NaviConfig.isLocal)
+    notifications = SystemNotificationBridge(webView: webView)
     window.contentView = makeContent()
     // 内容铺到窗口顶，红绿灯浮在页面上（见 WindowChrome）。窗口底色仍跟页面的 theme-color 走，
     // 页面还没画出来的那一瞬和占位页都是同一个底色。
@@ -186,13 +193,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
   /// 把页面载进来。连别处的 navi 时直接载；本机地址先认一次人、把那一份的实例号交给页面再载。
   func loadPage() {
-    stopHealthPolling()
     guard NaviConfig.isLocal else { return showPage() }
+    let generation = connectionGeneration
     NaviHealth.probe(NaviConfig.windowHealthURL) { probe in
       DispatchQueue.main.async { [weak self] in
-        guard let self else { return }
+        guard let self, self.connectionGeneration == generation else { return }
         guard let instance = NaviHealth.ours(probe) else { return self.instanceLost() }
-        self.bind(instance) { self.showPage() }
+        self.bind(instance) { current in
+          if current { self.showPage() }
+        }
       }
     }
   }
@@ -201,7 +210,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     beginHandoff()
     // 失败页、撤下后的空白页之后 webView.url 不是 navi 的，此时回到撤下前的路由或首页；正常情况下
     // 原地重载保住当前路由。
-    let target = [pendingRoute, webView.url, resumeURL].compactMap { $0 }.first(where: NaviConfig.isSameOrigin) ?? NaviConfig.windowURL
+    let target = [pendingRoute, resumeURL, webView.url].compactMap { $0 }.first(where: NaviConfig.isSameOrigin) ?? NaviConfig.windowURL
     resumeURL = nil
     pendingRoute = nil
     webView.load(URLRequest(url: target))
@@ -238,7 +247,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   func pageDidCommit() {
     computerPreview?.stop()
     documentSerial += 1
-    guard handoff != nil else { return }
+    documentPresentation = webView.url.map(NaviConfig.isSameOrigin) == true ? .committed : .invalid
+    guard documentPresentation == .committed, handoff != nil else { return }
     let document = documentSerial
     handoff?.document = document
     DispatchQueue.main.asyncAfter(deadline: .now() + Self.presentTimeout) { [weak self] in
@@ -248,9 +258,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   }
 
   private func pageDidPresent() {
-    guard let pending = handoff, pending.document == documentSerial else { return }
-    handoff = nil
-    if offlineView.revision == pending.screen { offlineView.isHidden = true }
+    guard documentPresentation == .committed else { return }
+    if let pending = handoff {
+      guard pending.document == documentSerial else { return }
+      handoff = nil
+      if offlineView.revision == pending.screen {
+        offlineView.isHidden = true
+        RuntimeLog.record("cover.hide")
+      }
+    }
+    if offlineView.isHidden {
+      documentPresentation = .presented
+      // 页面真的显示出来了：壳这一侧前面那次撤页 / 载入失败到这里收口。
+      RuntimeLog.record("page.presented")
+    }
   }
 
   /// 当前文档的脚本没载成（WindowChrome 报回来）：不再等它表态。
@@ -262,10 +283,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
   private func pageDidNotPresent(_ reason: String) {
     guard handoff != nil else { return }
+    RuntimeLog.record("page.not_presented", ["why": reason.contains("脚本") ? "script" : "timeout"])
     offlineView.show(title: "页面没有显示出来", detail: "\(reason)\n可以重试；要先看看页面现在的样子也行。", actions: [
       OfflineView.Action(title: "仍然显示页面") { [weak self] in
         self?.handoff = nil
         self?.offlineView.isHidden = true
+        self?.pageDidPresent()
       },
       OfflineView.Action(title: "重试") { [weak self] in self?.loadHome() },
     ])
@@ -277,15 +300,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   /// 服务专用的端口（NaviConfig.windowPort），服务一停那个端口就空着，别的 navi 接不到窗口的请求；
   /// 自己那份重起过、或者有谁照着同一个端口起了一份新版 navi，实例号对不上就不执行
   /// （server/src/instance-binding.ts）。定时认人和导航前认人只负责撤页和说明。
-  func bind(_ instance: NaviInstance, then: @escaping () -> Void) {
-    guard let id = instance.id, id != boundInstance else { return then() }
+  func bind(_ instance: NaviInstance, then: @escaping (Bool) -> Void) {
+    guard let id = instance.id, id != boundInstance else { return then(true) }
     guard let host = NaviConfig.windowURL.host,
           let cookie = HTTPCookie(properties: [.name: Self.instanceCookie, .value: id, .domain: host, .path: "/"]) else {
-      return then()
+      return then(true)
     }
+    let generation = connectionGeneration
+    boundInstance = nil
     webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) { [weak self] in
-      self?.boundInstance = id
-      then()
+      guard let self, self.connectionGeneration == generation else { return then(false) }
+      self.boundInstance = id
+      then(true)
     }
   }
 
@@ -298,38 +324,82 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   /// 实例号挡下（见 `bind`），但页面会一直报错。所以页面在的时候还要定时认：不是自己那份了就撤掉页面、说清楚。
   private func startInstanceGuard() {
     guard NaviConfig.isLocal, guardTimer == nil else { return }
-    guardTimer = Timer.scheduledTimer(withTimeInterval: Self.instanceGuardInterval, repeats: true) { [weak self] _ in
-      self?.checkInstance()
+    guardTimer = Timer.scheduledTimer(withTimeInterval: Self.instanceGuardInterval, repeats: true) { [weak self] timer in
+      self?.checkInstance(timer)
     }
   }
 
   func stopInstanceGuard() {
     guardTimer?.invalidate()
     guardTimer = nil
+    guardProbing = false
+    unreachableProbes = 0
   }
 
-  private func checkInstance() {
-    guard !guardProbing, guardTimer != nil else { return }
+  private func checkInstance(_ timer: Timer) {
+    guard !guardProbing, guardTimer === timer else { return }
     guardProbing = true
     NaviHealth.probe(NaviConfig.windowHealthURL) { probe in
       DispatchQueue.main.async { [weak self] in
-        guard let self else { return }
+        guard let self, self.guardTimer === timer else { return }
         self.guardProbing = false
-        guard self.guardTimer != nil else { return }
-        guard let instance = NaviHealth.ours(probe) else { return self.instanceLost() }
+        if case .unreachable = probe {
+          // 服务忙时连续几秒答不出探活，一个超时不能证明端口换了人。
+          self.unreachableProbes += 1
+          RuntimeLog.record("probe.miss", RuntimeLog.fields(of: probe).merging(["streak": self.unreachableProbes]) { a, _ in a })
+          if self.unreachableProbes < 3 { return }
+        }
+        guard let instance = NaviHealth.ours(probe) else {
+          RuntimeLog.record("page.takedown", RuntimeLog.fields(of: probe).merging(["via": "guard", "streak": self.unreachableProbes]) { a, _ in a })
+          return self.instanceLost()
+        }
+        self.unreachableProbes = 0
         // 还是自己那份，但服务重起过（实例号换了）：页面手上的旧实例号会被拒，换上新的重载一遍。
-        if instance.id != self.boundInstance { self.bind(instance) { self.webView.reload() } }
+        if instance.id != self.boundInstance {
+          self.bind(instance) { current in
+            guard current, self.guardTimer === timer else { return }
+            // 真重载了才记：认人中途被别的状态顶掉时页面没动。
+            RuntimeLog.record("page.reload", ["reason": "instance_changed", "serverPid": instance.pid ?? -1,
+                                              "inst": String((instance.id ?? "").prefix(8))])
+            self.webView.reload()
+          }
+        }
       }
     }
+  }
+
+  /// 运行日志只在页面真被换掉的那一步记 `page.takedown`：取消了这次导航、原来那页还留着的，只是一次没答上的探活。
+  func navigationProbeFailed(_ probe: NaviProbe, target: URL) {
+    let fields = RuntimeLog.fields(of: probe).merging(["via": "navigation"]) { a, _ in a }
+    guard case .unreachable(let reason, _) = probe else {
+      RuntimeLog.record("page.takedown", fields)
+      return instanceLost()
+    }
+    if hasPresentedPage {
+      RuntimeLog.record("probe.miss", fields)
+      return
+    }
+    RuntimeLog.record("page.takedown", fields)
+    resetPageConnection()
+    resumeURL = target
+    offlineView.show(title: "连不上 Navi", detail: reason,
+                     actions: [OfflineView.Action(title: "重试") { [weak self] in self?.loadHome() }])
+    startHealthPolling(at: NaviConfig.windowHealthURL)
+  }
+
+  func resetPageConnection() {
+    connectionGeneration += 1
+    documentPresentation = .invalid
+    handoff = nil
+    stopHealthPolling()
+    stopInstanceGuard()
+    pendingStartingScreen?.cancel()
   }
 
   /// 端口上不再是认过的那一份：页面连同它的轮询、SSE 一起撤掉（一个请求都不再发给新来的那份），
   /// 记下路由，回到 loadHome 认一遍 —— 被占着就盖上说明，自己那份回来了再载回去。
   func instanceLost() {
     computerPreview?.stop()
-    stopInstanceGuard()
-    // 下面换上的空白文档也会「提交、载完」，别把它当成页面接上了。
-    handoff = nil
     if let url = webView.url, NaviConfig.isSameOrigin(url) { resumeURL = url }
     webView.stopLoading()
     webView.loadHTMLString("", baseURL: nil)
@@ -340,9 +410,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   /// 办完的那一方会叫 loadHome。
   func showInstalling(_ note: String,
                       detail: String = "完成后自动回到工作区。") {
-    stopHealthPolling()
-    stopInstanceGuard()
-    pendingStartingScreen?.cancel()
+    RuntimeLog.record("cover.show", ["kind": "maintenance"])
+    resetPageConnection()
     offlineView.show(title: note, detail: detail, busy: true)
   }
 
@@ -351,15 +420,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   ///
   /// `takeOverWhenFree`：端口被别人占着时，对方一停（端口空出来）就接着起自己那份，不必用户再点
   /// 「重试」。只给「被占着」这一档：起不来的那一档要是也这样，就会每 2 秒起一次注定失败的服务。
-  func startHealthPolling(takeOverWhenFree: Bool = false) {
+  func startHealthPolling(at url: URL = NaviConfig.healthURL, takeOverWhenFree: Bool = false) {
     guard healthTimer == nil else { return }
-    healthTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-      NaviHealth.probe { probe in
+    healthTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
+      NaviHealth.probe(url) { probe in
         var down = false
         if case .down = probe { down = true }
         if case .unreachable = probe { down = true }
         guard NaviHealth.isServing(probe) || (takeOverWhenFree && down) else { return }
-        DispatchQueue.main.async { self?.loadHome() }
+        DispatchQueue.main.async {
+          guard let self, self.healthTimer === timer else { return }
+          self.loadHome()
+        }
       }
     }
   }
@@ -372,6 +444,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   // MARK: 菜单动作
 
   @objc func reloadPage(_ sender: Any?) {
+    RuntimeLog.record("page.reload", ["reason": "user"])
     if offlineView.isHidden { webView.reload() } else { loadHome() }
   }
 

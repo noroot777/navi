@@ -10,7 +10,8 @@
 //    之间什么都写不进来（框只读、档切不了、Esc 退不掉、哪儿都引不进来）——成功回来会把草稿清掉，
 //    中间补的字没发出去，留着就是静默吞掉；
 // ⑤ 驳回换了一条（轮询带来新状态），选择和写的字跟着旧那条走掉，不落到新那条上；
-// ⑥ 审查格那一轮下面只有记录：驳回一句话 + 折着的依据（老驳回摊开）、裁定一句结果，没有裁定的按钮。
+// ⑥ 审查格那一轮下面只有记录：驳回一句话 + 折着的依据（老驳回摊开）、裁定一句结果，没有裁定的按钮；
+// ⑦ 那一行的键上面先一句这条驳回争的是什么，后面一颗去审议格那一轮读报告和依据。
 import assert from "node:assert/strict";
 import { launchChrome, startWebServer } from "./dom-stage.mjs";
 import { waitUntil } from "./wait-until.mjs";
@@ -73,9 +74,20 @@ try {
     assert.equal(await scope(name).locator(".reply-dock-send").count(), 0);
   }
 
-  // ① 指到一颗：什么时候该点它、按下去会怎样，浮在上面，不常驻。
+  // ⑦ 键上面一句这条驳回争的是什么：执行者写给用户的那一句；老驳回没有，就说谁不认什么。
+  //    后面那颗去审议格那一轮读报告和依据，带着的是这一条。
   const open = scope("open");
-  assert.equal(await open.locator(".reply-dock").innerText(), "让它接着改\n这一轮不用改了\n转为独立任务\n让双方辩论", "这一行只有那几颗键，没有常驻的说明");
+  assert.equal(await open.locator(".reply-dock").innerText(),
+    "第 1 条读错了代码，另外两条我认、但该另开任务做。看报告和依据\n\n让它接着改\n这一轮不用改了\n转为独立任务\n让双方辩论",
+    "先一句争的是什么，下面是那几颗键；各档的说明不常驻");
+  assert.equal(await scope("old").locator(".ruling-lead span").innerText(), "执行者不认这一轮意见", "老驳回不编一句");
+  assert.equal(await scope("debated").locator(".ruling-lead span").innerText(), "第 1 条读错了代码，另外两条我认、但该另开任务做。", "辩完了这一句还在");
+  assert.match(await scope("running").locator(".ruling-lead").innerText(), /^第 1 条读错了代码/, "按不动的时候也看得到在争什么");
+  await open.getByRole("button", { name: "看报告和依据" }).click();
+  assert.deepEqual(await page.evaluate(() => window.__opened_open), [{ runId: "run-1", round: 1 }], "去审议格的那一场那一轮");
+  assert.equal(await open.locator(".reply-dock-row [aria-pressed='true']").count(), 0, "点它不选中任何一档");
+
+  // ① 指到一颗：什么时候该点它、按下去会怎样，浮在上面，不常驻。
   await open.getByRole("button", { name: "转为独立任务" }).hover();
   await page.getByRole("tooltip").filter({ hasText: /新建一个待办任务（不会自动开跑）[\s\S]*还没审过，想继续就再派一轮审查/ }).waitFor();
   // 键盘走进来同样浮出，读屏念得到。

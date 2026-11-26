@@ -264,6 +264,7 @@ async function readFreeWorkflowState(taskId: string): Promise<FreeWorkflowApiSta
       ...(awaiting.has(round.id) ? { awaitsInputDecision: true } : {}),
       ...(retry && round.id === retryRound?.id ? { retry } : {}),
       ...(noVerdicts.has(round.id) ? { noVerdict: noVerdicts.get(round.id)! } : {}),
+      ...(round.ranOn ? { ranOn: round.ranOn } : {}),
     })),
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,

@@ -31,13 +31,24 @@ case "unfinalized-recovery":
 case "start":
   ServerLauncher.shared.freshStartApproved = true
   emit("START \(ServerLauncher.shared.ensureRunningSync(timeout: 20))")
-case "switch":
+case "switch", "menu-retry":
   try RuntimeStore.prepare()
   var proceeded = false
   var refused = false
   gate.report = { emit("REFUSED \($0)"); refused = true }
+  // 接管窗口一时不安全（流正在写、许可被拒）时闸静默等待并自己重试，等到切过去或停在 blocked。
+  gate.pollInterval = 0.2
   gate.request(.staleServer(from: "test")) { proceeded = true }
-  until { proceeded || refused || gate.phase == .waiting }
+  until { proceeded || refused || gate.phase == .blocked }
+  if mode == "menu-retry" {
+    // 回退后的暂停只认菜单里的「重试切换新版服务…」。
+    guard refused, gate.phase == .blocked, gate.pendingMenuTitle == "重试切换新版服务…" else {
+      emit("ERROR pause not kept phase=\(gate.phase)"); exit(1)
+    }
+    refused = false
+    gate.reconsider()
+    until { proceeded || refused || gate.phase == .blocked }
+  }
   guard proceeded else { emit("SWITCH blocked phase=\(gate.phase)"); exit(2) }
   emit("START \(ServerLauncher.shared.ensureRunningSync(timeout: 20))")
 case "blocked":

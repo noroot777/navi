@@ -325,7 +325,9 @@ export async function noteMonitorsDropped(taskId: string): Promise<void> {
       // 放弃撤掉的只是「必须先收下它」这条放行条件 —— 那几条该送还是会送到。
       + "从这一刻起没人再盯着它们了,之后才产生的输出不会再有人收——还需要的话得重新挂一个哨兵"
       + "（它们停之前已经攒下、还排在待发送里的那些,该送的照旧会送到）。"),
-      { sessionId: turn.sessionId },
+      // 同一回合、同一批撤掉的哨兵只记一条：同一次调用执行到一半被停掉、按请求号重进时（request-receipts.ts）
+      // 不再记第二遍。
+      { sessionId: turn.sessionId, eventKey: `monitors.dropped:${turn.since}:${dropped.map((m) => m.id).sort().join(",")}` },
     );
   } catch (e) {
     console.error(`[navi] 记录「撤哨兵后完成」失败 task=${taskId}:`, e);

@@ -2,6 +2,22 @@
    一场辩论的概览（DebateOverview）、左侧抽屉里的完整记录（DebateRecord），和审查格那一轮下面的
    驳回 / 辩论 / 裁定（FreeReviewDisputeRecord）。只用主题变量，浅色深色同一套。 */
 
+/* 键上面那一句：这条驳回争的是什么。用正文的字，后面跟一颗点过去读报告和依据的小字键。 */
+.ruling-lead { margin: 0; padding: 9px 12px 0; color: var(--ink); font-size: var(--t-sm); line-height: 1.6; overflow-wrap: anywhere; }
+.ruling-lead > button {
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--t-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ruling-lead > button:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+.ruling-lead > button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 2px; }
+
 /* 选了「让双方辩论」：正文换成来回几次。 */
 .task-reply-box textarea[hidden] { display: none; }
 .ruling-exchanges { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 52px; padding: 8px 12px 2px; color: var(--muted); font-size: var(--t-sm); }

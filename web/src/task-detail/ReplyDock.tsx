@@ -38,9 +38,11 @@ function DockKey<T extends string>({ choice, pressed, onPick }: { choice: DockCh
   );
 }
 
-export function ReplyDockRow<T extends string>({ label, choices, pressed, onPick, onEscape, error, errorAction, children }: {
+export function ReplyDockRow<T extends string>({ label, lead, choices, pressed, onPick, onEscape, error, errorAction, children }: {
   /** 这一组的读屏名（「怎么裁定这条驳回」「叫 codex 来做什么」）。 */
   label: string;
+  /** 键上面那一句：这几颗键是在对什么拍板（裁定时是那条驳回争的是什么）。 */
+  lead?: ReactNode;
   choices: readonly DockChoice<T>[];
   pressed: T | null;
   onPick: (choice: T) => void;
@@ -57,6 +59,7 @@ export function ReplyDockRow<T extends string>({ label, choices, pressed, onPick
       if (event.key === "Escape" && onEscape) { event.preventDefault(); onEscape(); }
     }}>
       {children}
+      {lead}
       <div className="reply-dock-row" role="group" aria-label={label}>
         {choices.map((choice) => (
           <DockKey key={choice.id} choice={choice} pressed={choice.id === pressed} onPick={() => onPick(choice.id)} />

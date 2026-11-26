@@ -1,18 +1,12 @@
 import { readFileSync } from "node:fs";
+import { assertVersion } from "../../shared/release-version.mjs";
 import { compareVersions, latestVersion, parseItems } from "./appcast.mjs";
 
 export const WORKFLOW = "release-mac.yml";
 export const DOWNLOAD_TAG = "navi-mac-latest";
 export const LINK_COMMIT_PREFIX = "docs(README): mac 版下载指向";
 
-export function assertVersion(version) {
-  if (typeof version !== "string" || version.trim() !== version
-    || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)
-    || !version.split(".").every((part) => Number.isSafeInteger(Number(part)))) {
-    throw new Error("版本号要写成三个非负整数，例如 0.3.2（不带 v、不带前导零）");
-  }
-  return version;
-}
+export { assertVersion };
 
 export function readConfig(path) {
   const config = JSON.parse(readFileSync(path, "utf8"));

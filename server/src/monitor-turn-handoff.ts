@@ -135,6 +135,10 @@ export async function takeMonitorResultsForTurn(a: {
   token: string | null | undefined;
   where: (SQL | undefined)[];
   via: "pause" | "complete";
+  /** 这次调用的请求号（request-receipts.ts）：记在领取那一笔里，重试时凭它交回同一份。 */
+  request?: string | null;
+  /** 只交回这个请求号早先领走的那一批，不领新的。 */
+  againOnly?: boolean;
 }): Promise<HandedMonitorResults | null> {
   if (!a.token || dbClient.closed) return null;
   const token = a.token;
@@ -150,6 +154,11 @@ export async function takeMonitorResultsForTurn(a: {
       eq(sessions.role, turn.role === "reviewer" ? "reviewer" : "single")))
     .orderBy(sessions.turnStartedAt)).at(-1);
   if (!session) return null;
+  if (a.request) {
+    const again = await handedForRequest(a.taskId, session.id, token, a.request, a.via);
+    if (again) return again;
+  }
+  if (a.againOnly) return null;
   const at = now();
   const pending = await db.select().from(scheduledMessages).where(and(
     eq(scheduledMessages.taskId, a.taskId),
@@ -169,7 +178,7 @@ export async function takeMonitorResultsForTurn(a: {
   }
   // 收尾槽位只在内存里:发 CAS 之前同步再问一次。
   if (!candidates.length || candidates.some((m) => finishingNow(m.origin))) return null;
-  const handoff = { hand: newHand(), at };
+  const handoff = { hand: newHand(), at, ...(a.request ? { request: a.request } : {}) };
   const claimable = exists(db.select({ one: sql`1` }).from(tasks).where(eligible));
   // 同一个条件、一条语句(文件头 ①):唤醒那一路刚领走的、挑完之后身份变了的,都不会出现在 returning 里。
   const claimed = await db.update(scheduledMessages)
@@ -198,14 +207,43 @@ export async function takeMonitorResultsForTurn(a: {
     bus.publish({ type: "task.monitors", taskId: a.taskId });
   }
   if (!taken.length) return null;
+  return recordHanded(a.taskId, session.id, a.via, handoff.hand, taken);
+}
+
+/** 交出去的那几行拼成返回,会话里落一条记录(按交付号只落一次:重试交回同一份时不再落第二条)。 */
+async function recordHanded(
+  taskId: string, sessionId: string, via: "pause" | "complete", hand: string, taken: Row[],
+): Promise<HandedMonitorResults | null> {
   const body = taken.map((m) => m.text).join("\n\n");
   const monitorWake = handedWake(taken);
   // 会话里留一条带类型的记录:交了哪几条哨兵的什么、什么时候。写不下来就不交(这几行停在「交了、
   // 没确认」,收口时退回):没有这条记录,刷新之后谁也看不出这一轮里发生过这件事。
-  const recorded = await appendTaskTimeline(a.taskId,
-    noticeLine({ kind: "monitor.handed", via: a.via, monitorWake }, body), { sessionId: session.id });
+  const recorded = await appendTaskTimeline(taskId,
+    noticeLine({ kind: "monitor.handed", via, monitorWake }, body), { sessionId, eventKey: `monitor.handed:${hand}` });
   if (!recorded) return null;
-  return { text: body, hand: handoff.hand, monitorWake, count: taken.length };
+  return { text: body, hand, monitorWake, count: taken.length };
+}
+
+/**
+ * 同一次调用(同一个请求号)早先已经领走、还没确认的那一批:原样再交一次。那次调用的答复没写出去
+ * 服务就停了(request-receipts.ts),agent 从没见过那个交付号;重试时交回同一批、同一个号,
+ * 而不是当成「交过、还没带回回执号」拦下来 —— 那样它永远拿不到那个号。只认这一轮自己领的。
+ */
+async function handedForRequest(
+  taskId: string, sessionId: string, token: string, request: string, via: "pause" | "complete",
+): Promise<HandedMonitorResults | null> {
+  const rows = await db.select().from(scheduledMessages).where(and(
+    eq(scheduledMessages.taskId, taskId),
+    eq(scheduledMessages.status, "sent"),
+    eq(scheduledMessages.turnTakenBy, token),
+    sql`json_extract(${scheduledMessages.turnHandoff}, '$.request') = ${request}`,
+    sql`json_extract(${scheduledMessages.turnHandoff}, '$.ackedAt') IS NULL`,
+  ));
+  const hand = rows[0]?.turnHandoff?.hand;
+  if (!hand) return null;
+  const taken = rows.filter((m) => m.turnHandoff?.hand === hand)
+    .sort((x, y) => x.sendAt.localeCompare(y.sendAt) || x.createdAt.localeCompare(y.createdAt) || x.id.localeCompare(y.id));
+  return recordHanded(taskId, sessionId, via, hand, taken);
 }
 
 /**
@@ -216,12 +254,12 @@ export async function takeMonitorResultsForTurn(a: {
  */
 export async function handMonitorResultsOnPause(
   taskId: string, token: string | null, where: (SQL | undefined)[],
-  o: { receipts?: string[]; take?: boolean } = {},
+  o: { receipts?: string[]; take?: boolean; request?: string | null } = {},
 ): Promise<HandedMonitorResults | null> {
   return serialize(`task:${taskId}`, async () => {
     // 先认它带回来的回执号:这一次调用本身就是「我读到了那次返回」的证据。
     await confirmHandoffs(taskId, token, o.receipts ?? []);
-    return o.take === false ? null : takeMonitorResultsForTurn({ taskId, token, where, via: "pause" });
+    return o.take === false ? null : takeMonitorResultsForTurn({ taskId, token, where, via: "pause", request: o.request });
   });
 }
 

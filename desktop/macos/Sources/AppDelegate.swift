@@ -6,9 +6,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// 窗口建出来之前就收到的 navi:// 链接（被链接拉起时，系统可能先递链接、后报启动完成）。
   private var pendingLinks: [URL] = []
 
+  func applicationWillFinishLaunching(_ notification: Notification) {
+    // 点通知把 app 拉起来时，那一下在启动完成前后就会交给 delegate：先设上（SystemNotifications）。
+    SystemNotifications.shared.open = { [weak self] url in self?.application(NSApp, open: [url]) }
+    SystemNotifications.shared.install()
+  }
+
   func applicationDidFinishLaunching(_ notification: Notification) {
     // 第一个 WKWebView 建出来之前：要先让旧 app 退出、把改名前的网页数据复制过来（见 LegacyIdentity）。
     guard adoptLegacyIdentity() else { return }
+    RuntimeLog.record("app.launch", ["version": NaviConfig.bundleVersion,
+                                     "os": ProcessInfo.processInfo.operatingSystemVersionString])
     AppUpdater.shared.start()
     NSApp.mainMenu = MainMenu.build()
     registerTextInputDefaults()
@@ -61,6 +69,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   /// 退出时 Sparkle 会把下好的新版装上：先过 UpdateGate（会不会打断任务、停服务、备份库）。
+  func applicationWillTerminate(_ notification: Notification) {
+    RuntimeLog.record("app.quit", wait: true)
+  }
+
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     guard let version = AppUpdater.shared.readyVersion, UpdateGate.shared.phase != .prepared else { return .terminateNow }
     UpdateGate.shared.requestForQuit(version: version, whenDrained: { NSApp.terminate(nil) }) { allowed in
@@ -94,6 +106,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   @objc func toggleOtherDevices(_ sender: NSMenuItem) {
     RemoteAccessSwitch.toggle(windowController)
+  }
+
+  /// 服务起不来时设置页打不开，日志目录从这里也找得到（发给别人分析时连目录一起打包即可）。
+  @objc func revealRuntimeLog(_ sender: Any?) {
+    try? FileManager.default.createDirectory(at: RuntimeLog.directory, withIntermediateDirectories: true)
+    NSWorkspace.shared.activateFileViewerSelecting([RuntimeLog.directory])
   }
 
   @objc func checkHostMcp(_ sender: Any?) {
@@ -179,6 +197,7 @@ enum MainMenu {
     menu.addItem(item("登录时启动 Navi 服务", #selector(AppDelegate.toggleLoginService(_:))))
     menu.addItem(item("允许其他设备访问", #selector(AppDelegate.toggleOtherDevices(_:))))
     menu.addItem(item("检查 Navi MCP 登记…", #selector(AppDelegate.checkHostMcp(_:))))
+    menu.addItem(item("显示运行日志", #selector(AppDelegate.revealRuntimeLog(_:))))
     menu.addItem(.separator())
     menu.addItem(item("隐藏 Navi", #selector(NSApplication.hide(_:)), "h"))
     menu.addItem(item("隐藏其他", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]))

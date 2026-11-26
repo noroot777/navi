@@ -18,13 +18,15 @@ export type SettingsSection =
   | "users"
   | "account"
   | "defaults"
-  | "feishu";
+  | "feishu"
+  | "runtime-log";
 
 // `requires` 决定这一节**在导航里显不显示**,不决定它存不存在 —— 两者分开的原因见
 // 下面 parseSettingsSection 的注释。判据只有两种:
 //  · "multi"      多人模式才有意义(自用模式下这一节的内容是空话)
 //  · "multiAdmin" 还得是实例管理员(藏起来只是省事,真正的闸在后端)
-export type NavGate = "multi" | "multiAdmin";
+//  · "admin"      自用模式,或者多人模式下的实例管理员(整台实例的事,不是某个人的)
+export type NavGate = "multi" | "multiAdmin" | "admin";
 export type NavItem = { id: SettingsSection; label: string; requires?: NavGate };
 
 export const PROJECT_NAV: readonly NavItem[] = [
@@ -46,6 +48,7 @@ export const SYSTEM_NAV: readonly NavItem[] = [
   { id: "users", label: "用户", requires: "multiAdmin" },
   { id: "account", label: "我的账号", requires: "multi" },
   { id: "defaults", label: "默认规则" },
+  { id: "runtime-log", label: "运行日志", requires: "admin" },
 ];
 
 // 两份清单都从**完整**的 NAV 推,不受 requires 影响:URL 里带着 `?settings=users`
@@ -81,7 +84,7 @@ export function settingsSectionByLabel(label: string): SettingsSection | null {
 export const SECTION_ANCHORS: Partial<Record<SettingsSection, Record<string, string>>> = {
   // 「预览命令」是这张卡的旧名字，存量文案里还有（改成「自定义脚本 / 选择服务」之前的说法）。
   project: { 预览: "preview", 预览命令: "preview", 工作目录: "worktree", 常用命令: "commands" },
-  defaults: { 输入框: "send-key", 发送键: "send-key", 外观: "appearance", 深浅色: "appearance", 远程访问: "remote-access" },
+  defaults: { 输入框: "send-key", 发送键: "send-key", 外观: "appearance", 深浅色: "appearance", 通知: "system-notify", 系统通知: "system-notify", 远程访问: "remote-access" },
   // 服务端报错里写「设置 → 飞书 → 绑定」这类路径时，点一下就停在那张卡上。
   feishu: { 连接: "feishu-connection", 绑定: "feishu-binding", 推送: "feishu-push", 群: "feishu-groups" },
 };

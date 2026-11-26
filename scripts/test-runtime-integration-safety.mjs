@@ -174,7 +174,7 @@ await withTestResources(async () => {
   assert.deepEqual(await call("POST", "/draining", { nonIdempotent: true }), { ok: true });
   assert.equal(attempts.get("/api/draining"), 2);
   assert.equal(executed.get("/api/draining"), 1);
-  await assert.rejects(call("POST", "/uncertain", {}), /连不上/);
+  await assert.rejects(call("POST", "/uncertain", {}), /不确定它执行了没有/);
   assert.equal(executed.get("/api/uncertain"), 1);
   await assert.rejects(call("POST", "/unmarked", {}), /503/);
   assert.equal(executed.get("/api/unmarked"), 1);

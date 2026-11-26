@@ -9,7 +9,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 export function copyApp(source, destination) {
   return timed("app.copy", () => {
-    const result = spawnSync("/bin/cp", ["-cRp", source, destination], { encoding: "utf8" });
+    const result = spawnSync("bash", [join(HERE, "copy-app.sh"), source, destination], { encoding: "utf8" });
     if (result.status !== 0) throw new Error(`复制 app 失败（${result.status ?? result.signal}）：${result.stderr}`);
   });
 }

@@ -20,9 +20,10 @@
 //    有任务起跑就再等一轮,然后重启。WAIT_TIMEOUT=<秒> 可设上限(默认无限等),
 //    等待期间 Ctrl-C 随时可退。FORCE 优先于 WAIT(既然要强杀就不必等)。
 //    注意残留竞态:检查与 kill 之间仍可能有 queued 任务抢跑,于是它**没被等到**——
-//    真正关死这个窗口需要服务端的 drain 模式(停止启动新任务并如实报告已排空),这里
-//    够不着。但那只影响「等没等干净」这个账:抢跑的那个 agent **不会被这一刀杀掉**
-//    (Windows 那边按壳记号认人,见 platform.mjs 的 killServerProcess)。
+//    这个窗口由服务端的重启前冻结关死(server/src/restart-freeze.ts):第 2 步下刀之前先冻结
+//    接活,判据改用冻结之下的那份快照,冻着的时候它不会再变多。老版本服务没有这道关口,
+//    那时退回即时判据并如实说一句;抢跑的 agent 也**不会被这一刀杀掉**(Windows 那边按壳
+//    记号认人,见 platform.mjs 的 killServerProcess)。
 //  - navi MCP 是每个 Codex/Claude 会话各自 spawn 的 stdio 子进程(node mcp/dist/index.js),
 //    不是常驻端口。第 3 步杀掉这些"旧代码"子进程;客户端下次用到时会用新的 mcp/dist 重新拉起。
 //    **这一刀是本脚本唯一真能伤到正在干活的 agent 的地方**(重启 :4317 它们无感,见上一条):
@@ -40,7 +41,8 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { NPM, NPM_SPAWN_OPTS } from "./npm.mjs";
 import { IS_WINDOWS, listenerPids, localJson } from "./platform.mjs";
-import { countOf, dataDirFor, dbFileFor, drainWait as drainUntilSafe, exitLedgerFor, explainNoVerdict, killListeners, lockFileFor, noVerdictReason, queryImpact, waitPortQuiet } from "./server-control.mjs";
+import { countOf, dataDirFor, dbFileFor, drainWait as drainUntilSafe, exitLedgerFor, explainNoVerdict, killListeners, lockFileFor, noVerdictReason, queryImpact, restartFreezeSender, sayClosing, waitPortQuiet } from "./server-control.mjs";
+import { acquireRestartFreeze, releaseRestartFreeze, renewRestartFreeze, supportsRestartFreeze } from "./restart-freeze.mjs";
 import { launchServer, refreshMcp } from "./server-start.mjs";
 import { readEnv } from "./env.mjs";
 import { WORKSPACE_FAIL_HINT, inspectNpmConfig, inspectWorkspaces } from "./workspace-check.mjs";
@@ -80,7 +82,18 @@ const say = (line) => process.stdout.write(`${line}\n`);
 
 // 单实例锁的路径口径跟 server 一致(NAVI_DB 覆盖,默认 data 下的库),否则找错文件。
 const LOCK_FILE = lockFileFor(REPO);
-const impact = () => queryImpact(PORT, LOCK_FILE);
+const impact = () => queryImpact(PORT, LOCK_FILE, { includeShutdown: true });
+const freezeSend = restartFreezeSender(PORT, LOCK_FILE);
+
+/** 手上拿着的冻结(第 2 步下刀前后)。中止的每条出路都先放掉它:服务还活着,别让它冻到期才解。 */
+let freeze = null;
+async function letGo() {
+  if (!freeze) return;
+  const lease = freeze.lease;
+  freeze = null;
+  await releaseRestartFreeze(freezeSend, lease);
+}
+process.once("SIGINT", () => { void letGo().finally(() => process.exit(130)); });
 
 /** build 那一步跑过没有 —— 只用来让中止提示说得准（见 impactOrAbort）。 */
 let built = false;
@@ -175,13 +188,41 @@ if (old.length) {
   // 问不出判据就中止(impactOrAbort):静默按 0 继续正是这条闸失效的样子。
   let data = await impactOrAbort();
   let busy = countOf(data, "interrupted");
-  // build 少说几十秒,这期间完全可能又有任务起跑 —— WAIT 模式再排一轮。
-  if (busy > 0 && WAIT && !FORCE) {
-    await drainWait();
-    data = await impactOrAbort();
+  // 冻结之后判据改用冻结之下的快照:冻着的时候没有新回合、新 agent 起跑,下刀之前它不会再变多。
+  // WAIT 那一档等排空时不冻着(那可能是好几分钟),排空了再冻、再看一眼;快照里还有就放开再等。
+  for (;;) {
+    // build 少说几十秒,这期间完全可能又有任务起跑 —— WAIT 模式再排一轮。
+    if (busy > 0 && WAIT && !FORCE) {
+      await drainWait();
+      data = await impactOrAbort();
+      busy = countOf(data, "interrupted");
+    }
+    // 问不到判据还往下走的只有 FORCE(impactOrAbort):那时连这份服务认不认冻结都不知道,FORCE 已经说过会打断。
+    if (noVerdictReason(data) !== null) break;
+    if (!supportsRestartFreeze(data)) {
+      say("  ⚠ 这一版服务端没有重启前冻结:下面的判据是即时问的,从这一刻到停下之间新起的任务不在里面,仍可能被打断。");
+      sayClosing(say, data.shutdown?.resources);
+      break;
+    }
+    const got = await acquireRestartFreeze(freezeSend);
+    if (got.kind !== "frozen") {
+      if (!FORCE) {
+        say(`  ✋ 冻结不了接活(${got.why}) —— 已中止,未重启服务端。`);
+        say(`     稍后重跑一次;明知新起的任务可能被打断也要重启:  ${restartCommand("--force")}`);
+        say(`     (新代码已 build 进 dist,不会丢;只是暂不重启 :${PORT}。MCP 也未动。)`);
+        process.exit(2);
+      }
+      say(`  ⚠ FORCE:冻结不了接活(${got.why}),按即时判据重启 —— 这期间新起的任务也会被打断。`);
+      break;
+    }
+    freeze = got;
+    data = got.impact;
     busy = countOf(data, "interrupted");
+    if (!(busy > 0 && WAIT && !FORCE)) break;
+    await letGo();
   }
   if (busy > 0 && !FORCE) {
+    await letGo();
     say(`  ✋ 重启会打断 ${busy} 个任务(判为 failed) —— 已中止,未重启服务端。`);
     for (const t of data.interrupted.slice(0, 8)) say(`     · ${t.title} —— ${t.reason}`);
     say(`     让脚本替你等它们跑完:  ${restartCommand("--wait")}`);
@@ -197,11 +238,32 @@ if (old.length) {
     say(`  ✓ 有任务在跑,但重启不会打断:${safe} 个会被接管(继续跑,无感)、${lead} 个调度台会自动接回。`);
   }
   if (busy > 0) say(`  ⚠ FORCE:打断 ${busy} 个**接管不了**的任务(判为 failed,可重试);会被接管的不受影响。`);
+  // 下刀前最后核一次冻结还在(顺带续期):判据只在冻着的时候算数,到期了、被放掉了就不是这份快照了。
+  // 续期带回此刻的名单:冻着也拦不住已经在跑的 agent 自己变出新影响(restart-freeze.ts 顶部),多出接不回的就不停。
+  if (freeze) {
+    const renewed = await renewRestartFreeze(freezeSend, freeze.lease);
+    const known = new Set((data.interrupted ?? []).map((t) => t.id));
+    const extra = renewed.valid ? renewed.impact.interrupted.filter((t) => !known.has(t.id)) : [];
+    if (!renewed.valid || (extra.length && !FORCE)) {
+      await letGo();
+      say(renewed.valid
+        ? `  ✋ 冻结之后又多了 ${extra.length} 个会被打断的任务 —— 已中止,未重启服务端。重跑一次即可。`
+        : `  ✋ ${renewed.why} —— 判据不再算数,已中止,未重启服务端。重跑一次即可。`);
+      for (const t of extra.slice(0, 8)) say(`     · ${t.title} —— ${t.reason}`);
+      say(`     (新代码已 build 进 dist,不会丢;只是暂不重启 :${PORT}。MCP 也未动。)`);
+      process.exit(2);
+    }
+    if (extra.length) say(`  ⚠ FORCE:冻结之后又多了 ${extra.length} 个会被打断的任务,一并打断。`);
+    // 随服务一起关掉的终端、聊天、AI 协助、预览试跑:这条脚本不为它们中止 —— 它常常就是在 Navi 自己的终端里
+    // 跑的,拦下就永远重启不了;如实列出来,别让人事后才发现终端没了。
+    sayClosing(say, renewed.impact.shutdown?.resources);
+  }
   // 走到这儿时判据一定是问到了的(问不到 impactOrAbort 已经中止);保护名单怎么用见 killListeners。
   let how = "signal";
   try {
     how = killListeners(old, data, { force: FORCE });
   } catch (error) {
+    await letGo();
     say(`  ✋ 无法安全终止 Windows 旧实例: ${error.message}。已中止重启。`);
     say(`     未授权整树强杀;确定接受任务中断才使用 ${restartCommand("--force")}。`);
     process.exit(2);
@@ -216,6 +278,7 @@ if (old.length) {
 // (2026-08-21 Rocky 容器里没有 lsof,`old` 是空的,新进程撞单实例锁退出,而 /api/health
 // 由老进程照常回 200,脚本于是打印「✓ 已就绪」;判据细节见 isPortQuiet)。
 if (!(await waitPortQuiet(PORT))) {
+  await letGo(); // 它没退:还冻着就放开,别让它带着冻结接着跑到期
   const answers = Boolean(await localJson(PORT, "/api/health"));
   say(answers
     ? `  ✕ :${PORT} 上仍有一个 Navi 在应答,没能让它下线 —— 已中止,未重启服务端。`

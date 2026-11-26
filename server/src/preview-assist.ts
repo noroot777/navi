@@ -35,6 +35,8 @@ import {
   type Job,
 } from "./preview-assist-jobs.js";
 import { trialPreviewScript } from "./preview-trial.js";
+import { serviceFrozen, serviceFrozenText, waitServiceThaw } from "./runtime-handover-state.js";
+import { registerShutdownCleanup } from "./shutdown-resources.js";
 import { withoutTurnIdentity } from "./turn-identity.js";
 
 // 进度查询和取消就住在登记簿里（那边不碰 DB）；这里只管「起一趟」和那三轮循环。
@@ -90,7 +92,50 @@ export async function startPreviewAssist(options: PreviewAssistStartOptions): Pr
 
 type Executor = Awaited<ReturnType<typeof resolveExecutorFor>>;
 
+/**
+ * 已经开工的作业（等过冻结的那些）。进度只在内存里，重启一下就整份丢了，所以它们算「随服务一起关掉」的
+ * 资源，摆进重启确认（restart-freeze.ts 的快照）。还在等冻结的不算：那时候它还什么都没起。
+ *
+ * 说了「会关掉」就得真关掉：智能体自成进程组、父进程退了它照样跑，新起的页面又查不到、停不了它。停止是异步的
+ * （TERM、追后代、两秒后补 KILL），所以关服时先在排空那一段（shutdown-resources.ts）停掉正在跑的那一轮、
+ * 等这份作业自己收完尾（think 的 finally：kill + cleanup，收不净的交给执行器的清理责任）；exit 那一下只是兜底。
+ */
+const working = new Map<Job, { cwd: string; done: Promise<void> }>();
+const stopWorking = () => {
+  for (const job of working.keys()) {
+    job.canceled = true;
+    try { job.handle?.kill(); } catch { /* 已经退了 */ }
+  }
+};
+registerShutdownCleanup(
+  () => [...working].map(([job, { cwd }]) => ({ kind: "preview-assist", id: job.state.jobId, label: `AI 协助 ${cwd}`, projectId: job.state.projectId })),
+  stopWorking,
+  async () => {
+    const pending = [...working.values()].map((entry) => entry.done);
+    stopWorking();
+    await Promise.all(pending);
+  },
+);
+
 async function loop(
+  job: Job,
+  options: PreviewAssistStartOptions,
+  executor: Executor,
+  runEnv: Record<string, string | undefined>,
+): Promise<void> {
+  // 服务准备重启时先不开工（restart-freeze.ts）：开工就要拉起智能体，快照里却没有它。等着的时候点了停止就到此为止。
+  if (serviceFrozen()) job.state.step = `${serviceFrozenText()}，完成后再开工…`;
+  if (!(await waitServiceThaw(() => job.canceled))) return;
+  const done = rounds(job, options, executor, runEnv);
+  working.set(job, { cwd: options.cwd, done: done.catch(() => {}) }); // 等完到这一句之间没有 await
+  try {
+    await done;
+  } finally {
+    working.delete(job);
+  }
+}
+
+async function rounds(
   job: Job,
   options: PreviewAssistStartOptions,
   executor: Executor,

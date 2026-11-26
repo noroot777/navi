@@ -170,9 +170,10 @@ assert.equal(childEntry.activeTab, "review", "进入子任务按子任务阶段�
 memory.set("navi:inspector:task:leaf", JSON.stringify({ ...childEntry, activeTab: "dispatched", policyKey: "child:v8" }));
 assert.equal(readState("navi:inspector:task:leaf", descriptors, true, childPolicy).activeTab, "review", "迁移旧的父任务面板落点");
 assert.equal(dispatchedWord({ ...run, status: "queued", queueId: "q", queuePosition: 3 }).word, "排第 4");
-assert.equal(dispatchedMeta(leaf, now), "选哪个？");
-assert.equal(dispatchedMeta(accepted, now), "");
-assert.equal(dispatchedMeta(canceled, now), "");
+assert.deepEqual(dispatchedMeta(leaf, now), { ask: "选哪个？" });
+assert.equal(dispatchedMeta(accepted, now), null);
+assert.equal(dispatchedMeta(canceled, now), null);
+assert.deepEqual(dispatchedMeta({ ...run, executorLabel: "claude@box", startedAt: new Date(now - 633_000).toISOString(), activeMs: 633_000 }, now), { executor: "claude@box", duration: "用时 10m 33s" });
 assert.equal(dispatchedOrder([run, mid]), "同时");
 assert.equal(dispatchedOrder([{ ...run, queueId: "q" }, { ...mid, queueId: "q" }]), "一个接一个");
 assert.equal(dispatchedOrder([{ ...run, queueId: "q" }, mid]), null);

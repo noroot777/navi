@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { Agent, fetch as directFetch } from "undici";
-import { sealRuntime } from "../desktop/macos/scripts/runtime-store.mjs";
+import { sealRuntime } from "../desktop/shared/runtime-store.mjs";
 import { ensureSparkle } from "../desktop/macos/scripts/sparkle.mjs";
 import { seedSource, agentSource, codexSource } from "./macos-runtime-fixture.mjs";
 import { runTestProcess } from "./test-process.mjs";
@@ -183,8 +183,8 @@ await import(process.env.FIXTURE_ROOT+'/agent-fixture.mjs');`);
     await waitFor(() => records().length >= before + 2, "original Claude process receives Monitor decisions after service replacement");
     for (const record of records()) assert.deepEqual(record, { status: 200, decision: "deny" });
   }
-  async function switchRuntime(app = installed, status = 0) {
-    const child = await fixture(binary, ["switch"], { env: envFor(app) });
+  async function switchRuntime(app = installed, status = 0, mode = "switch") {
+    const child = await fixture(binary, [mode], { env: envFor(app) });
     try {
       const output = await finish(child, status);
       if (output.includes("START failed")) throw new Error(output);
@@ -216,7 +216,7 @@ await import(process.env.FIXTURE_ROOT+'/agent-fixture.mjs');`);
     const mainRepo = dirname(realpathSync(common));
     const cache = join(mainRepo, "desktop/macos/build/cache");
     const sparkle = await ensureSparkle(cache);
-    const sources = ["NaviConfig", "NaviHealth", "DatabaseBackup", "LegacyIdentity", "LoginService", "RestartImpact", "ServerControl", "ServerLauncher", "ServerStartLock", "UpdateGate", "Updater", "RuntimeRecovery", "BundleRuntimeUse"];
+    const sources = ["NaviConfig", "NaviHealth", "RuntimeLog", "DatabaseBackup", "LegacyIdentity", "LoginService", "RestartImpact", "ServerControl", "ServerLauncher", "ServerStartLock", "UpdateGate", "Updater", "RuntimeRecovery", "BundleRuntimeUse"];
     await run("swiftc", ["-swift-version", "5", "-F", sparkle, "-framework", "Sparkle", "-Xlinker", "-rpath", "-Xlinker", sparkle,
       ...sources.map((name) => join(mac, `Sources/${name}.swift`)), join(mac, "Tests/RuntimeIntegration/main.swift"), "-o", binary]);
     const runtime = join(installed, "Contents/Resources/app");
@@ -528,7 +528,14 @@ UpdateGate.shared.report = { emit("GATE-ERROR \\($0)") }`);
     writeFileSync(join(feed, "appcast.xml"), `<?xml version="1.0"?><rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><title>Isolated Navi runtime</title><item><title>2</title><sparkle:version>2</sparkle:version><enclosure url="${url}/update.zip" ${signed.stdout.trim()} type="application/octet-stream"/></item></channel></rss>`);
     await run(join(sparkle, "bin/sign_update"), ["--ed-key-file", keyFile, join(feed, "appcast.xml")]);
     const oldHealth = await health();
-    await switchRuntime(sparkleInstalled);
+    const pausedSwitch = await switchRuntime(sparkleInstalled, 2);
+    assert.match(pausedSwitch, /REFUSED 新版启动失败[\s\S]*自动切换已暂停[\s\S]*SWITCH blocked phase=blocked/);
+    assert.equal((await health()).pid, oldHealth.pid);
+    assert.ok(existsSync(join(data, ".mac-runtime-paused.json")));
+    await switchRuntime(sparkleInstalled, 0, "menu-retry");
+    assert.equal(existsSync(join(data, ".mac-runtime-paused.json")), false);
+    assert.notEqual((await health()).pid, oldHealth.pid);
+    console.log("✓ rollback pause survives installing another app: automatic switch leaves the old service alone until the menu retry lifts it");
     const continuous = await launchTask("sparkle-continuous", "claude");
     const before = await health();
     await fixture(join(sparkleInstalled, "Contents/MacOS/Navi"), [], { env: environment });

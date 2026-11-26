@@ -157,8 +157,20 @@ case "quit": gate.requestForQuit(version: "next", whenDrained: {}) { proceeded =
 default: gate.request(.staleServer(from: "previous")) { proceeded = true }
 }
 let deadline = Date().addingTimeInterval(35)
-while !proceeded && !reported && (gate.phase != .waiting || environment["WAIT_FOR_SWITCH"] == "1") && Date() < deadline {
+while !proceeded && !reported && gate.phase != .blocked
+  && (gate.phase != .waiting || environment["WAIT_FOR_SWITCH"] == "1" || environment["WAIT_FOR_RETRY_LIMIT"] == "1")
+  && Date() < deadline {
   RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+}
+if environment["WAIT_FOR_RETRY_LIMIT"] == "1" {
+  precondition(gate.phase == .blocked && !proceeded && !reported && !gate.isHolding && promptCount == 0)
+  RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+  precondition(gate.phase == .blocked && !proceeded && !reported && !gate.isHolding)
+  emit("RETRY_LIMIT \(gate.pendingMenuTitle)")
+}
+if environment["VERIFY_NO_STOP"] == "1" {
+  precondition(gate.phase == .waiting && !proceeded && !reported && !gate.isHolding && promptCount == 0)
+  emit("UNCHANGED_WORKSPACE")
 }
 if environment["VERIFY_HANDOVER_WAIT"] == "1" {
   precondition(gate.phase == .waiting && !proceeded && !gate.isHolding)

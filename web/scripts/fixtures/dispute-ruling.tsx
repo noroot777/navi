@@ -74,6 +74,7 @@ function Stage({ name, task: patch = {}, reviews: initial, inspector = false }: 
     task, reviews, known: true,
     onChanged: (state: FreeWorkflowApiState) => setReviews(state.reviews),
     notify: (message) => log(`__notices_${name}`, message),
+    onOpenRound: (target) => log(`__opened_${name}`, target),
   });
   // 夹具上的一颗「换一条驳回」：轮询带来新状态的那一下。
   (window as unknown as Record<string, unknown>)[`__swap_${name}`] = (next: FreeReviewRun[]) => setReviews(next);

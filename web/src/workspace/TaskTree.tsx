@@ -112,6 +112,8 @@ function ScopedTaskTree({
     [lookForTask, workerIndex],
   );
   const dispatchView = useMemo(() => createDispatchView(allTasks), [allTasks]);
+  // 项目分组的先后：项目列表的顺序（projectIndex 按它建，Map 保序）。
+  const projectOrder = useMemo(() => projectIndex ? [...projectIndex.keys()] : [], [projectIndex]);
   const filteredBySection = useMemo(
     () => sections.map((section) => ({
       section,
@@ -154,7 +156,7 @@ function ScopedTaskTree({
         grouped,
         groups: grouped
           // 已经收在别人下面的不能再从「展开」里冒出来一份。
-          ? groupTaskModeProjects(kept, allTasks.filter((task) => !forest.nested.has(task.id)), sections.find((entry) => entry.key === "pinned")?.tasks ?? []).map((group) => ({
+          ? groupTaskModeProjects(kept, allTasks.filter((task) => !forest.nested.has(task.id)), sections.find((entry) => entry.key === "pinned")?.tasks ?? [], projectOrder).map((group) => ({
             key: `project:${group.projectId}`,
             project: projectIndex?.get(group.projectId) ?? null,
             tasks: group.tasks,
@@ -163,7 +165,7 @@ function ScopedTaskTree({
           : [{ key: section.key, project: null as ProjectView | null, tasks: kept, extraTasks: [] as TaskListItem[] }],
       };
     }),
-    [allTasks, forest, keptBySection, projectIndex, sections],
+    [allTasks, forest, keptBySection, projectIndex, projectOrder, sections],
   );
   const hiddenSelection = useMemo(() => {
     if (!selectedTaskId) return null;

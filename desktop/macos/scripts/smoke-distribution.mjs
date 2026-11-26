@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
-import { once } from "node:events";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { startServer } from "../../shared/runtime-smoke.mjs";
 import { ARCHITECTURES, assertArchitecture, buildArchitecture } from "./architecture.mjs";
 import { appInfo } from "./release-artifacts.mjs";
 
@@ -55,43 +53,12 @@ export async function smokeDistribution(app, architecture = process.env.NAVI_MAC
   `], { cwd: join(runtime, "server"), encoding: "utf8", timeout: 20_000 });
   assert.equal(probe.status, 0, `${probe.error ?? ""}\n${probe.stdout}${probe.stderr}`);
   const directory = mkdtempSync(join(tmpdir(), "navi-distribution-smoke-"));
-  let child;
-  let output = "";
+  let server;
   try {
-    const socket = createServer();
-    socket.listen(0, "127.0.0.1");
-    await once(socket, "listening");
-    const port = socket.address().port;
-    await new Promise((done) => socket.close(done));
-    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(?:NAVI_|ASH_|PORT$|GH_TOKEN$|GITHUB_TOKEN$|MAC_RELEASE_TOKEN$|MAC_SPARKLE_PRIVATE_KEY$)/.test(name)));
-    child = spawn(node, [join(runtime, "server/dist/index.js")], { cwd: runtime, env: {
-      ...env, NAVI_DATA_DIR: directory, PORT: String(port), NAVI_LOCAL_ONLY: "1",
-    }, stdio: ["ignore", "pipe", "pipe"] });
-    child.stdout.on("data", (bytes) => { output += bytes; });
-    child.stderr.on("data", (bytes) => { output += bytes; });
-    let failure;
-    child.on("error", (error) => { failure = error; });
-    const deadline = Date.now() + 60_000;
-    let healthy = false;
-    while (Date.now() < deadline && child.exitCode === null && !failure) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(1000) });
-        const body = await response.json();
-        healthy = response.ok && body.pid === child.pid;
-        if (healthy) break;
-      } catch {}
-      await delay(200);
-    }
-    assert.ok(healthy, `独立服务未就绪：${failure ?? ""}\n${output}`);
+    server = await startServer({ node, runtime, dataDir: directory });
     console.log(`DISTRIBUTION_SMOKE_OK ${architecture}: native binaries, sqlite, pty, server health`);
   } finally {
-    if (child?.pid && child.exitCode === null && child.signalCode === null) {
-      const exited = once(child, "exit");
-      child.kill("SIGTERM");
-      const timer = setTimeout(() => child.kill("SIGKILL"), 5000);
-      try { await exited; } finally { clearTimeout(timer); }
-    }
-    rmSync(directory, { recursive: true, force: true });
+    try { await server?.stop(); } finally { rmSync(directory, { recursive: true, force: true }); }
   }
 }
 
