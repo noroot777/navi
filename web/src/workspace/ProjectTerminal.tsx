@@ -10,6 +10,7 @@ import type { TerminalDock } from "./useTerminalDock.ts";
 import { TerminalAppearanceMenu } from "./TerminalAppearanceMenu.tsx";
 import { readTerminalAppearance, terminalThemes, TERMINAL_APPEARANCE_KEY, type TerminalAppearance } from "./terminalAppearance.ts";
 import { terminalInputChunks } from "./terminalInput.ts";
+import { onTerminalUserInput } from "./terminalUserInput.ts";
 
 const TERMINAL_HEIGHT_KEY = "navi:terminal-height";
 const DEFAULT_HEIGHT = 280;
@@ -55,6 +56,9 @@ function TerminalPane({
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const queueResizeRef = useRef<((cols: number, rows: number) => void) | null>(null);
+  const themeRef = useRef(appearance.theme);
+  themeRef.current = appearance.theme;
   const lastSeqRef = useRef(0);
   // 已经有会话的 tab(attach 来的,或自己建完回填了 sessionId)一挂上就能收发;只有全新的
   // shell tab 要等 create 完才有 id。流 effect 等这个。
@@ -115,7 +119,10 @@ function TerminalPane({
     if (!terminal) return;
     terminal.options.theme = terminalThemes[appearance.theme].colors;
     terminal.options.fontSize = appearance.fontSize;
-    if (active) fitRef.current?.fit();
+    if (active) {
+      fitRef.current?.fit();
+      queueResizeRef.current?.(terminal.cols, terminal.rows);
+    }
   }, [appearance, active]);
 
   // 基座:xterm 实例、输入/резize 通道、shell 会话的创建与关闭。日志流不在这里 ——
@@ -154,6 +161,7 @@ function TerminalPane({
       notify(`CLI 连接失败：${message}`);
     };
     const flushInput = () => {
+      if (inputTimer !== null) window.clearTimeout(inputTimer);
       inputTimer = null;
       const sessionId = sessionIdRef.current;
       if (!sessionId || !inputBuffer) return;
@@ -169,20 +177,32 @@ function TerminalPane({
       inputBuffer += data;
       if (inputTimer === null) inputTimer = window.setTimeout(flushInput, 12);
     };
+    const reportFocus = (focused: boolean) => {
+      const sessionId = sessionIdRef.current;
+      if (!sessionId) return;
+      flushInput();
+      inputChain = inputChain.then(() => api.writeTerminalSession(project.id, sessionId, "", focused)).catch(showConnectionError);
+    };
+    const focus = () => reportFocus(true);
+    const blur = () => reportFocus(false);
     const flushResize = () => {
       resizeTimer = null;
       const sessionId = sessionIdRef.current;
       if (!sessionId || !pendingSize) return;
       const size = pendingSize;
       pendingSize = null;
-      void api.resizeTerminalSession(project.id, sessionId, size).catch(showConnectionError);
+      void api.resizeTerminalSession(project.id, sessionId, { ...size, theme: themeRef.current }).catch(showConnectionError);
     };
     const queueResize = (cols: number, rows: number) => {
       pendingSize = { cols, rows };
       if (resizeTimer === null) resizeTimer = window.setTimeout(flushResize, 80);
     };
+    queueResizeRef.current = queueResize;
 
-    const input = terminal.onData(queueInput);
+    const input = onTerminalUserInput(terminal, queueInput);
+    const textarea = terminal.textarea!;
+    textarea.addEventListener("focus", focus);
+    textarea.addEventListener("blur", blur);
     const resize = terminal.onResize(({ cols, rows }) => queueResize(cols, rows));
     const observer = new ResizeObserver(() => {
       if (host.offsetParent === null) return;
@@ -191,14 +211,14 @@ function TerminalPane({
     observer.observe(host);
     requestAnimationFrame(() => {
       if (host.offsetParent === null) return;
-      try { fit.fit(); terminal.focus(); } catch { /* component was removed */ }
+      try { fit.fit(); queueResize(terminal.cols, terminal.rows); terminal.focus(); } catch { /* component was removed */ }
     });
 
     // 只有「还没有任何会话」的 tab 才新建。光看 attachSessionId 不够 —— 前端自己建的 shell
     // 把会话 id 回填在 sessionId 上,这种 tab 要是又走一遍创建(挂到别的项目、或基座 effect
     // 因依赖变化重跑),就会平白多起一个 shell(第 1 轮逻辑审查:切项目时 create 了两次)。
     if (!tab.attachSessionId && !tab.sessionId) {
-      void api.createTerminalSession(project.id, { cols: terminal.cols, rows: terminal.rows })
+      void api.createTerminalSession(project.id, { cols: terminal.cols, rows: terminal.rows, theme: themeRef.current })
         .then((session) => {
           if (!alive) {
             // 会话建成前 tab 就没了(关抽屉/StrictMode 重挂):还没人看过一眼,直接收掉,
@@ -211,6 +231,7 @@ function TerminalPane({
           onMeta(tab.id, { cwd: session.cwd, sessionId: session.id });
           setEstablishedId(session.id);
           flushInput();
+          if (document.activeElement === textarea) focus();
           queueResize(terminal.cols, terminal.rows);
         })
         .catch(showConnectionError);
@@ -219,11 +240,15 @@ function TerminalPane({
     return () => {
       alive = false;
       observer.disconnect();
+      if (document.activeElement === textarea) blur();
+      textarea.removeEventListener("focus", focus);
+      textarea.removeEventListener("blur", blur);
       input.dispose();
       resize.dispose();
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;
+      queueResizeRef.current = null;
       if (inputTimer !== null) window.clearTimeout(inputTimer);
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
       // 会话是持久的(VSCode 语义):unmount 发生在收起 tab/切项目,这些都不杀
@@ -240,12 +265,6 @@ function TerminalPane({
     if (!terminal) return;
     let alive = true;
     let ended = tabRef.current.status === "ended";
-    let replaying = false;
-    const setReplay = (value: boolean) => {
-      if (replaying === value) return;
-      replaying = value;
-      terminal.write("", () => { terminal.options.disableStdin = value; });
-    };
     const source = new EventSource(api.terminalEventsUrl(project.id, establishedId, lastSeqRef.current));
     // attach tab 的状态点表达会话/服务事实,由集中轮询驱动,连接事件不碰它。
     source.onopen = () => { if (alive && !ended && !tab.attachSessionId) onMeta(tab.id, { status: "ready" }); };
@@ -253,7 +272,6 @@ function TerminalPane({
       if (!alive) return;
       const event = JSON.parse(message.data) as TerminalEvent;
       if (event.seq <= lastSeqRef.current) return;
-      setReplay(event.replayThrough !== undefined);
       if (event.seq > lastSeqRef.current + 1) {
         terminal.write("\x18", () => terminal.reset());
         announcedRef.current = { detached: false, ended: false };
@@ -273,17 +291,14 @@ function TerminalPane({
           terminal.write(`\r\n\x1b[90m进程已退出（${event.exitCode}）\x1b[0m\r\n`);
         }
       }
-      if (event.seq === event.replayThrough) setReplay(false);
     };
     source.onerror = () => {
-      setReplay(false);
       if (!alive || ended || tab.attachSessionId) return;
       onMeta(tab.id, { status: "reconnecting" });
     };
     return () => {
       alive = false;
       source.close();
-      if (terminalRef.current === terminal) setReplay(false);
     };
   }, [active, establishedId, project.id, tab.id, tab.attachSessionId, onMeta, announce, notify]);
 

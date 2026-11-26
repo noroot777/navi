@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import * as pty from "node-pty";
 import { SERVICE_COMMAND_ID } from "@navi/shared/project-commands";
+import type { TerminalTheme } from "@navi/shared/terminal-themes";
 import { IS_WINDOWS } from "./platform.js";
 import { createPortScanner, LAUNCH_ID_ENV } from "./service-ports.js";
 import { id } from "./util.js";
@@ -22,6 +23,7 @@ import { sampleLaunchClocks, settleLaunchClocks, type LaunchIdentity } from "./t
 import { TerminalWatcher } from "./terminal-session-watch.js";
 import { commandLaunch, interactivePtyEnvironment, ptyEnvironment, shellCommand, terminalSize } from "./terminal-shell.js";
 import { spawnWindowsPty, type TerminalProcess } from "./terminal-pty.js";
+import { withTerminalProtocol } from "./terminal-protocol.js";
 import { TerminalCapacity } from "./terminal-capacity.js";
 import { registerShutdownCleanup } from "./shutdown-resources.js";
 import { terminalShutdownResources } from "./terminal-shutdown-resources.js";
@@ -240,13 +242,15 @@ export class TerminalSessionManager {
     // 各个钟的起跑读数同样在 spawn 之前取:事后补取,创建子进程到取样之间那段停顿会让真后代
     // 比上界更老,于是在读记号之前就被筛掉(第 6 轮自由审查,见 terminal-launch-survivors.ts)。
     const launchClocks = sampleLaunchClocks();
-    const processHandle = spawnProcess(spawnSpec.file, spawnSpec.args, {
+    const cols = terminalSize(options.cols, 100, 20, 400);
+    const rows = terminalSize(options.rows, 24, 5, 200);
+    const processHandle = withTerminalProtocol(spawnProcess(spawnSpec.file, spawnSpec.args, {
       name: "xterm-256color",
-      cols: terminalSize(options.cols, 100, 20, 400),
-      rows: terminalSize(options.rows, 24, 5, 200),
+      cols,
+      rows,
       cwd,
       env: launchToken ? ptyEnvironment({ [LAUNCH_ID_ENV]: launchToken }) : interactivePtyEnvironment(shell, args),
-    });
+    }), cols, rows, options.theme);
     const session: TerminalSession = {
       id: id(),
       projectId,
@@ -317,24 +321,24 @@ export class TerminalSessionManager {
     return () => session.listeners.delete(listener);
   }
 
-  write(sessionId: string, projectId: string, data: string): boolean {
+  write(sessionId: string, projectId: string, data: string, focused?: boolean): boolean {
     const session = this.session(sessionId, projectId);
     if (!session) return false;
     session.lastAccessedAt = Date.now();
     // 已退出的会话(常用命令跑完/被停,日志还挂着给人看)吞掉输入:进程都没了,写下去
     // 只会让 node-pty 抛错、前端弹「连接失败」——而用户只是在死 tab 里碰了下键盘。
     if (session.exitCode !== null) return true;
-    try { session.process.write(data); } catch { /* pty died between checks */ }
+    try { session.process.write(data, focused); } catch { /* pty died between checks */ }
     return true;
   }
 
-  resize(sessionId: string, projectId: string, cols: number, rows: number): boolean {
+  resize(sessionId: string, projectId: string, cols: number, rows: number, theme?: TerminalTheme): boolean {
     const session = this.session(sessionId, projectId);
     if (!session) return false;
     session.lastAccessedAt = Date.now();
     // 同上:对死 pty 调 resize 是 ioctl ENOTTY,不是调用方的错,静默成功。
     if (session.exitCode !== null) return true;
-    try { session.process.resize(terminalSize(cols, 100, 20, 400), terminalSize(rows, 24, 5, 200)); } catch { /* pty died between checks */ }
+    try { session.process.resize(terminalSize(cols, 100, 20, 400), terminalSize(rows, 24, 5, 200), theme); } catch { /* pty died between checks */ }
     return true;
   }
 

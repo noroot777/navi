@@ -9,9 +9,9 @@ export function terminalEventStream(context: Context, manager: TerminalSessionMa
   if (!replay) return context.json({ error: "terminal session not found" }, 404);
   return streamSSE(context, async (stream) => {
     let pending: TerminalEvent[] | null = [];
-    const write = (event: TerminalEvent, replayThrough?: number) => stream.writeSSE({
+    const write = (event: TerminalEvent) => stream.writeSSE({
       id: String(event.seq),
-      data: JSON.stringify({ ...event, replayThrough }),
+      data: JSON.stringify(event),
     });
     const unsubscribe = manager.subscribe(sessionId, projectId, (event) => {
       if (pending) pending.push(event);
@@ -19,10 +19,9 @@ export function terminalEventStream(context: Context, manager: TerminalSessionMa
     });
     stream.onAbort(() => unsubscribe?.());
     try {
-      const replayThrough = replay.at(-1)?.seq;
       for (const event of replay) {
         if (stream.aborted) return;
-        await write(event, replayThrough);
+        await write(event);
       }
       for (const event of pending) {
         if (stream.aborted) return;

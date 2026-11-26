@@ -84,7 +84,6 @@ export type LaunchResidueView = {
   abandoned: LaunchAbandonment | null;
 };
 
-export type TerminalEvent = { replayThrough?: number } & (
+export type TerminalEvent =
   | { seq: number; type: "data"; data: string }
-  | { seq: number; type: "exit"; exitCode: number; signal?: number }
-);
+  | { seq: number; type: "exit"; exitCode: number; signal?: number };

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { TerminalSessionManager } from "../../server/src/terminal.ts";
 import { terminalInputChunks } from "../src/workspace/terminalInput.ts";
 import { launchChrome } from "./dom-stage.mjs";
+import { fetchesSettled, outlastPageTimers, trackFetches } from "./wait-until.mjs";
 import { build, preview } from "vite";
 import { webkit } from "playwright-core";
 import { Hono } from "hono";
@@ -30,7 +31,14 @@ if (zsh) {
   process.env.EDITOR = "vi";
   process.env.VISUAL = "vi";
   writeFileSync(join(scratch, ".zshenv"), "export NAVI_TEST_ZSHENV=loaded\n");
-  writeFileSync(join(scratch, ".zshrc"), "unset HISTFILE\nbindkey -M viins '^H' backward-kill-word\n");
+  writeFileSync(join(scratch, ".zshrc"), [
+    "unset HISTFILE",
+    "bindkey -M viins '^H' backward-kill-word",
+    "printf '\\033[3;4H\\033[6n'",
+    "if IFS= read -rst 3 -d R reply && [[ $reply == $'\\e[3;4' ]]; then",
+    "  printf '\\r\\n_STARTUP_ANSWER__\\n'",
+    "fi",
+  ].join("\n") + "\n");
 }
 const manager = new TerminalSessionManager();
 const projectId = "terminal-interaction";
@@ -67,6 +75,12 @@ async function handleBackendRequest(request, response) {
   if (path.startsWith(base)) {
     const [, sessionId, action] = path.slice(base.length).split("/");
     if (action === "events") {
+      if (zsh && !outputOf(sessionId).includes("_STARTUP_ANSWER__") && !streams.some((entry) => entry.sessionId === sessionId)) {
+        const until = Date.now() + 3500;
+        while (!outputOf(sessionId).includes("_STARTUP_ANSWER__") && Date.now() < until) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
       streamResponses.set(sessionId, response);
       return eventRequest(request, response);
     }
@@ -79,14 +93,14 @@ async function handleBackendRequest(request, response) {
       return json(await manager.createAsync(projectId, scratch, { ...body, ...options }));
     }
     if (action === "input") {
-      inputs.push({ sessionId, data: body.data });
+      if (body.data) inputs.push({ sessionId, data: body.data });
       if (Buffer.byteLength(body.data) > 64 * 1024) return json({ error: "data too large" }, 413);
-      manager.write(sessionId, projectId, body.data);
+      manager.write(sessionId, projectId, body.data, body.focused);
       return json({});
     }
     if (action === "resize") {
       sizes.set(sessionId, body);
-      manager.resize(sessionId, projectId, body.cols, body.rows);
+      manager.resize(sessionId, projectId, body.cols, body.rows, body.theme);
       return json({});
     }
     if (request.method === "DELETE") { await manager.destroy(sessionId, projectId); return json({}); }
@@ -174,6 +188,11 @@ try {
 async function runBrowser() {
   browser = browserEngine === "webkit" ? await webkit.launch() : await launchChrome();
   const page = await browser.newPage({ viewport: { width: 1100, height: 850 } });
+  await trackFetches(page, "/terminal/sessions");
+  const settleTerminalRequests = async () => {
+    await outlastPageTimers(page, 80);
+    await fetchesSettled(page);
+  };
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
@@ -206,7 +225,8 @@ async function runBrowser() {
   };
   await waitFor(() => manager.listForProject(projectId).length === 1, "shell created");
   const first = manager.listForProject(projectId)[0].id;
-  await waitFor(() => outputOf(first).length > 0, "shell prompt");
+  await waitFor(() => zsh ? outputOf(first).includes("_STARTUP_ANSWER__") && outputOf(first).includes("\x1b[?2004h") : outputOf(first).length > 0, "shell prompt and startup query reply");
+  if (zsh) await waitFor(() => viewport.innerText().then((text) => text.includes("_STARTUP_ANSWER__")), "startup output rendered");
   await input.focus();
   await page.keyboard.type("discard-me");
   await page.keyboard.press("Control+k");
@@ -249,6 +269,7 @@ async function runBrowser() {
 
     const firstTab = () => page.getByRole("button", { name: /^交互验证（/ });
     const beforeReload = inputs.length;
+    await settleTerminalRequests();
     await page.reload();
     await page.getByRole("button", { name: "终端", exact: true }).click();
     await firstTab().click();
@@ -264,7 +285,50 @@ async function runBrowser() {
     await page.keyboard.type("printf '\\033[?12$p'; IFS= read -rst 3 -d y reply; printf '\\137LIVE_%s__\\n' \"$?\"");
     await page.keyboard.press("Enter");
     await waitFor(() => outputOf(first).includes("\x1b[?12$p_LIVE_0__\r\n"), "live terminal query received an answer");
-    assert.match(inputs.slice(beforeLiveQuery).map((entry) => entry.data).join(""), /\x1b\[\?12;\d+\$y/);
+    assert.doesNotMatch(inputs.slice(beforeLiveQuery).map((entry) => entry.data).join(""), /\x1b\[\?12;\d+\$y/, "live queries are answered by the session, not the browser");
+
+    const secondTab = () => page.getByRole("button", { name: /^交互验证 2（/ });
+    for (const mode of ["HIDDEN", "OTHER_TAB", "RECONNECT"]) {
+      const streamCount = streams.filter((entry) => entry.sessionId === first).length;
+      const beforeQuery = inputs.length;
+      const command = `printf '\\137ARMED_${mode}__\\n'; read -r trigger; printf '\\033[4;7H\\033[6'; sleep 0.05; printf n; if IFS= read -rst 2 -d R reply && [[ $reply == $'\\e[4;7' ]]; then printf '\\r\\n\\137ANSWER_${mode}__\\n'; fi`;
+      await page.keyboard.type(command);
+      await page.keyboard.press("Enter");
+      await waitFor(() => outputOf(first).includes(`\r\n_ARMED_${mode}__\r\n`), "query command waiting for trigger");
+      if (mode === "HIDDEN") {
+        await page.getByRole("button", { name: "收起终端（shell 与服务继续跑）" }).click();
+      } else if (mode === "OTHER_TAB") {
+        await secondTab().click();
+      } else {
+        await settleTerminalRequests();
+        streamResponses.get(first).destroy();
+      }
+      manager.write(first, projectId, "\r");
+      await waitFor(() => outputOf(first).includes(`\r\n_ANSWER_${mode}__\r\n`), `correct cursor report before reattach (${mode})`);
+      assert.equal(streams.filter((entry) => entry.sessionId === first).length, streamCount, "query resolved before reconnect");
+      if (mode === "HIDDEN") await page.getByRole("button", { name: "终端", exact: true }).click();
+      if (mode === "OTHER_TAB") await firstTab().click();
+      await waitFor(() => viewport.innerText().then((text) => text.includes(`_ANSWER_${mode}__`)), "query outcome replays");
+      assert.doesNotMatch(inputs.slice(beforeQuery).map((entry) => entry.data).join(""), /\x1b\[\d+;\d+R/);
+      await input.focus();
+    }
+
+    const otherPage = await browser.newPage({ viewport: { width: 1100, height: 850 } });
+    try {
+      await otherPage.goto(`${web.origin}/scripts/fixtures/terminal-interaction.html`);
+      await otherPage.getByRole("button", { name: "终端", exact: true }).click();
+      await otherPage.getByRole("button", { name: /^交互验证（/ }).click();
+      const otherTerminal = otherPage.locator(".project-terminal__viewport:not([hidden])");
+      await waitFor(() => otherTerminal.innerText().then((text) => text.includes("_ANSWER_RECONNECT__")), "second window caught up");
+      const beforeDual = inputs.length;
+      manager.write(first, projectId, "printf '\\033[6n'; IFS= read -rst 2 -d R reply; firstReply=$?; IFS= read -rst 1 -d R repeated; printf '\\r\\n\\137DUAL_%s_%s__\\n' \"$firstReply\" \"$?\"\r");
+      await waitFor(() => outputOf(first).includes("_DUAL_0_1__\r\n"), "two windows see only one terminal reply");
+      assert.doesNotMatch(inputs.slice(beforeDual).map((entry) => entry.data).join(""), /\x1b\[\d+;\d+R/);
+    } finally {
+      await otherPage.close();
+    }
+    await input.focus();
+    console.log("PASS: terminal protocol answers before attach, offline, after tab switch, and once across windows");
 
     const paste = async (text) => input.evaluate((element, text) => {
       const clipboardData = new DataTransfer();
@@ -320,6 +384,7 @@ async function runBrowser() {
       await waitFor(() => viewport.innerText().then((text) => text.includes(`_ALT_${mode}__`)), "alternate screen before history gap");
       const lastBeforeGap = manager.eventsAfter(first, projectId, 0).at(-1).seq;
       if (automatic) {
+        await settleTerminalRequests();
         streamResponses.get(first).destroy();
       } else {
         await page.getByRole("button", { name: "收起终端（shell 与服务继续跑）" }).click();
@@ -349,6 +414,11 @@ async function runBrowser() {
   await page.getByRole("button", { name: "纸白", exact: true }).click();
   await page.getByRole("button", { name: "16 像素", exact: true }).click();
   await waitFor(() => page.locator(".project-terminal").evaluate((element) => getComputedStyle(element).backgroundColor === "rgb(245, 242, 235)"), "paper theme applied");
+  if (zsh) {
+    await waitFor(() => sizes.get(first)?.theme === "paper", "paper palette synced to the PTY");
+    manager.write(first, projectId, "printf '\\033]11;?\\007'; IFS= read -rst 2 -d '\\' reply; case $reply in (*rgb:f5f5/f2f2/ebeb*) printf '\\r\\n\\137PALETTE_OK__\\n';; esac\r");
+    await waitFor(() => outputOf(first).includes("_PALETTE_OK__\r\n"), "OSC color query uses the active palette");
+  }
   await page.keyboard.press("Escape");
   assert.equal(manager.get(first, projectId).exitCode, null);
   assert.equal(streams.length, connections);
@@ -372,6 +442,7 @@ async function runBrowser() {
     await page.getByRole("button", { name: /^交互验证（已退出）/ }).waitFor();
     console.log("PASS: exited shell stays exited after reconnecting");
   }
+  await settleTerminalRequests();
   await page.reload();
   await page.getByRole("button", { name: "终端", exact: true }).click();
   await page.getByRole("button", { name: "终端外观", exact: true }).click();
@@ -382,6 +453,7 @@ async function runBrowser() {
     const bounds = element.getBoundingClientRect();
     return bounds.left >= 0 && bounds.right <= innerWidth;
   }));
+  await settleTerminalRequests();
   assert.equal(await page.getByTestId("notices").textContent(), "");
   assert.deepEqual(errors, []);
   console.log("PASS: terminal key ownership, themes, font sizes, persistence, narrow layout, no session recreation");

@@ -3,8 +3,13 @@ import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { IPty, IPtyForkOptions } from "node-pty";
+import type { TerminalTheme } from "@navi/shared/terminal-themes";
 
-export type TerminalProcess = Pick<IPty, "pid" | "onData" | "onExit" | "write" | "resize" | "kill"> & { ptsName?: string };
+export type TerminalProcess = Pick<IPty, "pid" | "onData" | "onExit" | "kill"> & {
+  ptsName?: string;
+  write(data: string, focused?: boolean): void;
+  resize(cols: number, rows: number, theme?: TerminalTheme): void;
+};
 
 export function spawnWindowsPty(
   file: string,
