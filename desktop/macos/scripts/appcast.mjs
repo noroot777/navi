@@ -6,22 +6,12 @@
 // sign_update 签 appcast 时会把整份 XML 重新排版（属性顺序、开头那行都会变），并在头尾加上
 // 签名注释。所以这里读旧 appcast 只认元素、不认格式：每个 <item> 原样保留，只从里面取
 // <sparkle:version>；写的时候整份重新生成、去掉旧签名，交给 sign_update 重签。
+import { compareVersions } from "../../shared/release-version.mjs";
+
+export { compareVersions };
 
 const SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle";
 
-export function compareVersions(a, b) {
-  const parts = (v) => String(v).split(".").map((p) => (/^\d+$/.test(p) ? Number(p) : p));
-  const x = parts(a);
-  const y = parts(b);
-  for (let i = 0; i < Math.max(x.length, y.length); i++) {
-    const p = x[i] ?? 0;
-    const q = y[i] ?? 0;
-    if (p === q) continue;
-    if (typeof p === "number" && typeof q === "number") return p < q ? -1 : 1;
-    return String(p) < String(q) ? -1 : 1;
-  }
-  return 0;
-}
 
 /** 旧 appcast 里的各版本：[{ version, xml }]，按文件里的顺序。 */
 export function parseItems(xml) {

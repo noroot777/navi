@@ -11,6 +11,7 @@ mod paths;
 #[cfg(windows)]
 mod spawn;
 mod tray;
+mod update;
 mod window;
 
 use std::sync::Arc;
@@ -44,6 +45,7 @@ fn main() {
       }
     }))
     .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_updater::Builder::new().build())
     .manage(shell.clone())
     .invoke_handler(tauri::generate_handler![window::shell_screen, window::shell_action, window::page_report])
     .setup(move |app| {

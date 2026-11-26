@@ -2,7 +2,7 @@
 // 假壳收消息、按剧本回 started / report / action / link / menu / dialogResult；起服务和探活换成可编排的假的。
 // 覆盖首启 → 全新开始 → 认人 → 带实例号载页 → 页面表态；navi:// 在窗口里换路由或交给浏览器；页面在时端口换了人就撤页；
 // 服务重起过换实例号重载；等不到页面表态时给持久说明；第一次发布时说要等几分钟；端口被占着；「允许其他设备访问」先问再重启、
-// 点头之后名单变了要重问；页面内换了地址，浏览器入口和重载都跟着它；窗口端口认不出时说清楚、不空转。
+// 点头之后名单变了要重问、凭冻结之下的快照停（冻不了、续不上都不停）；页面内换了地址，浏览器入口和重载都跟着它；窗口端口认不出时说清楚、不空转。
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,6 +30,8 @@ function harness(name, { initialized = true, outcome, window: windowAnswer } = {
     assess: { kind: "clear", target: { kind: "ours", pid: 7 } },
     stopped: { kind: "stopped" },
     stops: [],
+    // 重启前冻结：不设 freeze 时照老版本服务走（即时再评估）；renewed 是下刀前续期的答复（null = 冻结还在）。
+    freeze: null, renewed: null, renews: [], releases: [],
   };
   const launcher = {
     isInitialized: () => initialized,
@@ -46,7 +48,14 @@ function harness(name, { initialized = true, outcome, window: windowAnswer } = {
     overrides: {
       probeWindow: async () => h.window,
       assess: async () => (typeof h.assess === "function" ? h.assess() : h.assess),
-      stop: async (target) => { h.stops.push(target); return h.stopped; },
+      freeze: async () => (h.freeze ? h.freeze() : { kind: "unfrozen", verdict: typeof h.assess === "function" ? h.assess() : h.assess }),
+      renew: async (lease, agreed) => { h.renews.push(lease); h.renewAgreed = agreed; return h.renewed; },
+      release: async (lease) => { h.releases.push(lease); },
+      stop: async (target, options) => {
+        h.stops.push(target);
+        const refused = await options?.beforeKill?.();
+        return refused ? { kind: "changed", why: refused } : h.stopped;
+      },
     },
   });
   h.receive = (message) => h.controller.receive(message);
@@ -76,6 +85,27 @@ function harness(name, { initialized = true, outcome, window: windowAnswer } = {
 }
 
 try {
+  // ── 窗口没开时点的 navi:// 链接：壳带着它起来，链接认完时首页已经在载了 ─────────────────
+  {
+    const h = harness("cold-link");
+    h.controller.start();
+    const load = await h.waitFor("load", () => h.last("load"));
+    assert.equal(load.url, `${h.cfg.windowURL}/`);
+    h.receive({ type: "started", url: load.url });
+    h.receive({ type: "link", url: "navi://open/?project=p2&task=t2&instance=ABCD-1234" });
+    await sleep(30);
+    assert.equal(h.of("route").length, 0, "页面还没表态：先不换路由");
+    h.receive({ type: "report", kind: "size:work" });
+    const route = await h.waitFor("route", () => h.last("route"));
+    assert.equal(route.route, "/?project=p2&task=t2", "这一页表态时换到链接那一页");
+    assert.equal(h.controller.state.pendingRoute, null);
+    h.receive({ type: "started", url: `${h.cfg.windowURL}/?project=p2&task=t2` });
+    h.receive({ type: "report", kind: "size:work" });
+    assert.equal(h.of("route").length, 1, "只换一次");
+    h.controller.stop();
+    console.log("✓ 冷启动带着 navi:// 链接：首页已经在载，等它表态再原地换到链接那一页");
+  }
+
   // ── 首启：小窗、问数据从哪来，「全新开始」后起服务、认人、带实例号载页 ─────────────
   {
     const h = harness("first", { initialized: false, outcome: { kind: "needsSetup" } });
@@ -279,6 +309,88 @@ try {
     await h.waitFor("重新载页", () => h.of("load").length > loads + 1);
     h.controller.stop();
     console.log("✓ 点头之后名单变了：松锁重问，取消什么都不动，同意了才停、才落设置");
+  }
+
+  // ── 重启前冻结：凭冻结之下的快照停、下刀前续期；快照多出来的放开冻结重问；冻不了、续不上都不改设置 ───────
+  {
+    const h = harness("remote-freeze");
+    h.controller.start();
+    await h.present();
+    const ours = (items) => (items ? { kind: "disrupts", target: { kind: "ours", pid: 7 }, items, instance: "one", freezable: true }
+      : { kind: "clear", target: { kind: "ours", pid: 7 }, instance: "one", freezable: true });
+    const settings = () => (existsSync(h.cfg.settingsFile) ? JSON.parse(readFileSync(h.cfg.settingsFile, "utf8")).allowOtherDevices : undefined);
+
+    // 冻不了：不停、不改设置，原因原样说出来
+    h.assess = ours();
+    h.freeze = () => ({ kind: "refused", why: "另一处正在准备重启服务" });
+    h.receive({ type: "menu", id: "toggleRemote" });
+    let dialog = await h.waitFor("确认框", () => h.last("dialog"));
+    assert.doesNotMatch(dialog.detail, /不支持重启前冻结/, "认冻结的服务不提这句");
+    h.receive({ type: "dialogResult", id: dialog.id, index: 0 });
+    let refusal = await h.waitFor("没切换的说明", () => h.of("dialog").find((m) => m.title === "没有切换"));
+    assert.match(refusal.detail, /冻结不了接活（另一处正在准备重启服务）[\s\S]*设置没改/);
+    assert.equal(h.stops.length, 0, "冻不了就不停");
+    assert.equal(settings(), undefined);
+    h.receive({ type: "dialogResult", id: refusal.id, index: 0 });
+    await h.waitFor("菜单恢复", () => h.last("menu").remote.enabled === true);
+
+    // 冻结之下多出了一个：放开冻结、松锁重问；取消就什么都不动
+    const lease = { token: "lease-1" };
+    h.freeze = () => ({ kind: "frozen", lease, verdict: ours([{ id: "late", title: "冻结时才看到的任务", why: "会被判失败：正在起跑" }]) });
+    h.receive({ type: "menu", id: "toggleRemote" });
+    dialog = await h.waitFor("确认框", () => h.of("dialog").find((m) => m.id > refusal.id));
+    h.receive({ type: "dialogResult", id: dialog.id, index: 0 });
+    const again = await h.waitFor("重问", () => h.of("dialog").find((m) => m.id > dialog.id));
+    assert.match(again.detail, /确认之后情况变了[\s\S]*冻结时才看到的任务/);
+    assert.deepEqual(h.releases, [lease], "重问之前冻结当场放开，不让它冻着等用户");
+    assert.equal(activeHold(h.cfg), null, "重问时维护锁已经松开");
+    assert.equal(h.stops.length, 0);
+    const loads = h.of("load").length;
+    h.receive({ type: "dialogResult", id: again.id, index: 1 });
+    await h.waitFor("取消后回到页面", () => h.of("load").length > loads);
+    assert.equal(settings(), undefined);
+
+    // 下刀前续期没续上：不停、放开冻结、不改设置
+    h.releases = [];
+    h.freeze = () => ({ kind: "frozen", lease, verdict: ours() });
+    h.renewed = "冻结已经失效（到期了，或者被放掉了）";
+    h.receive({ type: "menu", id: "toggleRemote" });
+    dialog = await h.waitFor("确认框", () => h.of("dialog").find((m) => m.id > again.id));
+    h.receive({ type: "dialogResult", id: dialog.id, index: 0 });
+    refusal = await h.waitFor("没切换的说明", () => h.of("dialog").find((m) => m.id > dialog.id && m.title === "没有切换"));
+    assert.match(refusal.detail, /冻结已经失效/);
+    assert.deepEqual(h.renews, [lease], "下刀前续了一次期");
+    assert.deepEqual(h.releases, [lease], "没停成就放开冻结");
+    assert.equal(settings(), undefined, "没停成就不改设置");
+    h.receive({ type: "dialogResult", id: refusal.id, index: 0 });
+    await h.waitFor("菜单恢复", () => h.last("menu").remote.enabled === true);
+
+    // 冻住了、名单没多：续期之后停，停成了不再放（服务退了冻结跟着没了），落设置
+    h.renews = [];
+    h.releases = [];
+    h.renewed = null;
+    h.stops = [];
+    h.receive({ type: "menu", id: "toggleRemote" });
+    dialog = await h.waitFor("确认框", () => h.of("dialog").find((m) => m.id > refusal.id));
+    h.receive({ type: "dialogResult", id: dialog.id, index: 0 });
+    await h.waitFor("停了", () => h.stops.length === 1 && settings() === true);
+    assert.deepEqual(h.renews, [lease]);
+    assert.equal(h.renewAgreed?.target?.kind, "ours", "续期拿用户点头的那份判断去比此刻的名单");
+    assert.deepEqual(h.releases, [], "停成了不用放");
+    h.controller.stop();
+
+    // 老版本服务（判据里没有协议号）：确认框里如实说这一下堵不上
+    const old = harness("remote-old-server");
+    old.controller.start();
+    await old.present();
+    old.assess = { kind: "clear", target: { kind: "ours", pid: 7 }, instance: "one", freezable: false };
+    old.receive({ type: "menu", id: "toggleRemote" });
+    const told = await old.waitFor("确认框", () => old.last("dialog"));
+    assert.match(told.detail, /这一版服务不支持重启前冻结/);
+    old.receive({ type: "dialogResult", id: told.id, index: 1 });
+    await old.waitFor("菜单恢复", () => old.last("menu").remote.enabled === true);
+    old.controller.stop();
+    console.log("✓ 重启前冻结：冻不了不停，快照多出来的放开冻结重问，续不上不停，冻住且没多才停；老版本服务如实说堵不上");
   }
 
   // ── 主端口好好的、窗口端口认不出：说清楚，隔一阵探一次，通了再载；不一圈圈地重起 ─────────

@@ -7,28 +7,35 @@
 //   { type: "route", route }                   页面在着时原地换路由（推一条历史、发一次 popstate，同 web 的 navigation.ts）
 //   { type: "reload" } { type: "window", size } { type: "front" } { type: "openExternal", url } { type: "openPath", path }
 //   { type: "dialog", id, title, detail, buttons }  弹原生对话框，壳回 { type: "dialogResult", id, index }
-//   { type: "menu", remote, login }            托盘菜单里两个勾此刻的样子
+//   { type: "menu", remote, login, switch }    托盘菜单里两个勾此刻的样子，和「切换到新版服务…」在不在（handover.mjs）
+//   { type: "updateCheck" | "updateInstall" | "updateCancel" }   查、装、取消更新（updates.mjs，壳回 updateResult / updateProgress / updateCancelResult）
 // 壳发来的：started（主框架开始载一份文档）、report（页面表态：size:<setup|work> / titlebar / broken:<地址>；
 //   url:<地址> 是页面内换了地址，不换文档）、
 //   navigationBlocked（壳的导航前认人没过）、action（本地那一屏上的按钮）、menu（托盘菜单）、link（navi:// 链接）、dialogResult。
 import { mkdirSync } from "node:fs";
 import { runtimeId } from "./config.mjs";
 import { decideLink, parseLink } from "./deep-link.mjs";
+import { createHandover } from "./handover.mjs";
+import { forgetUnfinished, noteUnfinished, readUnfinished } from "./handover-duty.mjs";
 import { isServing, mismatch, ours, probe as probeHealth } from "./health.mjs";
 import { activeHold, beginMaintenance } from "./maintenance.mjs";
-import { assessImpact, stopServer, widened } from "./restart.mjs";
+import { assessImpact, freezeImpact, releaseFreeze, renewFreeze, stopServer, widened } from "./restart.mjs";
 import { allowsOtherDevices, writeSettings } from "./settings.mjs";
+import { createUpdates } from "./updates.mjs";
 
 export const INSTANCE_COOKIE = "navi_instance";
 /** 新文档开始载入后最多等它多久表态。认约定的页面身份确认通常在一秒内；再久就是出事了。 */
 const PRESENT_TIMEOUT_MS = 15_000;
 
-export function createController({ cfg, send, launcher, loginItem, timing = {}, overrides = {} }) {
+export function createController({ cfg, send, launcher, loginItem, log = () => {}, updatesEnabled, timing = {}, overrides = {} }) {
   const deps = {
     probeMain: () => probeHealth(cfg.baseURL),
     probeWindow: () => probeHealth(cfg.windowURL),
     assess: () => assessImpact(cfg),
-    stop: (target) => stopServer(cfg, target),
+    freeze: () => freezeImpact(cfg, { assess: () => deps.assess() }),
+    renew: renewFreeze,
+    release: releaseFreeze,
+    stop: (target, options) => stopServer(cfg, target, options),
     ...overrides,
   };
   const t = { guard: 1_000, poll: 2_000, starting: 400, present: PRESENT_TIMEOUT_MS, holdRetry: 2_000, ...timing };
@@ -36,8 +43,46 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
     generation: 0, bound: null, pageURL: null, resumeURL: null, pendingRoute: null,
     document: 0, presentation: "invalid", handoff: null, screen: null, actions: new Map(),
     guard: null, guardProbing: false, unreachable: 0, poll: null, starting: null,
-    linkSerial: 0, welcoming: null, served: null, remoteBusy: false, dialogs: new Map(), dialogSerial: 0,
+    linkSerial: 0, welcoming: null, served: null, remoteBusy: false, dialogs: new Map(), dialogSerial: 0, unfinished: null,
   };
+  const handover = createHandover({
+    cfg,
+    timing: { poll: t.handover ?? 5_000, ...t.handoverTiming },
+    busy: () => occupied(),
+    overrides: overrides.handover,
+    ui: {
+      log, menu: () => pushMenu(), hold: (title, detail) => showInstalling(title, detail), release: () => loadHome(),
+      ask: (...args) => ask(...args), alert: (...args) => alert(...args),
+    },
+  });
+  const updates = createUpdates({
+    cfg, send, enabled: updatesEnabled, timing: t.updates,
+    busy: () => occupied(),
+    ui: {
+      log, ask: (...args) => ask(...args), alert: (...args) => alert(...args), done: () => loadHome(),
+      progress: (version, progress, cancel) => showInstalling(...downloadScreen(version, progress), cancel ? [{ id: "cancelUpdate", title: "取消", run: cancel }] : []),
+    },
+  });
+
+  /**
+   * 谁这会儿占着窗口那一屏、要让服务换一换：下更新、换到新版服务、按新设置重启服务。三件事互斥 —— 谁都会盖上自己那一屏、
+   * 做完再载回工作区，半路被另一件盖掉，取消按钮、进度就没了，或者两边一起去停服务。开始之前问这里，有人占着就说是谁。
+   */
+  function occupied() {
+    const update = updates.stage;
+    if (update) return update.phase === "installing" ? `正在安装 Navi ${update.version}` : `正在下载 Navi ${update.version} 的更新`;
+    if (handover.state.phase === "switching") return "正在切换到新版服务";
+    if (state.remoteBusy) return "正在改「允许其他设备访问」";
+    return null;
+  }
+
+  /** 下载更新那一屏：下载中（有总长度报百分比，没有就报收到多少）/ 正在取消 / 已经在装。 */
+  function downloadScreen(version, { phase, percent, received }) {
+    if (phase === "installing") return [`正在安装 Navi ${version}`, "已经下完、验过签，正在交给安装程序，这一步取消不了。装完 Navi 会自己重新打开。"];
+    if (phase === "cancelling") return [`正在取消下载 Navi ${version}`, "等下载停下来就回到工作区。"];
+    const done = Number.isFinite(percent) ? `${percent}%，` : received ? `已收到 ${(received / 1024 / 1024).toFixed(1)} MB，` : "";
+    return [`正在下载 Navi ${version}`, `${done}下完自动安装，Navi 会自己重新打开。在跑的服务和任务都不停。`];
+  }
 
   const sameOrigin = (url) => {
     try { return new URL(url).origin === new URL(cfg.windowURL).origin; } catch { return false; }
@@ -54,9 +99,9 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
 
   const retry = () => ({ id: "retry", title: "重试", run: () => loadHome() });
 
-  function showInstalling(title, detail = "完成后自动回到工作区。") {
+  function showInstalling(title, detail = "完成后自动回到工作区。", actions = []) {
     resetPageConnection();
-    show({ kind: "offline", title, detail, busy: true });
+    show({ kind: "offline", title, detail, busy: true }, actions);
   }
 
   // ── 认人、起服务、载页面 ───────────────────────────────────────────────
@@ -96,6 +141,7 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
   }
 
   function present(outcome) {
+    if (state.unfinished) void tellUnfinished(outcome);
     if (outcome.kind === "ready") {
       observe(outcome.instance);
       return void loadPage();
@@ -108,6 +154,16 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
     const actions = [{ id: "logs", title: "日志", run: openLogs }, retry()];
     show({ kind: "offline", title: "Navi 服务没起来", detail: outcome.message }, actions);
     startPolling(cfg.baseURL);
+  }
+
+  /** 上次退出时新版服务没起来（纸条见 handover-duty.mjs）：这次起服务有了结局再照实说，说过了才删纸条。 */
+  async function tellUnfinished(outcome) {
+    const note = state.unfinished;
+    state.unfinished = null;
+    const now = outcome.kind === "ready" ? "这次打开时服务已经起来了。" : "这次打开时服务也还没起来，窗口里写着原因；托盘菜单「日志」里有服务日志。";
+    await alert("上次退出时新版服务没起来", `${note.why}\n\n${now}`);
+    const failed = forgetUnfinished(cfg);
+    if (failed) log(`纸条删不掉（下次打开会再说一遍）：${failed}`);
   }
 
   function showFirstRun(problem = null) {
@@ -171,6 +227,7 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
   function observe(instance) {
     state.served = instance;
     pushMenu();
+    handover.observe(instance);
   }
 
   /** 端口上不再是认过的那一份：页面连同它的轮询、SSE 一起撤掉（一个请求都不再发给新来的那份），记下路由，回到 loadHome 认一遍。 */
@@ -283,7 +340,19 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
     if (state.handoff && state.handoff.document !== state.document) return;
     clearTimeout(state.handoff?.timer);
     state.handoff = null;
-    if (!state.screen) state.presentation = "presented";
+    if (state.screen) return;
+    state.presentation = "presented";
+    if (state.pendingRoute && sameOrigin(state.pendingRoute)) {
+      const url = state.pendingRoute;
+      state.pendingRoute = null;
+      routeTo(url);
+    }
+  }
+
+  function routeTo(url) {
+    const target = new URL(url);
+    state.pageURL = url;
+    send({ type: "route", route: `${target.pathname}${target.search}${target.hash}` });
   }
 
   // 「仍然显示页面」给不报尺寸的旧版服务留一条明确的路：再载一次、不再等它表态。
@@ -332,12 +401,11 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
       state.pendingRoute = null;
       send({ type: "openExternal", url: action.url });
     } else if (action.kind === "window") {
-      // 页面在着就原地换路由，不重载；页面还没载进来（服务在起、被占着、首启）就记下，载页面时直接载到那里。
-      if (hasPresentedPage()) {
-        state.pageURL = `${cfg.windowURL}${action.route}`;
-        send({ type: "route", route: action.route });
-      }
-      else state.pendingRoute = `${cfg.windowURL}${action.route}`;
+      // 页面在着就原地换路由，不重载；页面还没载进来（服务在起、被占着、首启）就记下：载页面时直接载到那里，
+      // 已经在载的那一页（窗口没开时点的链接：壳带着它起来，启动流程先把首页载上了）表态时再换过去。
+      const url = `${cfg.windowURL}${action.route}`;
+      if (hasPresentedPage()) routeTo(url);
+      else state.pendingRoute = url;
     }
   }
 
@@ -356,6 +424,7 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
         enabled: cfg.isLocal && !state.remoteBusy,
       },
       login: { checked: loginEnabled === true, enabled: Boolean(cfg.shellExe) && loginEnabled !== null },
+      switch: handover.menu(),
     });
   }
 
@@ -397,11 +466,15 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
   // 只停评估过的那一份，**确认停下之后、松开维护锁之前**才把新设置落盘，再按它起。中途在哪一步退出，留下的设置和
   // 服务都对得上；没停成就什么都不改。
   //
-  // 确认框可能开着好一阵，这期间别处又起了任务，用户点头时看到的名单就过时了。所以攥住维护锁之后、停服务之前再
-  // 评估一次（widened），多出了他没同意过的影响就松锁、把新名单重新摆给他。这只把窗口从「确认框开着的那段时间」
-  // 收窄到「再评估到停下之间」那一下：服务端没有「先停止接活、再给影响快照」的关口，这一下仍然挡不住。
+  // 确认框可能开着好一阵，这期间别处又起了任务，用户点头时看到的名单就过时了。所以攥住维护锁之后、停服务之前先让
+  // 服务冻结接活、拿冻结之下的快照（freezeImpact，server/src/restart-freeze.ts），多出了他没同意过的影响（widened）
+  // 就放开冻结、松锁、把新名单重新摆给他；没多出来就凭这份快照停，下刀前续一次期确认冻结还在、此刻的名单也没多出谁
+  // （已经在跑的 agent 中途拉起 MCP 服务端冻不住，多了就不停）。冻着的时候不起新回合，所以再评估到停下之间那一下也
+  // 堵上了。老版本服务没有这道关口：退回即时再评估，确认框里如实说这一下堵不上。
   async function toggleRemote() {
     if (state.remoteBusy) return;
+    const other = occupied();
+    if (other) return void alert("现在改不了", `${other}，等它完了再改。`);
     const hold = activeHold(cfg);
     if (hold) return void alert("现在改不了", `${hold}。等它完了再改。`);
     state.remoteBusy = true;
@@ -417,19 +490,30 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
       let changed = null;
       try {
         const end = await beginMaintenance(cfg, "正在按新设置重启 Navi 服务…", 50_000);
+        let lease = null;
         try {
-          const now = await deps.assess();
-          if (widened(verdict, now)) changed = now;
+          const frozen = await deps.freeze();
+          if (frozen.kind === "refused") failure = `服务这会儿冻结不了接活（${frozen.why}），这次没有重启。`;
           else {
-            const stopped = await deps.stop(verdict.target ?? null);
-            if (stopped.kind === "stopped") {
-              state.served = null;
-              writeSettings(cfg, { allowOtherDevices: enable });
-            } else {
-              failure = stopped.kind === "changed" ? `评估之后端口上的服务变了（${stopped.why}），这次没有重启。` : stopped.why;
+            lease = frozen.lease ?? null;
+            if (widened(verdict, frozen.verdict)) changed = frozen.verdict;
+            else {
+              const beforeKill = lease ? () => deps.renew(lease, verdict) : undefined;
+              const stopped = await deps.stop(verdict.target ?? null, { beforeKill });
+              if (stopped.kind === "stopped") {
+                lease = null; // 服务退了，冻结跟着没了
+                state.served = null;
+                writeSettings(cfg, { allowOtherDevices: enable });
+              } else {
+                failure = stopped.kind === "changed" ? `评估之后服务变了（${stopped.why}），这次没有重启。` : stopped.why;
+              }
             }
           }
-        } finally { end(); }
+        } finally {
+          // 没停成（名单变了要重问、停不下来）：服务还在，冻结当场放开，被挡住的任务接着起。
+          if (lease) await deps.release(lease);
+          end();
+        }
       } catch (error) {
         failure = `没能让服务下线：${error.message}`;
       }
@@ -465,6 +549,9 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
       const more = verdict.items.length > shown.length ? [`…另有 ${verdict.items.length - shown.length} 个`] : [];
       lines.push(["要重启 Navi 服务才生效，现在重启会打断：", ...shown, ...more].join("\n"));
     } else lines.push(`要重启 Navi 服务才生效。确认不了重启会不会打断任务（${verdict.why}），按会打断对待。`);
+    if (verdict.target?.kind === "ours" && verdict.freezable === false) {
+      lines.push("这一版服务不支持重启前冻结：确认之后到停下之间新起的任务不在上面，也会被打断。");
+    }
     return (await ask(title, lines.join("\n\n"), [primary, "取消"])) === 0;
   }
 
@@ -487,6 +574,8 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
     toggleRemote: () => void toggleRemote(),
     toggleLogin: () => void toggleLogin(),
     about: () => void about(),
+    checkUpdates: () => updates.checkNow(),
+    switchRuntime: () => handover.reconsider(),
   };
 
   function receive(message) {
@@ -497,6 +586,7 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
       case "action": return state.actions.get(message.id)?.();
       case "menu": return menuActions[message.id]?.();
       case "link": return void openLink(String(message.url ?? ""));
+      case "updateResult": case "updateProgress": case "updateCancelResult": return updates.receive(message);
       case "dialogResult": {
         const resolve = state.dialogs.get(message.id);
         state.dialogs.delete(message.id);
@@ -511,6 +601,7 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
     /** 壳起来时调一次：先定窗口大小（数据根还空着就开成首启那扇小窗），再走一遍 loadHome。 */
     start() {
       window(cfg.isLocal && !launcher.isInitialized() ? "setup" : "work");
+      state.unfinished = cfg.isLocal ? readUnfinished(cfg) : null;
       loadHome();
       setTimeout(() => {
         if (cfg.shellExe) {
@@ -518,8 +609,29 @@ export function createController({ cfg, send, launcher, loginItem, timing = {}, 
         }
         refreshLogin();
       }, 0);
+      updates.start();
     },
-    stop() { resetPageConnection(); },
+    stop() {
+      resetPageConnection();
+      updates.stop();
+      handover.stop();
+    },
+    /**
+     * 壳没了（关掉、崩了，stdin 断了）：别的都停；正在切换服务就等这一趟做完，旧服务已经交出去了就先把新版起起来。
+     * 旧服务停了以后能起新版的只有这里，壳退出不该把它带走 —— 不然服务一直不在，直到用户再打开 Navi。
+     */
+    async shutdown() {
+      this.stop();
+      // 安装包、卸载器这时也在等这个进程自己退（从不强杀它，installer/installdir.ps1）。
+      try { await handover.settled(); } catch (error) { log(`切换收尾出错：${error.message}`); }
+      if (!handover.successorPending()) return;
+      log("壳退出了，旧服务已经交出去：先把新版服务起起来再退");
+      const result = await handover.discharge((left) => launcher.ensureRunning(left));
+      if (result.ok) return log("新版服务起来了");
+      log(`新版服务没起来：${result.why}`);
+      // 这时没有窗口可说：留张纸条，下次打开 Navi 时告诉用户（那一次照常会再起服务）。
+      try { noteUnfinished(cfg, result.why); } catch (error) { log(`纸条也没留下：${error.message}`); }
+    },
     state,
   };
 }

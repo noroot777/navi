@@ -3,7 +3,12 @@
 //
 //   WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs [运行时目录]   # 缺省 desktop/windows/build/runtime
 //   WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs --shell [便携版目录]   # 缺省 desktop/windows/build/Navi
+//   WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs --install <演练载荷>   # drill-build.mjs 做的，跑 install-check.mjs
 //   WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs --reclaim      # 只清上次没清完的对端目录和本机暂存
+//
+// --install 送的是两版演练安装包和本地更新源，在那边跑 install-check.mjs：装旧版 → 首启 → 终端里一直跑着命令 →
+// 自动查到新版、点「现在更新」→ 终端没断、新壳等着 → 关终端后换到新运行时 → navi:// 三种情形 → 卸载后服务和数据还在。
+// 对端目录的 <id> 是做载荷时定的（演练安装包里编进了这个目录下的 LOCALAPPDATA），从载荷的 drill.json 里取。
 //
 // --shell 送的是 build-shell.mjs 出的便携版（Navi.exe + runtime\），在那边用它自带的 node 跑 shell-check.mjs：
 // 首启、认人、关窗、单实例转链接、壳被强杀、再打开、4317 被占（只读它的 /api/health）。
@@ -19,7 +24,7 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { cpSync, createReadStream, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { cpSync, createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -35,10 +40,10 @@ const REPO = resolve(HERE, "../../..");
 const TOOLS = [
   "desktop/shared/runtime-store.mjs", "desktop/shared/runtime-smoke.mjs", "desktop/shared/scratch.mjs",
   "desktop/windows/scripts/smoke-runtime.mjs", "desktop/windows/scripts/binary-check.mjs", "desktop/windows/scripts/layout.mjs",
-  "desktop/windows/scripts/process-job.mjs", "desktop/windows/scripts/shell-check.mjs",
+  "desktop/windows/scripts/process-job.mjs", "desktop/windows/scripts/shell-check.mjs", "desktop/windows/scripts/install-check.mjs",
 ];
-// 测试机上光是把运行时拷进发布目录就要近十分钟（上万个小文件，实测 17:24→17:34），整趟给半小时。
-const TIMEOUT_MS = Number(process.env.NAVI_WIN_SMOKE_TIMEOUT_MS || 30 * 60_000);
+// 测试机上光是把运行时拷进发布目录就要近十分钟（上万个小文件，实测 17:24→17:34），整趟给半小时；演练要发布两版，给 80 分钟。
+const TIMEOUT_MS = Number(process.env.NAVI_WIN_SMOKE_TIMEOUT_MS || (process.argv[2] === "--install" ? 80 : 30) * 60_000);
 // 记账时就把目标机器定下来：回收时按账上的地址去，不看那时的环境变量。
 const HOST = DEFAULT_HOST;
 
@@ -47,18 +52,23 @@ const pending = await reclaimPending({ exec: rexec, closeSession });
 for (const directory of reclaimScratch(tmpdir(), "navi-win-remote-smoke-").removed) console.log(`✓ 收掉上一次留下的本机暂存 ${directory}`);
 if (process.argv[2] === "--reclaim") process.exit(pending ? 1 : 0);
 
+const install = process.argv[2] === "--install";
 const shell = process.argv[2] === "--shell";
-// 送过去的那一份：冒烟是运行时目录本身，--shell 是便携版（运行时在它的 runtime\ 里）。对端都解到 <root>\runtime。
-const runtime = resolve((shell ? process.argv[3] : process.argv[2]) || join(HERE, "..", "build", shell ? "Navi" : "runtime"));
+// 送过去的那一份：冒烟是运行时目录本身，--shell 是便携版（运行时在它的 runtime\ 里），--install 是演练载荷。对端都解到 <root>\runtime。
+const runtime = resolve(((shell || install) ? process.argv[3] : process.argv[2]) || join(HERE, "..", "build", shell ? "Navi" : "runtime"));
 const sealed = shell ? join(runtime, "runtime") : runtime;
-if (!existsSync(join(sealed, ".runtime.json")) || (shell && !existsSync(join(runtime, "Navi.exe")))) {
+if (install && !existsSync(join(runtime, "drill.json"))) {
+  console.error(`✕ ${runtime} 不是演练载荷：先跑 node desktop/windows/scripts/drill-build.mjs`);
+  process.exit(2);
+}
+if (!install && (!existsSync(join(sealed, ".runtime.json")) || (shell && !existsSync(join(runtime, "Navi.exe"))))) {
   console.error(`✕ ${runtime} 不是${shell ? "便携版：先跑 node desktop/windows/scripts/build-shell.mjs" : "封好的运行时：先跑 node desktop/windows/scripts/bundle-runtime.mjs"}`);
   process.exit(2);
 }
 
 
 // 暂存目录、账、HTTP 服务都在下面那段 try 里才建出来，哪一步失败都走同一段 settle：建出来几样就收几样。
-const id = randomBytes(6).toString("hex");
+const id = install ? JSON.parse(readFileSync(join(runtime, "drill.json"), "utf8")).id : randomBytes(6).toString("hex");
 const controller = new AbortController();
 let staging;
 let record;
@@ -118,7 +128,7 @@ try {
   server.listen(0, "0.0.0.0");
   await once(server, "listening");
   const url = `http://${detectLocalAddress()}:${server.address().port}/${secret}/bundle.tgz`;
-  console.log(`▶ 送 ${(size / 1024 / 1024).toFixed(1)} MB 到对端 %TEMP%\\${remoteRootName(id)}，在那边跑 ${shell ? "shell-check" : "smoke-runtime"}.mjs`);
+  console.log(`▶ 送 ${(size / 1024 / 1024).toFixed(1)} MB 到对端 %TEMP%\\${remoteRootName(id)}，在那边跑 ${install ? "install-check" : shell ? "shell-check" : "smoke-runtime"}.mjs`);
 
   main = rexec(remoteCommand(id, url), {
     timeout: TIMEOUT_MS, signal: controller.signal, host: HOST, onSession: (session) => track(record, session),
@@ -138,13 +148,15 @@ try {
 // LimitFlags 0x2000），壳在那里照设计拒绝起服务。用户从开始菜单、桌面、资源管理器打开时是 explorer 的 Job
 // （实测 0x1800：允许脱离、不连带结束）。所以经 explorer 打开一个 .vbs，由 wscript 隐藏着跑检查，这边等它写出结束码。
 // 那一路进程的命令行里同样带着目录名，清理照样认得出来。
-function outsideTerminalJob() {
+function outsideTerminalJob(script, minutes) {
   const vbs = [
     `Set sh = CreateObject("WScript.Shell")`,
     // explorer 打开文件时不带参数：目录就是脚本自己所在的那个。
     `root = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)`,
     `q = Chr(34)`,
-    `cmd = "cmd /d /c " & q & q & root & "\\runtime\\runtime\\node\\node.exe" & q & " " & q & root & "\\tools\\desktop\\windows\\scripts\\shell-check.mjs" & q & " " & q & root & "\\runtime" & q & " " & q & root & "\\work" & q & " > " & q & root & "\\check.log" & q & " 2>&1" & q`,
+    // 壳检查用便携版自带的 node；演练用对端系统里的 node（载荷里没有运行时，装上去之前也没有）。
+    `node = ${script === "shell-check" ? `q & root & "\\runtime\\runtime\\node\\node.exe" & q` : `"node"`}`,
+    `cmd = "cmd /d /c " & q & node & " " & q & root & "\\tools\\desktop\\windows\\scripts\\${script}.mjs" & q & " " & q & root & "\\runtime" & q & " " & q & root & "\\work" & q & " > " & q & root & "\\check.log" & q & " 2>&1" & q`,
     `code = sh.Run(cmd, 0, True)`,
     `Set f = CreateObject("Scripting.FileSystemObject").CreateTextFile(root & "\\check.done", True)`,
     `f.Write code`,
@@ -155,11 +167,11 @@ function outsideTerminalJob() {
     `  [IO.File]::WriteAllText($vbs, ${psq(vbs)}, [Text.Encoding]::ASCII)`,
     `  $done = Join-Path $root 'check.done'`,
     `  & explorer.exe $vbs`,
-    `  $deadline = (Get-Date).AddMinutes(28)`,
+    `  $deadline = (Get-Date).AddMinutes(${minutes})`,
     `  while (-not (Test-Path -LiteralPath $done) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }`,
     `  $log = Join-Path $root 'check.log'`,
     `  if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Encoding UTF8 | ForEach-Object { "$_" } }`,
-    `  if (-not (Test-Path -LiteralPath $done)) { Write-Output '✕ 28 分钟内检查没跑完'; exit 1 }`,
+    `  if (-not (Test-Path -LiteralPath $done)) { Write-Output '✕ ${minutes} 分钟内检查没跑完'; exit 1 }`,
     `  $global:LASTEXITCODE = [int](Get-Content -LiteralPath $done -Raw).Trim()`,
   ];
 }
@@ -178,7 +190,7 @@ function remoteCommand(id, url) {
     `  Write-Output ("harness node " + (node -v) + "  on " + [Environment]::OSVersion.VersionString)`,
     `  $work = Join-Path $root 'work'`,
     `  New-Item -ItemType Directory -Path $work | Out-Null`,
-    ...(shell ? outsideTerminalJob() : [
+    ...(shell || install ? outsideTerminalJob(install ? "install-check" : "shell-check", Math.round(TIMEOUT_MS / 60_000) - 2) : [
       `  node (Join-Path $root 'tools\\desktop\\windows\\scripts\\smoke-runtime.mjs') (Join-Path $root 'runtime') $work 2>&1 | ForEach-Object { "$_" }`,
     ]),
     `  exit $LASTEXITCODE`,

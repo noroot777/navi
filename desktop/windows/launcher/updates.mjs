@@ -1,0 +1,201 @@
+// 什么时候查更新、问不问、装不装（对应 mac 的 Updater.swift；查、下、验签、交给安装包在壳里，见 shell/src/update.rs）。
+//
+// 带更新源的构建（NAVI_WIN_UPDATES=1）起来 1 分钟后查一次，之后每 6 小时一次；托盘「检查更新…」随时查。
+// 查到新版就问用户：「现在更新」「跳过这一版」「以后再说」（关掉对话框按最后一个算）（记在 settings.json 的 skippedVersion，自动检查不再问它，
+// 手动检查照样摆出来）。点了「现在更新」窗口盖上下载进度，下完壳把安装包交给系统、自己退出，安装包装完重开 Navi。
+// 换的只是壳：服务和 agent 不停，新壳起来后再按 handover.mjs 换到新运行时。
+//
+// 每一步都有头（壳里查 30 秒、下 15 分钟、300 MB，见 update.rs）；这里再兜一层：壳那边过了头还没回话、或者下载一分半
+// 没收到一个字节（壳收到字节就报，有没有总长度都报），就叫壳收掉那一趟。下载那一屏的「取消」走同一条路。
+// 取消是壳裁决的（updateCancel → updateCancelResult）：它说收掉了才放开状态、页面回来；它说已经在装，就照实
+// 摆「正在安装」，不说取消了。请求号带着这一代控制器的标识：重开的控制器认不成上一代那一趟的答复。
+// 整趟只有一个最终期限（t.install，再加 t.settle 的余量），哪个阶段都消耗不掉它：到点还在下就叫壳收掉，再到余量用完
+// 不管停在哪个阶段都收场。收场分两种说法：壳认过的结局（没装上 / 取消了）和结果不明（壳没答、或者停在「正在安装」
+// —— 安装程序可能还在跑；壳在它结束前不会开始第二次安装）。
+// 别处占着窗口那一屏（换运行时、按新设置重启服务，controller.mjs 的 occupied）时不下。
+import { randomBytes } from "node:crypto";
+import { readSettings, writeSettings } from "./settings.mjs";
+
+export const FIRST_CHECK_MS = 60_000;
+export const INTERVAL_MS = 6 * 60 * 60_000;
+export const CHECK_LIMIT_MS = 60_000;
+export const INSTALL_LIMIT_MS = 16 * 60_000;
+export const STALL_LIMIT_MS = 90_000;
+export const CANCEL_REPLY_MS = 15_000;
+export const SETTLE_GRACE_MS = 30_000;
+
+export function createUpdates({ cfg, send, ui, enabled = process.env.NAVI_WIN_UPDATES === "1", busy = () => null, timing = {} }) {
+  const t = { first: FIRST_CHECK_MS, interval: INTERVAL_MS, check: CHECK_LIMIT_MS, install: INSTALL_LIMIT_MS, stall: STALL_LIMIT_MS, cancelReply: CANCEL_REPLY_MS, settle: SETTLE_GRACE_MS, ...timing };
+  const state = { serial: 0, generation: randomBytes(4).toString("hex"), pending: new Map(), timer: null, busy: false, installing: null, download: null };
+
+  /** 发给壳、等它回话；给了 limitMs，到了还没回就按 { error, timedOut } 收场。返回 { id, done, settle }。 */
+  function request(message, limitMs = null) {
+    const id = `u-${state.generation}-${++state.serial}`;
+    let settle;
+    const done = new Promise((resolve) => {
+      const timer = limitMs === null ? null : setTimeout(() => settle({ error: "等了太久没有回音", timedOut: true }), limitMs);
+      settle = (answer) => {
+        if (!state.pending.has(id)) return;
+        clearTimeout(timer);
+        state.pending.delete(id);
+        resolve(answer);
+      };
+      state.pending.set(id, settle);
+    });
+    send({ ...message, id });
+    return { id, done, settle };
+  }
+
+  function schedule(delay) {
+    clearTimeout(state.timer);
+    state.timer = setTimeout(() => { void check({ manual: false }).finally(() => schedule(t.interval)); }, delay);
+  }
+
+  async function check({ manual }) {
+    if (!enabled) {
+      if (manual) await ui.alert("这一版不自动更新", "这份 Navi 没带更新源（开发时的便携版）。装正式的安装包才会自动更新。");
+      return;
+    }
+    if (state.installing) {
+      const detail = state.download?.phase === "installing"
+        ? `正在安装 Navi ${state.installing}，装完会自己重新打开。`
+        : `正在下载 Navi ${state.installing}，下载那一屏上可以取消。`;
+      if (manual) await ui.alert("正在更新", detail);
+      return;
+    }
+    if (state.busy) return;
+    state.busy = true;
+    try {
+      const found = await request({ type: "updateCheck" }, t.check).done;
+      if (found.error) {
+        ui.log(`检查更新失败：${found.error}`);
+        if (manual) await ui.alert("检查更新没成功", `${found.error}\n\n过一会儿再试；网络通了也会每 6 小时自动查一次。`);
+        return;
+      }
+      if (!found.version) {
+        if (manual) await ui.alert("已经是最新版", `Navi ${cfg.version} 就是最新的。`);
+        return;
+      }
+      if (!manual && readSettings(cfg).skippedVersion === found.version) return ui.log(`有新版 ${found.version}，用户跳过了这一版`);
+      const notes = String(found.notes ?? "").trim();
+      const detail = [
+        `现在是 ${cfg.version}。${notes ? `\n\n${notes.slice(0, 1200)}` : ""}`,
+        "更新只换窗口这一层，几十秒就好：在跑的服务和任务都不停，装好后等它们都能交接了再切到新版服务。",
+      ].join("\n\n");
+      const choice = await ui.ask(`Navi ${found.version} 可以更新了`, detail, ["现在更新", "跳过这一版", "以后再说"]);
+      if (choice === 1) skip(found.version);
+      if (choice === 0) await install(found.version);
+    } finally {
+      state.busy = false;
+    }
+  }
+
+  function skip(version) {
+    try { writeSettings(cfg, { skippedVersion: version }); }
+    catch (error) {
+      ui.log(`记不下跳过的 ${version}：${error.message}`);
+      void ui.alert("没记住跳过这一版", `${error.message}\n\n下次自动检查还会问到 ${version}。`);
+    }
+  }
+
+  async function install(version) {
+    const other = busy();
+    if (other) return void await ui.alert("现在不能更新", `${other}，等它完了再从托盘菜单「检查更新…」更新。`);
+    state.installing = version;
+    const download = { ...request({ type: "updateInstall", version }), version, received: 0, percent: null, phase: "downloading", stall: null, reply: null, aborting: null };
+    state.download = download;
+    // 最终期限：到点还在下就叫壳收掉（它裁决），余量用完不管停在哪儿都收场。两个计时器只在收场时清。
+    const limit = setTimeout(() => abandon("下载超过了时限"), t.install);
+    const hard = setTimeout(() => download.settle({
+      error: download.phase === "installing" ? "一直停在「正在安装」，没有等到结果" : "过了时限，壳一直没给出这一趟的结局",
+      unknown: true,
+    }), t.install + t.settle);
+    beat();
+    const result = await download.done;
+    // 装成了走不到这里：壳把安装包交出去就退出了。回来的只有失败、取消和结果不明。
+    clearTimeout(limit);
+    clearTimeout(hard);
+    clearTimeout(download.stall);
+    clearTimeout(download.reply);
+    state.download = null;
+    state.installing = null;
+    ui.done();
+    if (result.cancelled) return ui.log(`取消了更新到 ${version}`);
+    if (result.unknown) {
+      ui.log(`更新到 ${version} 结果不明：${result.error}`);
+      return void await ui.alert("更新结果不明", `${result.error}\n\n安装程序可能还在运行，装完 Navi 会自己重新打开；它结束之前不会开始第二次安装。一直没有动静的话，可以从托盘菜单「检查更新…」再试。`);
+    }
+    ui.log(`更新到 ${version} 没装上：${result.error}`);
+    await ui.alert("更新没装上", `${result.error || "原因不明"}\n\n现在的版本照常能用，可以稍后从托盘菜单「检查更新…」再试。`);
+  }
+
+  /** 照现在的阶段画那一屏；还在下的时候顺带重新计「没进展」的时。 */
+  function beat() {
+    const download = state.download;
+    clearTimeout(download.stall);
+    if (download.phase === "downloading" && !download.aborting) {
+      download.stall = setTimeout(() => abandon(`下载 ${Math.round(t.stall / 1000)} 秒没有收到数据`), t.stall);
+    }
+    ui.progress(download.version, {
+      phase: download.aborting ? "cancelling" : download.phase,
+      percent: download.percent,
+      received: download.received,
+    }, download.phase === "downloading" && !download.aborting ? cancel : null);
+  }
+
+  /** 叫壳收掉这一趟，等它裁决（updateCancelResult）。user：是用户点的取消，不是过了期限。 */
+  function abandon(why, { user = false } = {}) {
+    const download = state.download;
+    if (!download || download.aborting || download.phase !== "downloading") return;
+    download.aborting = { why, user };
+    send({ type: "updateCancel", id: download.id });
+    // 壳一直不答（它多半已经没了，也可能正在装）：不能一直挂着那一屏，但也不能说成没装上。
+    download.reply = setTimeout(() => download.settle({ error: `${why}；壳没有回应取消`, unknown: true }), t.cancelReply);
+    beat();
+  }
+
+  function cancel() { abandon("已取消", { user: true }); }
+
+  /** 进了安装（壳报的进度、或者取消时壳说已经在装）：从这以后取消不了，等它的结局或者最终期限。 */
+  function installing(download) {
+    if (download.aborting) ui.log(`要取消更新时已经在装了：${download.aborting.why}`);
+    clearTimeout(download.reply);
+    download.aborting = null;
+    download.phase = "installing";
+    beat();
+  }
+
+  function decided(download, outcome) {
+    const { why, user } = download.aborting ?? {};
+    if (outcome === "cancelled") return download.settle({ error: why, cancelled: user });
+    if (outcome === "installing") return installing(download);
+    clearTimeout(download.reply);
+    download.aborting = null;
+    // gone：壳那边这一趟已经结束了，它的结局（updateResult）就在路上；再等一会儿，还没有就按没装上收场。
+    download.reply = setTimeout(() => download.settle({ error: why }), t.cancelReply);
+  }
+
+  function receive(message) {
+    const download = state.download;
+    const current = download && message.id === download.id;
+    if (message.type === "updateProgress") {
+      if (!current) return;
+      if (Number.isFinite(message.received)) download.received = message.received;
+      if (Number.isFinite(message.percent)) download.percent = message.percent;
+      return message.installing ? installing(download) : beat();
+    }
+    if (message.type === "updateCancelResult") return void (current && download.aborting && decided(download, message.outcome));
+    state.pending.get(message.id)?.(message);
+  }
+
+  return {
+    start() { if (enabled) schedule(t.first); },
+    stop() { clearTimeout(state.timer); },
+    checkNow: () => void check({ manual: true }),
+    receive,
+    cancel,
+    get installing() { return state.installing; },
+    /** 在更新的那一趟：{ version, phase: downloading | installing }，没有是 null。 */
+    get stage() { return state.download ? { version: state.download.version, phase: state.download.phase } : null; },
+  };
+}

@@ -152,7 +152,7 @@ export async function confirmTaskComplete(a: {
    * (这一轮的回合令牌)。**只有 HTTP 给**:那条路上 agent 正在等这次返回;断线补录的那一轮
    * 已经结束,交给它等于交给一个读不到的人。这一次仍然不算确认 —— 结果可能是失败,得它看过再定。
    */
-  handOver?: { token: string | null };
+  handOver?: { token: string | null; request?: string | null };
   /**
    * 这一次调用带回来的回执号(monitor-turn-ack.ts):先确认,再过闸 —— 交给过它的那几条只有这样才
    * 不再拦着。断线补录也给:那一笔就是 agent 自己发出的那次调用,参数里带着它读到的号。
@@ -161,13 +161,23 @@ export async function confirmTaskComplete(a: {
 }): Promise<ConfirmCompleteResult> {
   const result = await serialize(`task:${a.taskId}`, async (): Promise<ConfirmCompleteResult> => {
     if (a.receipts) await confirmHandoffs(a.taskId, a.receipts.token, a.receipts.hands);
+    // 同一次调用早先已经领走了一批、答复没写出去服务就停了(request-receipts.ts):交回同一批、同一个号。
+    // 不先认这一下的话,那一批正是闸的第四类「交过、没带回回执号」,重试会被它拦住,而 agent 从没见过那个号。
+    if (a.handOver?.request) {
+      const again = await takeMonitorResultsForTurn({ taskId: a.taskId, token: a.handOver.token, where: a.where,
+        via: "complete", request: a.handOver.request, againOnly: true });
+      if (again) {
+        const still = (await monitorsBlockingDetail(a.taskId, { withHanded: false })).message;
+        return { ok: false, error: completeHandedNote(still, again.hand), blockedByMonitors: true, handed: again };
+      }
+    }
     // 回合里交过、还没带回回执号的那几行是闸的第四类(monitor-responsibility.ts),跟托盘里排着的
     // 一样拦着完成;它们不再交第二遍(monitor-turn-ack.ts),要么带回回执号,要么收口时退回再送。
     const gate = await monitorsBlockingDetail(a.taskId);
     const blocked = gate.message;
     if (blocked && a.handOver && gate.unread > 0) {
       const handed = await takeMonitorResultsForTurn({
-        taskId: a.taskId, token: a.handOver.token, where: a.where, via: "complete",
+        taskId: a.taskId, token: a.handOver.token, where: a.where, via: "complete", request: a.handOver.request,
       });
       if (handed) {
         // 交完再问一次闸:剩下的(还在盯的、正在入队的)照旧拦,说法照旧;刚交的这几行正随这次返回

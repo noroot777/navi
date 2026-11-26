@@ -3,6 +3,7 @@
 //
 //   node controller-main.mjs            窗口模式：stdin 一行一条壳发来的 JSON，stdout 一行一条发给壳的（controller.mjs 顶部）。
 //                                       stdin 一断（壳退出、被强杀）就退出：控制器不守护，服务也不归它管。
+//                                       只有一个例外：正在切换到新版服务，旧服务已经交出去了，先把新版起起来再退。
 //   node controller-main.mjs --ensure   `Navi.exe --start-server`（登录时那一档）：确保服务在跑就退出，不开窗口。
 //                                       数据根还空着时不起：首启要问用户「全新开始」，抢先建一份空库就没得选了。
 //
@@ -43,13 +44,16 @@ if (ensure) {
 const brief = (text) => String(text ?? "").replace(/\s*\n\s*/g, " ⏎ ").slice(0, 600);
 function describe(message) {
   if (message.type === "screen") return [message.screen.kind, message.screen.title, brief(message.screen.detail ?? message.screen.problem)].filter(Boolean).join(" ");
+  if (message.type === "dialog") return [message.id, message.title, brief(message.detail), `[${message.buttons.join("|")}]`].join(" ");
   return brief(message.url ?? message.route ?? message.size ?? message.id ?? message.kind ?? "");
 }
+let closed = false;
 const send = (message) => {
+  if (closed) return;
   log(`→ ${message.type} ${describe(message)}`.trimEnd());
   process.stdout.write(`${JSON.stringify(message)}\n`);
 };
-const controller = createController({ cfg, send, launcher, loginItem: createLoginItem(cfg) });
+const controller = createController({ cfg, send, launcher, log, loginItem: createLoginItem(cfg) });
 
 process.on("uncaughtException", (error) => { log(`uncaught ${error.stack ?? error}`); });
 process.on("unhandledRejection", (error) => { log(`unhandled ${error?.stack ?? error}`); });
@@ -62,8 +66,8 @@ input.on("line", (line) => {
   controller.receive(message);
 });
 input.on("close", () => {
-  controller.stop();
-  process.exit(0);
+  closed = true;
+  void controller.shutdown().catch((error) => log(`退出前收尾出错：${error?.stack ?? error}`)).finally(() => process.exit(0));
 });
 log(`控制器起来了：${cfg.baseURL}，数据 ${cfg.dataDir}，窗口端口 ${cfg.windowPort}`);
 controller.start();

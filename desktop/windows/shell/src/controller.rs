@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-use crate::{paths, tray, window};
+use crate::{paths, tray, update, window};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -27,6 +27,10 @@ pub struct Shell {
   pub screen: Mutex<Value>,
   pub page: Mutex<window::Page>,
   pub menu: Mutex<Option<tray::Items>>,
+  /// 最近一次查到、还没装的那一版（src/update.rs）。
+  pub update: Mutex<Option<tauri_plugin_updater::Update>>,
+  /// 在下（或在装）的那一趟：取消和下完去装在这里裁决（src/update.rs）。
+  pub download: Mutex<Option<update::Download>>,
 }
 
 impl Shell {
@@ -50,8 +54,10 @@ impl Shell {
     let mut command = Command::new(paths::node(&runtime));
     command
       .arg(&script)
+      .envs(paths::rehearsal_env().iter().map(|(key, value)| (key, value)))
       .env("NAVI_WIN_SHELL", std::env::current_exe().unwrap_or_default())
       .env("NAVI_WIN_VERSION", app.package_info().version.to_string())
+      .env("NAVI_WIN_UPDATES", if update::configured(app) { "1" } else { "0" })
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped());
@@ -95,6 +101,7 @@ impl Shell {
 
   fn exited(self: &Arc<Self>, app: &AppHandle) {
     *self.stdin.lock().unwrap() = None;
+    update::abandon(self);
     let status = self.child.lock().unwrap().take().and_then(|mut child| child.wait().ok());
     if self.quitting.load(Ordering::SeqCst) {
       return;
@@ -134,6 +141,9 @@ impl Shell {
       "openExternal" => window::open_external(&text("url")),
       "openPath" => window::open_path(&text("path")),
       "menu" => tray::update(app, self, &message),
+      "updateCheck" => update::check(app, self, message.get("id").cloned().unwrap_or(Value::Null)),
+      "updateInstall" => update::install(self, message.get("id").cloned().unwrap_or(Value::Null), &text("version")),
+      "updateCancel" => update::cancel(self, message.get("id").cloned().unwrap_or(Value::Null)),
       "dialog" => {
         let (app, shell, message) = (app.clone(), self.clone(), message.clone());
         std::thread::spawn(move || {
@@ -159,6 +169,7 @@ pub fn ensure_once() -> i32 {
   command
     .arg(paths::controller_script(&runtime))
     .arg("--ensure")
+    .envs(paths::rehearsal_env().iter().map(|(key, value)| (key, value)))
     .env("NAVI_WIN_SHELL", std::env::current_exe().unwrap_or_default())
     .stdin(Stdio::null())
     .stdout(Stdio::null())

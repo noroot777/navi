@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { mountRuntimeHandoverRoutes } from "./runtime-handover-routes.js";
+import { mountRestartFreezeRoutes, RESTART_FREEZE_PROTOCOL, serviceFreezePublic } from "./restart-freeze.js";
 import type { Context } from "hono";
 import { stream, streamSSE } from "hono/streaming";
 import { getConnInfo } from "@hono/node-server/conninfo";
@@ -126,6 +127,8 @@ api.get("/health", (c) => c.json({
   previousResidualLock: previousResidualLockPublic(),
   // 飞书长连接连没连上（只这一档，不带应用标识与错误原文：这个端点免登录）。
   feishu: feishuHealthPublic(),
+  // 服务此刻是不是冻着（准备重启 / 换运行时）：页面上那句「服务正在准备重启」开页时从这里取，之后跟 `service.freeze` 事件。
+  freeze: serviceFreezePublic(),
   // 「端口上这份是谁」：数据根和代码根。mac app 靠它认出 :4317 上是不是它自己起的那份（别的
   // navi —— 比如仓库里的开发实例 —— 占着时不能悄悄连上去当成自己的）。路径只答本机直连：
   // 这个端点免登录，别的机器不该从这里读到这台机器的目录结构。
@@ -152,6 +155,7 @@ api.get("/health", (c) => c.json({
 // 匿名那一档两种模式都要校验:自用模式下匿名 = 别的机器没带访问密钥就来打(本机跑
 // 重启脚本是本机直连,不是匿名),免登录名单放行的只是路径形状。
 mountRuntimeHandoverRoutes(api);
+mountRestartFreezeRoutes(api);
 api.get("/restart-impact", async (c) => {
   const { actorOf } = await import("./auth/context.js");
   if (actorOf(c).kind === "anonymous") {
@@ -166,8 +170,8 @@ api.get("/restart-impact", async (c) => {
   const { restartImpact } = await import("./reattach.js");
   const protocol = c.req.query("protocol");
   const schema = c.req.query("schema");
-  const impact = await restartImpact(protocol !== undefined || schema !== undefined
-    ? { protocol: Number(protocol), schema } : undefined);
+  const impact = { ...await restartImpact(protocol !== undefined || schema !== undefined
+    ? { protocol: Number(protocol), schema } : undefined), restartFreeze: RESTART_FREEZE_PROTOCOL };
   if (c.req.query("shutdown") !== "1") return c.json(impact);
   const { shutdownResources } = await import("./shutdown-resources.js");
   return c.json({ ...impact, shutdown: await shutdownResources() });

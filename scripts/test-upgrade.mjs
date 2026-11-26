@@ -203,10 +203,38 @@ rmSync(join(DATA, "impact.json"));
 await untouched(out, "有任务在跑");
 console.log("✓ 工作区脏、远端拉不动、两份库并存、有任务在跑:都在停服务之前拦下,什么都没改");
 
+// ── 重启前冻结(server/src/restart-freeze.ts):第二段停服务之前冻结接活,凭冻结之下的快照再挡一遍 ─────────────
+// 第一段的即时判据是空的;冻结之下多出来的、续期时多出来的(升级连会被接管的也挡)、冻结被占(mac 版正拿着换新版服务的
+// 交接许可)都退回刚拉的代码中止,旧服务不动;中止时放掉冻结,冻不了就只问那一次。干净的那一档在下面第一次升级里。
+const FREEZE_LOG = join(DATA, "freeze.log");
+const freezeCalls = () => (existsSync(FREEZE_LOG) ? readFileSync(FREEZE_LOG, "utf8").split("\n").filter(Boolean).join(",") : "");
+const freezing = (mode) => {
+  rmSync(FREEZE_LOG, { force: true });
+  writeFileSync(join(DATA, "impact.json"), JSON.stringify({ survives: [], resumes: [], interrupted: [], mcpDisrupted: [], restartFreeze: 1 }));
+  writeFileSync(join(DATA, "freeze.json"), JSON.stringify({ mode }));
+};
+for (const [mode, line, calls] of [
+  ["widen", /有 1 个任务在跑或排队[\s\S]*冻结时才看到的任务/, "acquire,release"],
+  ["grow", /冻结之后又多了 1 个会被挡下的任务[\s\S]*冻结之后才冒出来的任务/, "acquire,renew,release"],
+  ["busy", /冻结不了接活\(正在切换新版服务\)/, "acquire"],
+]) {
+  freezing(mode);
+  out = await upgrade([], 2);
+  assert.match(out, line, out);
+  assert.equal(freezeCalls(), calls, `${mode}:冻结调用不对\n${out}`);
+  assert.match(out, /刚拉的代码已退回/, out);
+  await untouched(out, `冻结(${mode})`);
+}
+console.log("✓ 重启前冻结:快照或续期时多出来的、冻结被占,都退回代码中止并放掉冻结,旧服务不动");
+
 // ── 第一次:git pull && npm run upgrade ───────────────────────────────────────────
 git(INSTALL, "pull", "-q", "--ff-only");
+freezing("clean");
 out = await upgrade([], 0);
 const firstRun = out;
+assert.equal(freezeCalls(), "acquire,renew", `冻结 → 下刀前续期,停成了不再放\n${out}`);
+assert.doesNotMatch(out, /没有重启前冻结/, out);
+for (const f of ["impact.json", "freeze.json", "freeze.log"]) rmSync(join(DATA, f));
 let h = await health();
 assert.equal(h?.version, "v2", `服务不是新代码\n${out}`);
 assert.notEqual(h.pid, oldHealth.pid);
@@ -254,6 +282,7 @@ const v3 = publish(DEV, "v3", { flags: ["BUILD_FAIL"], upgradeMarker: true });
 out = await upgrade([], 1);
 assert.match(out, /\[v3 的升级逻辑\]/, `拉完代码跑的不是新版的升级逻辑\n${out}`);
 assert.match(out, /构建失败/, out);
+assert.match(out, /没有重启前冻结/, `老服务不认冻结时要如实说问完到停下之间新起的任务不在名单上\n${out}`);
 assert.equal(await health(), null, "构建失败之后服务应当停着(依赖已经换过)");
 assert.equal(head(), v3);
 back = await followRollback(out);
