@@ -9,7 +9,7 @@ import { heldTurns } from "./turn-lock.js";
 import { commitRuntimeHandover, releaseRuntimeHandover, runtimeHandoverActive, runtimeHandoverDeadline, runtimeHandoverMatches } from "./runtime-handover-state.js";
 import { resumeRuntimeGateway } from "./runtime-channel-gateway.js";
 import { acquireForcedRuntimeHandover, acquireRuntimeHandover, type ForcedItem } from "./runtime-handover.js";
-import { checkpointRuntimeHandover, sealRuntimeHandover } from "./runtime-handover-prepare.js";
+import { checkpointRuntimeConsumers, checkpointRuntimeHandover, sealRuntimeHandover } from "./runtime-handover-prepare.js";
 import { runtimeCompatibility, type RuntimeCompatibility } from "./runtime-compatibility.js";
 
 async function standingResources(): Promise<string[]> {
@@ -53,10 +53,11 @@ export function mountRuntimeHandoverRoutes(api: Hono) {
     const { restartImpact } = await import("./reattach.js");
     try {
       const current = runtimeCompatibility();
-      // 带 accept（用户确认过会打断的那几项）就是强制切换：同样封口，封口之后核对名单（见 acquireForcedRuntimeHandover）。
+      // 带 accept（用户确认过会打断的那几项）就是强制切换：同样封口，封口之后核对名单，没确认的会话照样先到检查点（见 acquireForcedRuntimeHandover）。
       const result = Array.isArray(body.accept)
         ? await acquireForcedRuntimeHandover(() => restartImpact(body),
-          new Set(body.accept.filter((id): id is string => typeof id === "string")), sealRuntimeHandover, standingItems)
+          new Set(body.accept.filter((id): id is string => typeof id === "string")),
+          { seal: sealRuntimeHandover, checkpoint: checkpointRuntimeConsumers }, standingItems)
         : await acquireRuntimeHandover(() => restartImpact(body), heldTurns, {
           seal: sealRuntimeHandover,
           async checkpoint(impact, lease) {

@@ -91,26 +91,55 @@ try {
   const blocking = (...ids: string[]): RestartImpact => ({ ...empty, runtimeHandover: { sessions: [],
     blocked: ids.map((id) => ({ id, title: `任务 ${id}`, reason: "调度台当前回合不能无损接管" })) } });
   const seal = async () => { assert.equal(runtimeHandoverActive(), true, "先封口"); };
-  const grown = await acquireForcedRuntimeHandover(async () => blocking("t9"), new Set(["t9"]), seal, async () => {
+  const checkpointed: string[][] = [];
+  const prep = { seal, checkpoint: async (sessions: string[]) => {
+    assert.equal(runtimeHandoverActive(), true, "封口之后才到检查点");
+    checkpointed.push(sessions);
+  } };
+  const grown = await acquireForcedRuntimeHandover(async () => blocking("t9"), new Set(["t9"]), prep, async () => {
     assert.equal(runtimeHandoverActive(), true, "封口之后才看会打断的终端");
     return [{ id: "terminal:s2", title: "终端「cargo watch」" }];
   });
   assert.equal(grown.lease, undefined, "确认之后新开的终端：不发许可");
   assert.deepEqual(grown.widened, [{ id: "terminal:s2", title: "终端「cargo watch」" }], "把多出来的交回去重新问");
   assert.equal(runtimeHandoverActive(), false, "当场解封，旧服务照常接活");
-  const task = await acquireForcedRuntimeHandover(async () => blocking("t9", "t10"), new Set(["t9"]), seal, async () => []);
+  const task = await acquireForcedRuntimeHandover(async () => blocking("t9", "t10"), new Set(["t9"]), prep, async () => []);
   assert.deepEqual(task.widened?.map((item) => item.id), ["t10"], "多出没确认过的任务也一样");
-  const agreed = await acquireForcedRuntimeHandover(async () => blocking("t9"), new Set(["t9", "terminal:s1"]), seal,
+  const agreed = await acquireForcedRuntimeHandover(async () => blocking("t9"), new Set(["t9", "terminal:s1"]), prep,
     async () => [{ id: "terminal:s1", title: "终端「PowerShell」" }]);
   assert.ok(agreed.lease, "都在确认过的里面（变少也算）：发许可");
   assert.equal(runtimeHandoverActive(), true, "发了许可就一直封着，直到兑现后旧服务退出");
   releaseRuntimeHandover(agreed.lease!);
-  const unknown = await acquireForcedRuntimeHandover(async () => empty, new Set(), seal, async () => []);
+  const unknown = await acquireForcedRuntimeHandover(async () => empty, new Set(), prep, async () => []);
   assert.match(unknown.error ?? "", /确认不了/, "旧服务报不出会打断谁：不发");
   assert.equal(runtimeHandoverActive(), false);
-  await assert.rejects(acquireForcedRuntimeHandover(async () => blocking(), new Set(), async () => { throw new Error("仍有请求在执行"); }, async () => []), /仍有请求/);
+  await assert.rejects(acquireForcedRuntimeHandover(async () => blocking(), new Set(), { ...prep, seal: async () => { throw new Error("仍有请求在执行"); } }, async () => []), /仍有请求/);
   assert.equal(runtimeHandoverActive(), false, "封不住口：许可撤掉");
   console.log("✓ 强制切换：封口之后核对用户确认过的名单，多出一项就不发许可、当场解封；发了许可就一直封着");
+
+  // 没在名单上的、能接管的会话：用户只确认了关掉终端，另一条任务还在输出 —— 它照样先到检查点（正文、水位落盘）再发许可。
+  const withSession = (sessions: string[], ...ids: string[]): RestartImpact => ({ ...blocking(...ids),
+    runtimeHandover: { ...blocking(...ids).runtimeHandover!, sessions } });
+  checkpointed.length = 0;
+  const kept = await acquireForcedRuntimeHandover(async () => withSession(["sess-a"]), new Set(["terminal:s1"]), prep,
+    async () => [{ id: "terminal:s1", title: "终端「PowerShell」" }]);
+  assert.ok(kept.lease, "只打断确认过的终端：发许可");
+  assert.deepEqual(checkpointed, [["sess-a"]], "没确认打断的会话先到检查点，才发许可");
+  releaseRuntimeHandover(kept.lease!);
+  await assert.rejects(acquireForcedRuntimeHandover(async () => withSession(["sess-a"]), new Set(), { ...prep,
+    checkpoint: async () => { throw new Error("输出消费屏障未就绪"); } }, async () => []), /屏障未就绪/);
+  assert.equal(runtimeHandoverActive(), false, "到不了检查点：不发许可、当场解封");
+  let round = 0;
+  const lost = await acquireForcedRuntimeHandover(async () => (round++ ? withSession([], "t11") : withSession(["sess-a"])),
+    new Set(), prep, async () => []);
+  assert.deepEqual(lost.widened?.map((item) => item.id), ["t11"], "检查点之后那条会话接不过去了：没确认过，交回去重新问");
+  assert.equal(runtimeHandoverActive(), false);
+  round = 0;
+  const grew = await acquireForcedRuntimeHandover(async () => withSession(round++ ? ["sess-a", "sess-b"] : ["sess-a"]),
+    new Set(), prep, async () => []);
+  assert.match(grew.error ?? "", /状态变化/, "检查点之后多出一条没到检查点的会话：不发");
+  assert.equal(runtimeHandoverActive(), false);
+  console.log("✓ 强制切换只打断确认过的：别的能接管的会话照样先到检查点，之后再核一遍，变了就不发");
 
   const realNow = Date.now;
   const later = (ms: number) => { const base = realNow(); Date.now = () => base + ms; };

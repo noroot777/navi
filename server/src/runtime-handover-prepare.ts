@@ -14,7 +14,15 @@ export async function checkpointRuntimeHandover(impact: RestartImpact, lease: st
   if (!impact.runtimeHandover || impact.runtimeHandover.blocked.length) {
     throw new Error(impact.runtimeHandover?.blocked.map((task) => `${task.title}：${task.reason}`).join("；") || "无法确认接管能力");
   }
-  for (const session of impact.runtimeHandover.sessions) {
+  await checkpointRuntimeConsumers(impact.runtimeHandover.sessions, lease);
+}
+
+/**
+ * 让这些会话的输出消费停在检查点：冻结输入、排空队列、正文和水位落盘（runtime-consumers.ts）。解封时各自恢复。
+ * 无损交接和强制切换共用：强制切换只打断用户确认过的那几项，其余能接管的会话照样要先到检查点再停服务。
+ */
+export async function checkpointRuntimeConsumers(sessions: string[], lease: string): Promise<void> {
+  for (const session of sessions) {
     const checkpoint = checkpointRuntimeConsumer(session);
     afterRuntimeHandover(checkpoint.resume);
     let timer: NodeJS.Timeout | undefined;
