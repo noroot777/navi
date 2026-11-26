@@ -221,6 +221,9 @@ function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Inci
 /** 页面那边记下的状态变化（不是详情）。 */
 const PAGE_STATES = ["page.boot", "page.reload", "page.crash"];
 
+/** 没收下的那几条里可能有状态变化：本身就是状态，或者不知道是什么（没看 / 认不出 / 丢失记录自己也被挡了）。 */
+const mayHoldState = (of: string) => PAGE_STATES.includes(of) || of.startsWith("batch.") || of.startsWith("log.");
+
 function median(values: number[]): number {
   if (!values.length) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -282,13 +285,15 @@ export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummar
   const notes: string[] = [];
   if (!counts.server) notes.push("没有服务端运行日志：服务端可能还是加日志之前的版本。");
   if (!counts.mac && !counts.win) notes.push("没有桌面壳的运行日志：用的是浏览器，或桌面 app 还是旧版本。");
-  // 服务端按事件限流（journal.ts）：页面那边的状态变化被挡掉过，次数就只是下限，明说。开始丢的那一刻就有
-  // `log.dropping`，带个数的 `log.dropped` 要等下一条同类事件才写（风暴停了、服务重启了就没有）。
-  const dropRecords = sorted.filter((r) => (r.ev === "log.dropped" || r.ev === "log.dropping") && r.src === "web" && PAGE_STATES.includes(String(r.of)));
-  if (dropRecords.length) {
-    const counted = dropRecords.filter((r) => r.ev === "log.dropped").reduce((sum, r) => sum + Number(r.count ?? 0), 0);
-    notes.push(`页面那边有${counted ? `至少 ${counted} 条` : "一些"}载入 / 重载 / 崩溃记录超过每分钟上限没记下来，页面看到的次数只是下限。`);
+  // 页面那边的记录没收下的（journal.ts 限流 / 超长、routes.ts 一批超额 / 认不出 / 没看）：其中可能有状态变化，
+  // 次数就只是下限，明说。开始丢的那一刻就有 `log.dropping`，带个数的 `log.dropped` 要等下一条同类事件才写。
+  const lost = sorted.filter((r) => (r.ev === "log.dropped" || r.ev === "log.dropping" || r.ev === "log.too_long") && r.src === "web" && mayHoldState(String(r.of)));
+  if (lost.length) {
+    const counted = lost.filter((r) => r.ev !== "log.dropping").reduce((sum, r) => sum + Number(r.count ?? 1), 0);
+    notes.push(`页面那边有${counted ? `至少 ${counted} 条` : "一些"}记录没记下来（超过上限或者认不出），其中可能有载入 / 重载 / 崩溃，页面看到的次数只是下限。`);
   }
+  const skipped = sorted.filter((r) => r.ev === "page.skipped").reduce((sum, r) => sum + Number(r.count ?? 0), 0);
+  if (skipped) notes.push(`页面自己因为上限少报了 ${skipped} 条报错 / 断线记录（载入、重载、崩溃不受这个上限）。`);
 
   return {
     from: sorted[0]?.at ?? null,

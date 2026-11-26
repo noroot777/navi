@@ -8,7 +8,7 @@
 //     不能让它反过来把服务搞崩或搞慢 —— 所以同步追加、吞掉异常，单条有长度上限。
 //   · **按事件限流**：一条坏路径每秒抛几百次异常时，日志不能跟着涨成几个 G。开始丢的那一刻就记一条
 //     `log.dropping`（丢了这件事本身不能等下一条同类事件来补——风暴停了、服务重启了，就再也没有下一条），
-//     超出的只数个数，下一次放行时补一条带个数的 `log.dropped`。
+//     超出的只数个数，下一次放行时补一条带个数的 `log.dropped`。超长写不下的一条也留一条 `log.too_long`。
 //   · **轮转只改名**（同 exit-ledger.ts 的理由）：同一个目录可能有别的进程在追加（被单例锁挡回去
 //     的那一份也会记一条 `server.refused`），读-改-写会吞掉别人刚写的记录。
 import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
@@ -69,8 +69,11 @@ function admit(ev: string, now: number): number | null | "first" {
 }
 
 function append(record: RuntimeLogRecord, retry = true): void {
-  const line = JSON.stringify({ ...record, v: RUNTIME_LOG_SCHEMA });
-  if (line.length > MAX_LINE) return;
+  let line = JSON.stringify({ ...record, v: RUNTIME_LOG_SCHEMA });
+  // 超长的不写半截，但「丢了一条」要留下：换成只带事件名的一条。
+  if (line.length > MAX_LINE) {
+    line = JSON.stringify({ at: record.at, src: record.src, pid: record.pid, ev: "log.too_long", of: record.ev, v: RUNTIME_LOG_SCHEMA });
+  }
   const file = logFile();
   try {
     if (!ensured) {

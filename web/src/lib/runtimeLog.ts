@@ -32,6 +32,8 @@ const LOAD_KEY = "navi.runtimeLog.load";
 const pending: Pending[] = [];
 let timer: ReturnType<typeof setTimeout> | null = null;
 let errorsSent = 0;
+/** 因为上限没报的详情（报错超过 MAX_ERRORS、攒着没发的超过 MAX_PENDING_DETAILS）：下一批里带上个数。 */
+let skipped = 0;
 const seenErrors = new Set<string>();
 let crashReported = false;
 
@@ -60,6 +62,10 @@ const load = randomId();
 const isState = (pending: Pending) => WEB_STATE_EVENTS.includes(pending.event.ev);
 
 function send(events: Pending[], keepalive: boolean): void {
+  if (skipped) {
+    events.push({ event: { ev: "page.skipped", count: skipped }, t: Date.now() });
+    skipped = 0;
+  }
   if (!events.length) return;
   const ordered = [...events.filter(isState), ...events.filter((pending) => !isState(pending))];
   for (let start = 0; start < ordered.length; start += WEB_EVENTS_PER_POST) post(ordered.slice(start, start + WEB_EVENTS_PER_POST), keepalive);
@@ -84,7 +90,10 @@ function flush(keepalive = false): void {
 
 function queue(event: Event): void {
   const next = { event, t: Date.now() };
-  if (!isState(next) && pending.filter((item) => !isState(item)).length >= MAX_PENDING_DETAILS) return;
+  if (!isState(next) && pending.filter((item) => !isState(item)).length >= MAX_PENDING_DETAILS) {
+    skipped += 1;
+    return;
+  }
   pending.push(next);
   timer ??= setTimeout(() => flush(), FLUSH_MS);
 }
@@ -96,7 +105,10 @@ function errorFields(error: unknown): Record<string, unknown> {
 }
 
 function reportError(kind: "error" | "rejection" | "boundary", error: unknown): void {
-  if (errorsSent >= MAX_ERRORS) return;
+  if (errorsSent >= MAX_ERRORS) {
+    skipped += 1;
+    return;
+  }
   const fields = errorFields(error);
   const key = `${String(fields.name)}:${String((fields.frames as string[] | undefined)?.[0] ?? "")}`;
   if (seenErrors.has(key)) return;

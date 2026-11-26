@@ -103,6 +103,9 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.equal(verified[8], "node:internal");
   assert.ok(!/CustomerAcquisitionBudget|OpenAI/.test(JSON.stringify(verified)));
   assert.equal(serverCodeLocations.resolve("server/../../../etc/hosts"), null, "跳出代码目录的不认");
+  assert.deepEqual(shared.verifyFrames(["(gc)", "(idle)", "(program)", "(evil)"], serverCodeLocations), ["(gc)", "(idle)", "(program)", "<other>"], "采样器的固定帧读回来还是它");
+  assert.equal(shared.scrubErrorCode(shared.scrubErrorCode(5)), "5", "整数码过两遍还是它");
+  assert.equal(shared.scrubErrorCode("12345678901234"), "OTHER");
   // 规范化之后存在的不算：被规范化掉的那一段可以是任何东西（第 2 轮复审实测客户名这样带进了导出）。
   const aliased = [
     `f server/src/CustomerBudgetSecret/../runtime-log/journal.ts:3`,
@@ -185,7 +188,8 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.equal(posted.filter((event) => event.ev === "page.crash").length, 1, "普通报错用完了额度，整页崩溃也要记下（一次载入只记一次）");
   assert.ok(batches.every((batch) => batch.length <= shared.WEB_EVENTS_PER_POST), `每次发的不超过服务端一次收的：${batches.map((b) => b.length)}`);
   assert.deepEqual(batches[0]!.slice(0, 2), ["page.boot", "page.crash"], "状态排在最前");
-  assert.equal(posted.length, 1 + 10 + 22 + 1, "分批发完，一条不少");
+  assert.equal(posted.length, 1 + 10 + 22 + 1 + 1, "分批发完，一条不少");
+  assert.deepEqual(posted.filter((event) => event.ev === "page.skipped").map((event) => event.count), [2], "超过额度没报的报错留下个数");
   for (const name of ["location", "sessionStorage", "document", "window", "fetch"]) Reflect.deleteProperty(globalThis, name);
 
   // 服务端：老页面一批塞得比上限多时，先收状态、再收详情，没收的记个数。
@@ -199,6 +203,16 @@ function serverLines(): Array<Record<string, unknown>> {
   const web = serverLines().filter((line) => line.src === "web");
   assert.equal(web.filter((line) => line.ev === "page.crash").length, 1, "排在第 25 条的崩溃照样收下");
   assert.deepEqual(web.filter((line) => line.ev === "log.dropped").map((line) => [line.of, line.count]), [["events.down", 5]], "截掉的留下个数");
+  // 每一处不收都要留下记录：超过扫描上限没看的（第 5 轮复审实测第 201 条的崩溃无声无息）、认不出的、请求体读不出来的。
+  const post = (body: string) => api.request("/runtime-log/events", { method: "POST", headers: { "content-type": "application/json" }, body });
+  const beyondScan = [...Array.from({ length: 200 }, () => ({ ev: "events.down", tab: "tabB", load: "loadB" })), { ev: "page.crash", name: "TypeError", tab: "tabB", load: "loadB" }, { ev: "task.content" }];
+  assert.deepEqual(await (await post(JSON.stringify({ events: beyondScan }))).json(), { kept: 20, dropped: 182 }, "个数按收到的全部算");
+  assert.deepEqual(await (await post("{not json")).json(), { kept: 0, dropped: null });
+  assert.deepEqual(await (await post(JSON.stringify({ events: [{ ev: "task.content", text: "客户" }] }))).json(), { kept: 0, dropped: 1 });
+  const marks = serverLines().filter((line) => line.src === "web" && line.ev === "log.dropped").slice(1).map((line) => [line.of, line.count]);
+  assert.deepEqual(marks, [["events.down", 180], ["batch.unexamined", 2], ["batch.unexamined", undefined], ["batch.unrecognized", 1]], JSON.stringify(marks));
+  const lowerBound = analyzeRuntimeLog(serverLines() as never, []);
+  assert.ok(lowerBound.notes.some((note) => note.includes("可能有载入 / 重载 / 崩溃") && note.includes("下限")), JSON.stringify(lowerBound.notes));
 }
 
 // ── 1b. 慢请求和卡顿时在处理的请求记注册的路由模板，不是请求路径 ─────────
@@ -241,9 +255,11 @@ function serverLines(): Array<Record<string, unknown>> {
 {
   for (let i = 0; i < 40; i += 1) runtimeLog("test.flood", { i });
   const flood = serverLines().filter((line) => line.ev === "test.flood");
-  assert.deepEqual(serverLines().filter((line) => line.ev === "log.dropping").map((line) => line.of), ["test.flood"],
+  assert.deepEqual(serverLines().filter((line) => line.ev === "log.dropping" && line.src === "server").map((line) => line.of), ["test.flood"],
     "开始丢的那一刻就记下，不等下一条同类事件；一个窗口只记一次");
   assert.equal(flood.length, 30, "同一个事件每分钟最多 30 条");
+  runtimeLog("test.huge", { pad: "x".repeat(9000) });
+  assert.deepEqual(serverLines().filter((line) => line.of === "test.huge").map((line) => line.ev), ["log.too_long"], "超长写不下的也留下「丢了一条」");
   assert.equal(flood[0]!.src, "server");
   assert.equal(flood[0]!.pid, process.pid);
   // 运行中日志目录被清掉：下一条照样写得进去。

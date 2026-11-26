@@ -19,9 +19,14 @@ export function RuntimeLogSettings({ notify }: { notify: (message: string) => vo
 
   useEffect(() => {
     let live = true;
-    const load = () => request<{ dir: string; report: RuntimeLogReport }>(`/runtime-log/report?days=${DAYS}`)
-      .then((next) => { if (live) { setState(next); setFailed(null); } })
-      .catch((error) => { if (live) setFailed(error instanceof ApiError ? error.message : "读不到运行日志"); });
+    // 只认最新发出的那一次：慢网络下前一次晚到，不能拿旧结果盖掉新的。
+    let latest = 0;
+    const load = () => {
+      const mine = ++latest;
+      return request<{ dir: string; report: RuntimeLogReport }>(`/runtime-log/report?days=${DAYS}`)
+        .then((next) => { if (live && mine === latest) { setState(next); setFailed(null); } })
+        .catch((error) => { if (live && mine === latest) setFailed(error instanceof ApiError ? error.message : "读不到运行日志"); });
+    };
     void load();
     const timer = setInterval(() => { if (document.visibilityState === "visible") void load(); }, REFRESH_MS);
     return () => { live = false; clearInterval(timer); };

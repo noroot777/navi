@@ -50,7 +50,7 @@ export type RuntimeLogBundle = {
 
 /** 页面能报的事件。服务端只收这几个，字段再按 `sanitizeWebEvent` 过一遍。 */
 export const WEB_RUNTIME_EVENTS = [
-  "page.boot", "page.error", "page.crash", "page.reload", "events.down", "events.up",
+  "page.boot", "page.error", "page.crash", "page.reload", "events.down", "events.up", "page.skipped",
 ] as const;
 export type WebRuntimeEvent = (typeof WEB_RUNTIME_EVENTS)[number];
 
@@ -150,6 +150,8 @@ const SQLITE_CODES = ("ERROR INTERNAL PERM ABORT BUSY LOCKED NOMEM READONLY INTE
 export function scrubErrorCode(code: unknown): string | undefined {
   if (typeof code === "number" && Number.isInteger(code)) return String(code);
   if (typeof code !== "string" || !code) return undefined;
+  // 整数码记下来就是十进制串：读回来再过一遍要还是它（读的一侧也调这个）。
+  if (/^-?\d{1,12}$/.test(code)) return code;
   if (ERRNO_CODES.has(code)) return code;
   const sqlite = SQLITE_CODES.find((primary) => code === `SQLITE_${primary}` || code.startsWith(`SQLITE_${primary}_`));
   return sqlite ? `SQLITE_${sqlite}` : "OTHER";
@@ -199,6 +201,9 @@ export type CodeLocations = {
   nameAt(file: string, line: number | null, reported: string): string | null;
 };
 
+/** 不是代码位置、本身就是固定写法的几帧：认不出的、原生的，和采样器给 V8 特殊节点起的名字（sampler.ts）。 */
+const FIXED_FRAMES = new Set(["<native>", "<other>", "(gc)", "(program)", "(idle)"]);
+
 /** 行列号：正整数，超过这么大的不是真代码里的位置。 */
 const MAX_LINE_OR_COLUMN = 10_000_000;
 
@@ -216,7 +221,7 @@ export function verifyFrames(frames: unknown, locations: CodeLocations, limit = 
     // 「名字 位置」或者只有位置；形状不对的（空位置、只有名字）当成认不出的一帧，不让它拖垮整批。
     const split = frame.lastIndexOf(" ");
     const location = frame.slice(split + 1);
-    if (location === "<native>" || location === "<other>") {
+    if (FIXED_FRAMES.has(location)) {
       kept.push(location);
       continue;
     }
@@ -356,6 +361,10 @@ export function sanitizeWebEvent(
       break;
     case "events.up":
       set("downMs", count(event.downMs));
+      break;
+    // 页面自己因为上限没报的详情（报错、断线）有几条：不报可以，不报了要说。
+    case "page.skipped":
+      set("count", count(event.count, 1_000_000));
       break;
   }
   return out as Omit<RuntimeLogRecord, "at" | "src" | "pid">;

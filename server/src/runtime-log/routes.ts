@@ -11,7 +11,15 @@ import { digestPageId, webCodeLocations } from "./code-symbols.js";
 import { runtimeLog, runtimeLogDir } from "./journal.js";
 import { buildRuntimeLogBundle, loadOwnRuntimeLog } from "./load.js";
 
-/** 一次请求里最多看这么多条（老页面不分批）：先全认一遍是什么事件，再决定收哪些。 */
+/**
+ * 一次请求里最多看这么多条（老页面不分批）：先全认一遍是什么事件，再决定收哪些。
+ *
+ * 这个接口上**每一处主动不收都要留下记录**，不能只交代「看过的那部分」：
+ *   · 看过、收不下（超过一批的上限）→ 按事件记 `log.dropped`（状态先收，详情后收）；
+ *   · 看过、认不出（名单外的事件、收的时候出错）→ `log.dropped of=batch.unrecognized`；
+ *   · 没看（超过扫描上限、请求体读不出来）→ `log.dropped of=batch.unexamined`，不知道里面有什么，
+ *     分析端按「里面可能有状态变化」说次数只是下限。
+ */
 const MAX_EVENTS_EXAMINED = 200;
 
 const DAY = 86_400_000;
@@ -24,15 +32,19 @@ function sinceDays(raw: string | undefined, fallback: number): number {
 export function mountRuntimeLogRoutes(api: Hono): void {
   api.post("/runtime-log/events", async (c) => {
     const body = (await c.req.json().catch(() => null)) as { events?: unknown } | null;
-    const raws = Array.isArray(body?.events) ? body.events.slice(0, MAX_EVENTS_EXAMINED) : [];
+    const all = Array.isArray(body?.events) ? body.events : null;
+    const raws = all ? all.slice(0, MAX_EVENTS_EXAMINED) : [];
+    const unexamined = all ? all.length - raws.length : null;
+    let unrecognized = 0;
     const events: Array<NonNullable<ReturnType<typeof sanitizeWebEvent>>> = [];
     for (const raw of raws) {
       // 一条收不了只丢这一条：同一批里还可能有整页崩溃这种状态变化。
       try {
         const event = sanitizeWebEvent(raw, { locations: webCodeLocations, digest: digestPageId });
         if (event) events.push(event);
+        else unrecognized += 1;
       } catch {
-        // 不收
+        unrecognized += 1;
       }
     }
     // 超过一批的上限：状态（崩溃、重载、载入）先收，详情后收；没收的按事件记个数，不悄悄截掉。
@@ -44,8 +56,13 @@ export function mountRuntimeLogRoutes(api: Hono): void {
       const { ev, ago, ...fields } = event;
       runtimeLog(String(ev), fields, "web", typeof ago === "number" ? ago : 0);
     }
+    if (unrecognized) dropped.set("batch.unrecognized", unrecognized);
+    // 请求体读不出来时连有几条都不知道：不带个数。
+    if (unexamined === null) runtimeLog("log.dropped", { of: "batch.unexamined" }, "web");
+    else if (unexamined > 0) dropped.set("batch.unexamined", unexamined);
     for (const [ev, count] of dropped) runtimeLog("log.dropped", { of: ev, count }, "web");
-    return c.json({ kept: Math.min(ordered.length, WEB_EVENTS_PER_POST), dropped: ordered.length - Math.min(ordered.length, WEB_EVENTS_PER_POST) });
+    const kept = Math.min(ordered.length, WEB_EVENTS_PER_POST);
+    return c.json({ kept, dropped: all ? all.length - kept : null });
   });
 
   api.get("/runtime-log/report", async (c) => {
