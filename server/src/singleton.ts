@@ -9,7 +9,7 @@ import { resourceKeysFor, withResourceClaim } from "./resource-claim.js";
 import { type NaviPresenceRegistration, registerNaviPresence } from "./navi-presence.js";
 import { RUNS_DIR } from "./paths.js";
 import { drainShutdownCleanups, shutdownDrainPending } from "./shutdown-resources.js";
-import { reserveServiceFreeze } from "./runtime-handover-state.js";
+import { beginServiceShutdown } from "./runtime-handover-state.js";
 import { IS_WINDOWS, killPidsCommand } from "./platform.js";
 import type { ProcessInfo } from "./proc.js";
 import {
@@ -579,14 +579,18 @@ function installCleanup(lock: SingletonLock, presence: NaviPresenceRegistration 
 
 /**
  * 退出之前那一段能 await 的收尾（shutdown-resources.ts）：临时智能体的停止是异步的，进了 exit 就跑不完。
- * 有要排空的才等（最多 SHUTDOWN_DRAIN_MS），这期间先冻结接活，免得这几秒里又起新回合、新终端；锁和在线
- * 登记照旧握着，排空完才放 —— 服务还在端口上，别让下一个实例先起来撞上。没有要排空的就和原来一样立刻退。
+ * 先关上接活（beginServiceShutdown：不可撤销，别处放掉或到期的重启许可都放不开它），再排空（最多
+ * SHUTDOWN_DRAIN_MS）；锁和在线登记照旧握着，排空完才放 —— 服务还在端口上，别让下一个实例先起来撞上。
+ * 没有要排空的就和原来一样立刻退。没收完的如实写进日志：那几类可能还留在后台。
  */
 async function drainBeforeExit(): Promise<void> {
+  beginServiceShutdown();
   if (!shutdownDrainPending()) return;
   try {
-    reserveServiceFreeze("restart", 60_000);
-    await drainShutdownCleanups();
+    const outcome = await drainShutdownCleanups();
+    if (!outcome.done) {
+      console.warn(`[navi] 退出前收尾${outcome.why}：${outcome.kinds.join("、") || "（说不出是哪几类）"}，可能还留在后台`);
+    }
   } catch (error) {
     console.error("[navi] 退出前收尾失败，照常退出:", error);
   }

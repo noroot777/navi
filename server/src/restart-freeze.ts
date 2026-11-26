@@ -30,10 +30,11 @@ import { liveLockToken } from "./singleton.js";
 import { secretsEqual } from "./openai-converter/common.js";
 import { NAVI_HEADERS, requestHeader } from "./request-headers.js";
 import { heldTurns } from "./turn-lock.js";
-import { shutdownResources } from "./shutdown-resources.js";
+import { SHUTDOWN_DRAIN_MS, shutdownResources } from "./shutdown-resources.js";
 import type { RestartImpact } from "./reattach.js";
 import {
   currentServiceFreeze, onServiceFreezeChange, releaseServiceFreeze, renewServiceFreeze, reserveServiceFreeze, serviceFreezeMatches,
+  serviceShuttingDown,
 } from "./runtime-handover-state.js";
 
 /** 协议号：`/restart-impact` 与本端点的每个答复都带着它，调用方凭它分辨「这一版服务认这道关口」。 */
@@ -104,7 +105,8 @@ export async function acquireRestartFreeze(ttlMs?: unknown, assess?: () => Promi
   const ttl = ttlOf(ttlMs);
   const held = currentServiceFreeze();
   if (held) return { busy: held.kind === "handover" ? "正在切换新版服务" : "另一处正在准备重启服务" };
-  const reserved = reserveServiceFreeze("restart", ttl)!;
+  const reserved = reserveServiceFreeze("restart", ttl);
+  if (!reserved) return { busy: serviceShuttingDown() ? "服务正在停止" : "另一处正在准备重启服务" };
   try {
     const impact = await frozenRestartSnapshot(assess);
     // 快照花掉的那几秒不算持有者的：给出去的时候期限从头算。
@@ -124,9 +126,10 @@ export async function acquireRestartFreeze(ttlMs?: unknown, assess?: () => Promi
  */
 export function serviceFreezePublic(): { kind: "handover" | "restart"; until: string; remainingMs: number } | null {
   const freeze = currentServiceFreeze();
-  return freeze
-    ? { kind: freeze.kind, until: new Date(freeze.deadline).toISOString(), remainingMs: Math.max(0, freeze.deadline - Date.now()) }
-    : null;
+  // 正在停止（没有许可、也没有期限）：按排空最多要的那几秒报，页面上照样看得出「新的活稍后开始」。
+  const deadline = freeze?.deadline ?? (serviceShuttingDown() ? Date.now() + SHUTDOWN_DRAIN_MS : null);
+  return deadline === null ? null
+    : { kind: freeze?.kind ?? "restart", until: new Date(deadline).toISOString(), remainingMs: Math.max(0, deadline - Date.now()) };
 }
 
 onServiceFreezeChange(() => bus.publish({ type: "service.freeze", freeze: serviceFreezePublic() }));

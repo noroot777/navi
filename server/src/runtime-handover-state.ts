@@ -9,6 +9,10 @@ import { randomUUID } from "node:crypto";
 //  · restart   准备重启（restart-freeze.ts）：接口照常应答，只是不再起会被这次重启打断的新东西，
 //              好让给出去的影响快照在停服务之前一直算数
 // 被挡住的入口一律**等**，不算失败：许可一放（用户取消、期限到了）它们原样接着走。
+//
+// 另有一种不是许可的冻结：**正在停止**（beginServiceShutdown，singleton.ts 收到停止信号那一刻）。它不可撤销、
+// 没有期限：退出过程中别处放掉许可、许可到期都不会让入口接着走 —— 不然排空收掉的是开始时那几个，后来放进来的
+// 新智能体就留在退出之后没人管了。被它挡住的入口一直等到进程退出。
 
 export type ServiceFreezeKind = "handover" | "restart";
 
@@ -22,6 +26,7 @@ export class ServiceFrozenError extends Error {
 type Lease = { token: string; kind: ServiceFreezeKind; deadline: number; revision: number };
 
 let lease: Lease | null = null;
+let shuttingDown = false;
 let expiry: ReturnType<typeof setTimeout> | null = null;
 let revisions = 0;
 const waiting = new Set<() => void>();
@@ -45,12 +50,13 @@ function endLease(): void {
   lease = null;
   if (expiry) clearTimeout(expiry);
   expiry = null;
+  notify();
+  if (shuttingDown) return; // 正在停止：许可没了也不放行，等着的留到进程退出
   const callbacks = [...waiting];
   waiting.clear();
   for (const callback of callbacks) {
     try { callback(); } catch (error) { console.error("[navi] service freeze waiter failed:", error); }
   }
-  notify();
 }
 
 /** 此刻的冻结（到点的当场作废）。 */
@@ -60,11 +66,23 @@ export function currentServiceFreeze(): Readonly<Lease> | null {
 }
 
 export function serviceFrozen(): boolean {
-  return currentServiceFreeze() !== null;
+  return currentServiceFreeze() !== null || shuttingDown;
+}
+
+/** 服务开始停止：从此不再接活，不可撤销（见顶部）。 */
+export function beginServiceShutdown(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  notify();
+}
+
+export function serviceShuttingDown(): boolean {
+  return shuttingDown;
 }
 
 /** 被挡住的入口怎么跟人说。 */
 export function serviceFrozenText(): string {
+  if (shuttingDown) return "服务正在停止";
   return currentServiceFreeze()?.kind === "restart" ? "服务正在准备重启" : "正在切换新版服务";
 }
 
