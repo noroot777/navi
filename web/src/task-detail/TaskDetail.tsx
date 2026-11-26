@@ -57,6 +57,7 @@ import { stageSideChatQuote } from "../side-chat/sideChatQuote.ts";
 import { useAddReplyQuote } from "./replyQuote.ts";
 import { useReuseInput } from "./ReuseInput.tsx";
 import { DispatchHeldLine, useDispatchHolder } from "./dispatched/DispatchHeldLine.tsx";
+import { useViewingTask } from "../lib/taskViewing.ts";
 
 type InspectorOpenTab = InspectorHostControls["openTab"];
 
@@ -102,6 +103,7 @@ export function TaskDetail({
   inspectorToggleTarget?: HTMLElement | null;
   notify: Notify;
 }) {
+  useViewingTask(task.id);
   const [groups, setGroups] = useState<Group[]>([]);
   const [busy, setBusy] = useState(false);
   // 共享项目里动别人的任务会换执行器 —— 起轮之前先确认(§八)。自用模式恒不弹。

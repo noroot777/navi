@@ -1,13 +1,16 @@
 // 系统通知（server/src/system-notify.ts）：什么时候往客户端推一条 task.notify。
 //
 // 钉住的几件事：
-// ① 头一回启用：已有的待验收、失败都只记底，不补推；记过底的任务之后再有事照推；
+// ① 头一回启用：已有的待验收、失败都只记底，不补推；记过底的任务之后再有事照推；头一次全量对账之前就有动静的
+//    老任务（启动时还在跑、几秒内就跑完了）不算历史，跟全量对账一起推，不提前推；
 // ② 水位之后新建的任务：跑完等验收推一条，重复对账不再推；
 // ③ 停下来提问推一条，带上问题；跑挂了（中断）推一条；验收落章推一条，「等你验收」那件事没了不另推；
 // ④ 验证没过、验收前置命令没过各推一条；门禁通过不单推；
 // ⑤ 回合锁还占着（这一轮还在结算）先不推，锁放开自己再对一次；
 // ⑥ 归档的任务不推；一次对账同一个人超过上限合成一条；
-// ⑦ 自用模式下 SSE 照推（合成的那一条也推）。
+// ⑦ 自用模式下 SSE 照推（合成的那一条也推）；
+// ⑧ 续聊挂了、原来的 done 放回去（真结算）：不说「完成了」，说「这一轮中断了」；续聊真完成了才是新的一次完成；
+// ⑨ 被停下（canceled）推一条，不重复。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -32,6 +35,8 @@ try {
   const { SystemNotifier, DIGEST_OVER } = await import("../src/system-notify.js");
   const { makeEventFilter } = await import("../src/auth/event-filter.js");
   const { SINGLE_USER_ID } = await import("../src/auth/context.js");
+  const { sessions, sessionTurns } = await import("../src/db/schema.js");
+  const { settleTaskStatus } = await import("../src/settle-status.js");
   const { eq } = await import("drizzle-orm");
 
   await ensureSchema();
@@ -56,8 +61,15 @@ try {
   await db.insert(tasks).values(task({ id: "old-done", title: "早就干完了", status: "done", endedAt: old, createdAt: old }) as never);
   await db.insert(tasks).values(task({ id: "old-failed", title: "早就挂了", status: "failed", endedAt: old, createdAt: old }) as never);
   await db.insert(tasks).values(task({ id: "old-running", title: "升级时在跑", status: "running", createdAt: old }) as never);
+  await db.insert(tasks).values(task({ id: "old-quick", title: "启动后马上跑完", status: "running", createdAt: old }) as never);
+  await set("old-quick", { status: "done", endedAt: new Date().toISOString() });
+  notifier.mark("old-quick", true);
+  await sleep(500);
+  assert.deepEqual(take(), [], "头一次全量对账之前：动静只攒着");
   await notifier.full();
-  assert.deepEqual(take(), [], "头一回启用：已有的待验收、失败都不补推");
+  const early = take();
+  assert.deepEqual(early.map((notice) => [notice.taskId, notice.kind]), [["old-quick", "accept"]],
+    "头一回启用：已有的待验收、失败都不补推；启动后才跑完的照推");
   await notifier.full();
   assert.deepEqual(take(), [], "再对一遍也不推");
   await set("old-running", { status: "done", endedAt: new Date().toISOString() });
@@ -158,6 +170,43 @@ try {
   assert.ok(filter.allow(done[0]!), "自用模式推给本机");
   assert.ok(filter.allow(digest[0]!), "合成的那一条也推");
   filter.stop();
+
+  // ── ⑧ 续聊挂了：不报完成 ───────────────────────────────────────────────
+  await db.insert(tasks).values(task({ id: "t6", title: "续聊", status: "running" }) as never);
+  await reconcile("t6");
+  await set("t6", { status: "done", doneSeq: 1, endedAt: new Date().toISOString() });
+  assert.deepEqual((await reconcile("t6")).map((notice) => notice.kind), ["accept"]);
+  const turnOf = async (n: number, outcome: string) => {
+    const at = new Date(Date.now() + n).toISOString();
+    await db.insert(sessionTurns).values({ id: `turn-${n}`, sessionId: "s6", taskId: "t6", startedAt: at, endedAt: at, outcome } as never);
+  };
+  await db.insert(sessions).values({ id: "s6", taskId: "t6", role: "single", agentType: "claude", executor: "claude", startedAt: new Date().toISOString() } as never);
+  await set("t6", { status: "running", followUpFrom: "done" });
+  assert.deepEqual(await reconcile("t6"), [], "续聊在跑：不推");
+  await turnOf(1, "failed");
+  const settled6 = await settleTaskStatus("t6", 1, null);
+  assert.equal(settled6.status, "done", "失败的续聊把原来的 done 放回去");
+  const restored = await reconcile("t6");
+  assert.deepEqual(restored.map((notice) => notice.kind), ["interrupted"], "不说「完成了，等你验收」");
+  assert.equal(restored[0]!.body, "这一轮中断了，结果还是上一版");
+  assert.deepEqual(await reconcile("t6"), [], "不重复");
+  await set("t6", { status: "running", followUpFrom: "done" });
+  await reconcile("t6");
+  await turnOf(2, "completed");
+  await set("t6", { completeConfirmedAt: new Date().toISOString() });
+  const finished6 = await settleTaskStatus("t6", 0, null);
+  assert.equal(finished6.status, "done");
+  const again = await reconcile("t6");
+  assert.deepEqual(again.map((notice) => notice.kind), ["accept"], "续聊真完成了：新的一次完成");
+
+  // ── ⑨ 被停下 ───────────────────────────────────────────────────────────
+  await db.insert(tasks).values(task({ id: "t7", title: "停掉", status: "running" }) as never);
+  await reconcile("t7");
+  await set("t7", { status: "canceled", endedAt: new Date().toISOString() });
+  const stopped = await reconcile("t7");
+  assert.deepEqual(stopped.map((notice) => notice.kind), ["canceled"]);
+  assert.equal(stopped[0]!.body, "已停止");
+  assert.deepEqual(await reconcile("t7"), [], "不重复");
 
   notifier.stop();
   console.log("test-system-notify: ok");

@@ -7,11 +7,12 @@
 //   · 浏览器：网页通知（Notification），要这台设备上自己打开过、浏览器也给了权限。只在 https 或本机地址下有。
 // 开关记在这台设备上（权限本来就是按设备给的），设置页「通知」那一块改它。
 //
-// 正对着看的那个任务不弹：窗口在前台、地址栏就是它，弹了只是噪音。几个页面各收到一份时靠 key 合成一条
-// （浏览器和 Windows 按 tag、mac 按通知 id 替换）。
+// 正对着看的那个任务不弹：这台设备上哪个页面在前台挂着它的会话视图（lib/taskViewing.ts，几个页面互相报），弹了只是
+// 噪音。几个页面各收到一份时靠 key 合成一条（浏览器和 Windows 按 tag、mac 按通知 id 替换）。
 import type { ServerEvent } from "@navi/shared";
 import { subscribeEvents } from "./events.ts";
 import { safeStorage } from "./safeStorage.ts";
+import { startTaskViewing, viewedSomewhere } from "./taskViewing.ts";
 
 type Notice = Extract<ServerEvent, { type: "task.notify" }>;
 interface NativeMessage { title: string; subtitle: string; body: string; key: string; project: string | null; task: string | null }
@@ -63,14 +64,15 @@ export async function setSystemNotifyEnabled(next: boolean): Promise<boolean> {
   return systemNotifyEnabled();
 }
 
+/** 开关变了（本页改的，或者同一设备上别的页面改的）。 */
 export function onSystemNotifyChange(listener: () => void): () => void {
+  const fromOtherPage = (event: StorageEvent) => { if (event.key === PREF_KEY) listener(); };
   listeners.add(listener);
-  return () => { listeners.delete(listener); };
-}
-
-function lookingAt(notice: Notice): boolean {
-  if (!notice.taskId || document.visibilityState !== "visible" || !document.hasFocus()) return false;
-  return new URLSearchParams(window.location.search).get("task") === notice.taskId;
+  window.addEventListener("storage", fromOtherPage);
+  return () => {
+    listeners.delete(listener);
+    window.removeEventListener("storage", fromOtherPage);
+  };
 }
 
 /** 点了通知：回到那个任务（同 navi:// 链接落地那样推一条历史、发一次 popstate，不重载）。 */
@@ -101,8 +103,9 @@ function show(notice: Notice): void {
 
 /** 整个页面听一份（App 里挂一次）。返回退订。 */
 export function startSystemNotify(): () => void {
+  startTaskViewing();
   return subscribeEvents((event) => {
-    if (event.type !== "task.notify" || !systemNotifyEnabled() || lookingAt(event)) return;
+    if (event.type !== "task.notify" || !systemNotifyEnabled() || (event.taskId && viewedSomewhere(event.taskId))) return;
     try {
       show(event);
     } catch {

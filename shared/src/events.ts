@@ -160,12 +160,13 @@ export type TurnTraceEvent = { kind: "tool" | "thinking" | "notice"; label: stri
 export type TurnImageRef = { path?: string; source: string; ref?: number; pos?: number; lost?: boolean };
 
 /**
- * 系统通知是哪一种时刻。前六种就是「此刻要人做哪件事」（task-attention.ts HumanTurnKind）；后三种是事后的结局：
- * 验收落章、验收前置命令没过、审查通过（不在等验收时才单说）。digest = 一口气来了好几件，合成一条。
+ * 系统通知是哪一种时刻。前六种就是「此刻要人做哪件事」（task-attention.ts HumanTurnKind）；后面是事后的结局：
+ * 这一轮中断了但任务没落失败（续聊挂了，原来的结果还在）、被停下、验收落章、验收前置命令没过、审查通过（不在等验收时才单说）。
+ * digest = 一口气来了好几件，合成一条。
  */
 export type TaskNotifyKind =
   | "question" | "failed" | "dispute" | "duet_gate" | "verify_failed" | "accept"
-  | "accepted" | "gate_failed" | "review_passed" | "digest";
+  | "interrupted" | "canceled" | "accepted" | "gate_failed" | "review_passed" | "digest";
 
 // SSE envelope pushed to the web client.
 export type ServerEvent =
