@@ -24,14 +24,20 @@ export function dispatchedWord(task: TaskListItem): { word: string; tone: Dispat
   return { word: display.label, tone: null };
 }
 
-/** 那一行小字：谁在干（执行器）、干了多久。 */
-export function dispatchedMeta(task: TaskListItem, now = Date.now()): string {
-  if (task.question) return task.question;
+/**
+ * 那一行小字：在问你就是那个问题；在干活就是谁在干（执行器）、干了多久。
+ * 后者分两段交出去，是为了窄的时候只把执行器截短，时长整个留着，不在「10m 33s」中间折行。
+ */
+export type DispatchedMeta = { ask: string } | { executor: string | null; duration: string | null };
+
+export function dispatchedMeta(task: TaskListItem, now = Date.now()): DispatchedMeta | null {
+  if (task.question) return { ask: task.question };
   const indicator = taskLook(task).indicator;
-  if (!indicator || !["active", "working", "attention", "error", "stalled"].includes(indicator)) return "";
+  if (!indicator || !["active", "working", "attention", "error", "stalled"].includes(indicator)) return null;
   const executor = task.executorLabel || task.agentType || null;
-  const duration = taskDurationInfo(task, now);
-  return [executor, duration ? `${duration.label} ${duration.text}` : null].filter(Boolean).join(" · ");
+  const info = taskDurationInfo(task, now);
+  const duration = info ? `${info.label} ${info.text}` : null;
+  return executor || duration ? { executor, duration } : null;
 }
 
 /**
