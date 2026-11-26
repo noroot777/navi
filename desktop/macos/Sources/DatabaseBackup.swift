@@ -148,8 +148,10 @@ enum DatabaseBackup {
       try? FileManager.default.removeItem(at: partial)
       throw error
     }
-    let pin = Pin(file: target.lastPathComponent, lastServedBy: ServerRecord.read()?.lastHandedTo ?? "unknown", since: Date())
-    try JSONEncoder().encode(validPins() + [pin]).write(to: pinsURL, options: .atomic)
+    try ServerRecord.locked {
+      let pin = Pin(file: target.lastPathComponent, lastServedBy: ServerRecord.read()?.lastHandedTo ?? "unknown", since: Date())
+      try JSONEncoder().encode(validPins() + [pin]).write(to: pinsURL, options: .atomic)
+    }
     prune(dir)
     return target
   }
@@ -164,10 +166,12 @@ enum DatabaseBackup {
     validPins().contains { $0.lastServedBy == version }
   }
 
-  /// 有一份服务在这份库上真起来了（迁移跑完了）：恢复点回到普通轮换里。删不掉也不要紧 ——
-  /// 比确认时间早的恢复点本来就不算（见 `validPins`）。
-  static func releaseRecoveryPoints() {
-    try? FileManager.default.removeItem(at: pinsURL)
+  /// 刚记上一次确认（ServerRecord.confirmServing，在它那把锁里调）：比确认时刻早的恢复点回到普通轮换里，清单里
+  /// 只留还固定着的（确认之后别人才留的底照样固定）。写不回去也不要紧 —— 比确认时刻早的本来就不算（`validPins`）。
+  static func dropReleasedPoints() {
+    let pins = validPins()
+    if pins.isEmpty { try? FileManager.default.removeItem(at: pinsURL) }
+    else { try? JSONEncoder().encode(pins).write(to: pinsURL, options: .atomic) }
   }
 
   private static func validPins() -> [Pin] {

@@ -100,7 +100,8 @@ if environment["MODE"]?.hasPrefix("paused-") == true {
   exit(0)
 }
 
-try RuntimeStore.prepare()
+// 同 ServerLauncher：已经有 current（旧服务那一版）就只发布不切。
+try RuntimeStore.prepare(activate: !RuntimeStore.hasCurrent)
 if environment["MISSING_NEXT"] == "1" { try FileManager.default.removeItem(at: RuntimeStore.destination!) }
 
 if environment["HOLD_START_LOCK"] == "1" {
@@ -201,6 +202,16 @@ while pendingInstall && !installFinished && !reported && Date() < deadline {
 emit("PHASE \(gate.phase) MAINTENANCE \(Maintenance.activeNote() ?? "none")")
 if proceeded && environment["START_FAILED_MIGRATION"] == "1" {
   emit("OUTCOME \(ServerLauncher.shared.ensureRunningSync(timeout: 5))")
+  if environment["LATE_EXIT"] == "1" {
+    let current = { NaviHealth.realPath(RuntimeStore.root.appendingPathComponent("current").path) }
+    emit("CURRENT_WHILE_STARTING \(current())")
+    let spawned = Int32(ServerRecord.read()!.attempt!.pid)
+    let exited = Date().addingTimeInterval(15)
+    while kill(spawned, 0) == 0 && Date() < exited { Thread.sleep(forTimeInterval: 0.1) }
+    precondition(kill(spawned, 0) != 0, "the late new server did not exit")
+    emit("CURRENT_AFTER_EXIT \(current()) SERVING \(ServerRecord.read()!.bundleVersion)")
+    exit(0)
+  }
   if case .navi(let instance) = NaviHealth.probeSync() { emit("RESTORED_SERVICE \(instance.codeDir ?? "none")") }
   let savedPause = try RuntimeRecovery.paused()
   precondition(savedPause != nil)

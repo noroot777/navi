@@ -44,7 +44,9 @@ if (process.platform !== "darwin") {
 const {DatabaseSync}=require('node:sqlite');
 const data=process.env.NAVI_DATA_DIR,root=fs.realpathSync(__dirname+'/../..');
 if(${JSON.stringify(version)}==='next'&&!fs.existsSync(data+'/.recovery-retry-clear')){
- const database=new DatabaseSync(data+'/navi.db');database.exec('create table failed_migration (id text)');database.close();process.exit(7);
+ const database=new DatabaseSync(data+'/navi.db');database.exec('create table failed_migration (id text)');database.close();
+ if(fs.existsSync(data+'/.recovery-linger')){setTimeout(()=>process.exit(7),7000);return}
+ process.exit(7);
 }
 const event=value=>fs.appendFileSync(data+'/../events.jsonl',JSON.stringify(value)+'\\n');
 const cleanupToken=fs.readFileSync(data+'/.recovery-cleanup-token','utf8');
@@ -451,6 +453,17 @@ server.listen(0,'127.0.0.1',()=>writeFileSync(${JSON.stringify(ready)},JSON.stri
       database.close();
       assert.equal(realpathSync(join(data, ".mac-runtimes/current")), realpathSync(previous));
     });
+    await scenario({}, async ({ run, previous, data }) => {
+      // 新版迁移后不应答、启动器等满时限放弃之后才退：从授权切换到它退出，current 一直是旧版。
+      execFileSync(process.execPath, [join(root, "desktop/shared/runtime-store.mjs"), "activate", previous, join(data, ".mac-runtimes")]);
+      writeFileSync(join(data, ".recovery-linger"), "");
+      const output = await run(0, { START_FAILED_MIGRATION: "1", LATE_EXIT: "1" });
+      assert.match(output, /OUTCOME failed/, output);
+      assert.ok(output.includes(`CURRENT_WHILE_STARTING ${realpathSync(previous)}`), output);
+      assert.ok(output.includes(`CURRENT_AFTER_EXIT ${realpathSync(previous)} SERVING previous`), output);
+      assert.equal(realpathSync(join(data, ".mac-runtimes/current")), realpathSync(previous));
+    });
+    console.log("✓ a switched-to runtime becomes current only once it answers: one that exits after the launcher gave up never does");
     await scenario({}, async ({ run, next }) => {
       const output = await run(0, { START_FAILED_MIGRATION: "1", RETRY_AFTER_ROLLBACK: "1", ANSWERS: "recover,recover,recover,recover" });
       assert.ok(output.includes(`RETRY_TARGET ${realpathSync(next)}`), output);

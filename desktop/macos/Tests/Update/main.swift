@@ -144,6 +144,15 @@ case "record":
   emit("STALE \(ServerRecord.staleVersion(servingPID: Int(args[2])!) ?? "none")")
   emit("STALE-OTHER-PID \(ServerRecord.staleVersion(servingPID: Int(args[2])! + 1) ?? "none")")
 
+case "observe":
+  // 探一眼、先不记账，等 args[2] 那个文件出现才把这一眼交给确认那一处：迟到的一眼。
+  let asked = Date()
+  let probe = NaviHealth.probeSync()
+  guard case .navi(let instance) = probe else { emit("OBSERVED nothing"); exit(1) }
+  emit("OBSERVED \(instance.pid ?? -1)")
+  _ = runUntil(30) { FileManager.default.fileExists(atPath: args[2]) }
+  emit("SETTLED \(ServerLauncher.settle(probe, askedAt: asked).map { "\($0)" } ?? "nil")")
+
 case "staleness":
   // 只读：端口上那份（pid）认不认得出是别的构建号起的。
   emit("STALE \(ServerRecord.staleVersion(servingPID: Int(args[2])!) ?? "none")")
@@ -183,7 +192,7 @@ case "pins":
   emit("PINS \(DatabaseBackup.recoveryPoints().map(\.lastPathComponent).joined(separator: ","))")
 
 case "confirm":
-  ServerRecord.confirmServing(pid: Int(args[2])!)
+  ServerRecord.confirmServing(pid: Int(args[2])!, observedAt: Date())
   emit("PINS \(DatabaseBackup.recoveryPoints().map(\.lastPathComponent).joined(separator: ","))")
 
 default:

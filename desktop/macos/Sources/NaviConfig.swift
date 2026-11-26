@@ -334,19 +334,26 @@ enum RuntimeStore {
     try? FileManager.default.destinationOfSymbolicLink(atPath: root.appendingPathComponent("current").path)
   }
 
-  /// current 跟着确认在服务的那一份走：新开的 MCP（mcp.sh）用的就是端口上那份服务的那一版。端口上是数据根里
-  /// 发布过的某一版、而 current 指着别处才改；包内旧布局起的服务不在仓库里，不动。
-  static func follow(_ instance: NaviInstance) {
-    guard instance.isOurs, let code = instance.codeDir, contains(code) else { return }
-    let runtime = URL(fileURLWithPath: NaviHealth.realPath(code), isDirectory: true)
-    guard currentID != runtime.lastPathComponent else { return }
-    try? select(runtime)
+  /// current 跟着确认在服务的那一份走：新开的 MCP（mcp.sh）用的就是端口上那份服务的那一版。只由
+  /// ServerRecord.confirmServing 在它那把锁里、认准了这一眼不是过时的之后调。端口上是数据根里发布过的某一版
+  /// （`codeDir`）、而 current 指着别处才改；包内旧布局起的服务不在仓库里，不动。切不过去返回 false。
+  static func follow(_ codeDir: String?) -> Bool {
+    guard let codeDir, contains(codeDir) else { return true }
+    let runtime = URL(fileURLWithPath: NaviHealth.realPath(codeDir), isDirectory: true)
+    guard currentID != runtime.lastPathComponent else { return true }
+    return (try? select(runtime)) != nil
   }
 
-  /// 把 current 指过去，并记下这一次起服务用的是它（`restored`，NaviConfig.runtimeURL）。
+  /// 往回切：把 current 指回确认服务过的那一版（回退到迁移前、回退暂停里再起），并记下这一次起服务用的是它
+  /// （`restored`，NaviConfig.runtimeURL）。往前切只有 follow 一条路。
   static func activate(_ runtime: URL) throws {
     try select(runtime)
     restored = runtime
+  }
+
+  /// 这一次起服务用这一版 app 带的那一版（NaviConfig.targetRuntimeURL），current 不动：它应答了才跟过去（follow）。
+  static func launchTarget() {
+    restored = nil
   }
 
   private static func select(_ runtime: URL) throws {

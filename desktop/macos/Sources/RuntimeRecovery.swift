@@ -31,7 +31,7 @@ enum RuntimeRecovery {
           NaviHealth.samePath(record.next, NaviConfig.targetRuntimeURL.path) else {
       throw SQLiteFile.Failure("新版切换恢复记录未定稿，未解除回退暂停")
     }
-    try RuntimeStore.activate(NaviConfig.targetRuntimeURL)
+    RuntimeStore.launchTarget()
     if FileManager.default.fileExists(atPath: pauseURL.path) { try FileManager.default.removeItem(at: pauseURL) }
   }
 
@@ -71,7 +71,7 @@ enum RuntimeRecovery {
     let pause = Pause(previous: record.previous, version: record.server?.bundleVersion ?? "unknown", reason: reason)
     try JSONEncoder().encode(pause).write(to: pauseURL, options: .atomic)
     try RuntimeStore.activate(previous)
-    if let server = record.server { try JSONEncoder().encode(server).write(to: ServerRecord.url, options: .atomic) }
+    if let server = record.server { try ServerRecord.replace(with: server) }
     try FileManager.default.removeItem(at: url)
     return previous
   }

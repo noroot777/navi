@@ -71,14 +71,14 @@ final class ServerLauncher {
   func ensureRunningSync(timeout: TimeInterval) -> Outcome {
     do {
       if NaviConfig.isLocal {
-        // 只把这一版的运行时发布进数据根，不切 current：current 跟着确认在服务的那一份走（RuntimeStore.follow）——
+        // 只把这一版的运行时发布进数据根，不切 current：current 跟着确认在服务的那一份走（ServerRecord.confirmServing）——
         // 端口上还是旧服务时（在等它缓过来、在等安全接管），新开的 MCP 也该用旧服务那一版。还没有 current（第一次
         // 用外置运行时）时没有「旧的」可留，直接指向这一版，mcp.sh 才有东西可起。
         if try RuntimeRecovery.paused() == nil { try RuntimeStore.prepare(activate: !RuntimeStore.hasCurrent) }
       }
     }
     catch { return .failed(error.localizedDescription) }
-    if let settled = Self.settle(NaviHealth.probeSync()) { return settled }
+    if let settled = Self.settleNow() { return settled }
     if let hold { return .failed(hold) }
     guard NaviConfig.isLocal else {
       return .failed("连不上 \(NaviConfig.baseURL.absoluteString)。它不是本机地址，app 不会替它启动服务。")
@@ -89,7 +89,7 @@ final class ServerLauncher {
       lock = try ServerStartLock(dataDir: NaviConfig.dataURL)
       let deadline = Date().addingTimeInterval(timeout)
       while try !lock.tryAcquire() {
-        if let settled = Self.settle(NaviHealth.probeSync()) { return settled }
+        if let settled = Self.settleNow() { return settled }
         if let hold { return .failed(hold) }
         guard Date() < deadline else { return .failed("等另一处启动 Navi 服务超时。可以重试；服务起来后也会自动载入。") }
         Thread.sleep(forTimeInterval: 0.2)
@@ -98,7 +98,7 @@ final class ServerLauncher {
       return .failed("无法取得服务启动锁：\(error.localizedDescription)")
     }
     defer { withExtendedLifetime(lock) {} }
-    if let settled = Self.settle(NaviHealth.probeSync()) { return settled }
+    if let settled = Self.settleNow() { return settled }
     if let hold { return .failed(hold) }
     if let waited = waitForLockHolder(timeout: timeout) { return waited }
     let pause: RuntimeRecovery.Pause?
@@ -106,8 +106,8 @@ final class ServerLauncher {
     do {
       pause = try RuntimeRecovery.paused()
       runtime = pause.map { URL(fileURLWithPath: $0.previous) } ?? NaviConfig.targetRuntimeURL
-      // 回退暂停里起的是要回到的那一版，current 先指回它。别的情形 current 等新起的那份应答了再跟过去（settle /
-      // waitReady → RuntimeStore.follow）：它没起来，current 就还指着原来那一版，不用事后再退。
+      // 回退暂停里起的是要回到的那一版，current 先指回它。别的情形 current 等新起的那份应答了再跟过去（adopt →
+      // ServerRecord.confirmServing）：它没起来，current 就还指着原来那一版，不用事后再退。
       if pause != nil { try RuntimeStore.activate(runtime) }
     }
     catch { return .failed("无法启用新版运行时，未启动服务：\(error.localizedDescription)") }
@@ -133,9 +133,10 @@ final class ServerLauncher {
       let outcome = waitReady(pid: pid, timeout: timeout)
       if case .failed(let startupFailure) = outcome, kill(pid, 0) != 0, errno == ESRCH {
         // 它退了，这份库这会儿却握在另一个活着的服务手里（在上面那次查过之后才出现的）：不在它底下拿恢复点
-        // 覆盖库，接着等它。它这一次有没有动过库这里不猜 —— 恢复点照常固定着，等下一次确认才作废。
+        // 覆盖库，接着等它。它是被那份的锁挡下的、还是自己出了事之后那份才起来，这里分不出来，不猜 —— 恢复点
+        // 照常固定着，等下一次确认才作废。
         if let holder = DatabaseFile.liveHolder(in: NaviConfig.dataURL), holder.pid != pid {
-          RuntimeLog.record("server.spawn_refused", ["serverPid": Int(pid), "holderPid": Int(holder.pid)])
+          RuntimeLog.record("server.exited_while_held", ["serverPid": Int(pid), "holderPid": Int(holder.pid)])
           return waitForLockHolder(timeout: timeout) ?? outcome
         }
         do {
@@ -199,7 +200,7 @@ final class ServerLauncher {
     RuntimeLog.record("server.held", ["holderPid": Int(holder.pid)])
     let deadline = Date().addingTimeInterval(timeout)
     while true {
-      if let settled = Self.settle(NaviHealth.probeSync()) { return settled }
+      if let settled = Self.settleNow() { return settled }
       if let hold { return .failed(hold) }
       guard let current = DatabaseFile.liveHolder(in: NaviConfig.dataURL) else { return nil }
       holder = current
@@ -208,23 +209,33 @@ final class ServerLauncher {
     }
   }
 
+  /// 现在探一眼，看结果里哪些已经是结论。
+  static func settleNow() -> Outcome? {
+    let asked = Date()
+    return settle(NaviHealth.probeSync(), askedAt: asked)
+  }
+
   /// 探到的结果里哪些已经是结论：自己那份在 → ready；别人占着 → occupied；连不上 → nil（接着起）。
-  static func settle(_ probe: NaviProbe) -> Outcome? {
+  /// `askedAt`：这一眼是什么时候发出去的（见 adopt）。
+  static func settle(_ probe: NaviProbe, askedAt: Date) -> Outcome? {
     switch probe {
     case .down, .unreachable: return nil
     case .notNavi(let what): return .occupied(Occupant.notNavi(what))
     case .navi(let instance):
       guard NaviHealth.isServing(probe) else { return .occupied(Occupant.otherNavi(instance)) }
-      // 不管服务是谁起的、谁先看到它起来，确认都在这一处（窗口、登录项、另一个窗口的重试都经过这里）。
-      if NaviConfig.isLocal {
-        RuntimeRecovery.confirmed(instance)
-        RuntimeStore.follow(instance)
-        RuntimeStore.reclaimAfterConfirmation(instance)
-        ServerRecord.confirmServing(pid: instance.pid)
-        ServedInstance.observe(instance)
-      }
+      if NaviConfig.isLocal { adopt(instance, askedAt: askedAt) }
       return .ready
     }
+  }
+
+  /// 自己那份应答了。不管服务是谁起的、谁先看到它起来，确认都在这一处（窗口、登录项、另一个窗口的重试、起它的
+  /// 那个启动器都经过这里）。这一眼可能是过时的（探到和走到这里之间，旧服务可能已经退了、新的一次已经起了），
+  /// 所以带上发出去的时刻，由服务记录那一层判断它还算不算数（ServerRecord.confirmServing）。
+  private static func adopt(_ instance: NaviInstance, askedAt: Date) {
+    RuntimeRecovery.confirmed(instance)
+    ServerRecord.confirmServing(pid: instance.pid, codeDir: instance.isOurs ? instance.codeDir : nil, observedAt: askedAt)
+    RuntimeStore.reclaimAfterConfirmation(instance)
+    ServedInstance.observe(instance)
   }
 
   private enum Spawned { case success(Int32), failure(String) }
@@ -285,13 +296,10 @@ final class ServerLauncher {
   private func waitReady(pid: Int32, timeout: TimeInterval) -> Outcome {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
+      let asked = Date()
       let probe = NaviHealth.probeSync()
       if case .navi(let instance) = probe, instance.isOurs, instance.pid == Int(pid) {
-        RuntimeRecovery.confirmed(instance)
-        RuntimeStore.follow(instance)
-        RuntimeStore.reclaimAfterConfirmation(instance)
-        ServerRecord.confirmServing(pid: Int(pid))
-        ServedInstance.observe(instance)
+        Self.adopt(instance, askedAt: asked)
         return .ready
       }
       if case .navi(let instance) = probe, !instance.isOurs { return .occupied(Occupant.otherNavi(instance)) }

@@ -9,7 +9,8 @@
 // 覆盖：锁的持有者活着、一时不应答 → 不起、等它缓过来、记录不变；端口关着也一样；等满时限 → 如实说是谁，
 // 「停掉它」只停那一个、它缓过来就不停、不理 SIGTERM 时再给强制结束；起出来的那份没服务过就退了（被锁挡下 /
 // 自己没起来 / 等满时限之后才退）→ 在服务的那一份一字不动、旧版照样认得出，这一次只记成一次没成的尝试（留的底
-// 照常固定，下一版起之前不重备）；闸在等着换掉旧服务时端口上已经是这一版起的那份 → 不再接管它。
+// 照常固定，这一版再起不重备）；旧服务在尝试之后应答 → 它的恢复点作废；尝试之前的一眼迟到了才交来确认 → 什么都
+// 不改；闸在等着换掉旧服务时端口上已经是这一版起的那份 → 不再接管它。
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
@@ -135,6 +136,7 @@ const drive = (args, answers) => driveAsync(args, answers).done;
 
 const OLD = "20000101.0000";
 const record = () => JSON.parse(readFileSync(recordFile, "utf8"));
+const attempt = () => { const { pid, bundleVersion } = record().attempt; return { pid, bundleVersion }; };
 const backups = () => (existsSync(join(data, "backups")) ? readdirSync(join(data, "backups")).filter((n) => n.endsWith(".db")) : []);
 const pins = async () => (await drive(["pins"])).out.match(/PINS (.*)/)[1].split(",").filter(Boolean);
 const staleness = async (pid) => (await drive(["staleness", String(pid)])).out.match(/STALE (.*)/)[1];
@@ -218,7 +220,7 @@ await withTestResources(async () => {
   assert.match(result.out, new RegExp(`LAUNCH unresponsive ${holder.pid}`), "and then it waits for the holder instead\n" + result.out);
   assert.equal(record().pid, holder.pid, "the serving identity is untouched");
   assert.equal(record().bundleVersion, OLD);
-  assert.deepEqual(record().attempt, { pid: spawnedPids()[0], bundleVersion: "dev" }, "the spawn is only an attempt");
+  assert.deepEqual(attempt(), { pid: spawnedPids()[0], bundleVersion: "dev" }, "the spawn is only an attempt");
   assert.equal(await staleness(holder.pid), OLD, "the old service is still recognised as stale");
   assert.equal(backups().length, 1, "fixture: the launch backed up before spawning");
   assert.deepEqual(await pins(), backups(), "whether the attempt touched the database is not guessed: the backup stays pinned");
@@ -243,11 +245,38 @@ await withTestResources(async () => {
   result = await drive(["launch", "5"]);
   assert.match(result.out, /LAUNCH ready/, result.out);
   assert.deepEqual(spawnedPids(), [lingering], "the recovered old service is adopted, nothing new is started");
-  assert.equal(record().attempt, undefined, "confirming the serving process drops the failed attempt");
   assert.equal(record().bundleVersion, OLD);
+  assert.ok(record().confirmedAt > record().attempt.startedAt, "it was seen serving after the attempt");
+  assert.deepEqual(await pins(), [], "so the database was last written by it: its points are released, the next build backs up afresh");
   assert.equal(await staleness(holder.pid), OLD);
   await stop(holder);
   console.log("PASS: a spawn that exits after the launcher stopped waiting is reconciled by the record itself");
+
+  // ── 迟到的一眼：旧服务应答之后才退、新的一次已经起了，这一眼才交到确认那一处 —— 什么都不改 ──
+  reset();
+  setHealth("ok");
+  holder = await startHolder({ lock: false });
+  await drive(["record", String(holder.pid), OLD]);
+  const go = join(temporary, "go");
+  rmSync(go, { force: true });
+  const observer = driveAsync(["observe", go]);
+  for (let i = 0; i < 100 && !observer.output().includes("OBSERVED"); i++) await delay(50);
+  assert.match(observer.output(), new RegExp(`OBSERVED ${holder.pid}`), observer.output());
+  await stop(holder);
+  writeFileSync(newServerMode, "linger");
+  result = await drive(["launch", "2"]);
+  assert.match(result.out, /LAUNCH failed .*2 秒内没应答/, result.out);
+  const pending = record();
+  assert.equal(pending.attempt.pid, spawnedPids()[0]);
+  assert.deepEqual(await pins(), backups(), "fixture: the attempt's backup is pinned");
+  writeFileSync(go, "");
+  result = await observer.done;
+  assert.match(result.out, /SETTLED ready/, result.out);
+  assert.deepEqual(record(), pending, "an answer from before the attempt confirms nothing about after it");
+  assert.deepEqual(await pins(), backups(), "and releases no recovery point");
+  assert.equal(await staleness(holder.pid), OLD);
+  for (let i = 0; i < 100 && spawnSync("kill", ["-0", String(spawnedPids()[0])]).status === 0; i++) await delay(100);
+  console.log("PASS: a late observation of the old service does not undo a newer attempt or its recovery point");
 
   // ── 自己没起来（没人握着锁）：在服务的那一份不动；「这一版起过」记在尝试里，下一版起之前照常重备、这一版再起不重备 ──
   reset();
@@ -258,7 +287,7 @@ await withTestResources(async () => {
   assert.equal(spawnedPids().length, 1);
   assert.equal(record().pid, 4242, "no pid that never served becomes the serving identity");
   assert.equal(record().bundleVersion, OLD);
-  assert.deepEqual(record().attempt, { pid: spawnedPids()[0], bundleVersion: "dev" }, "this build had its go at the database");
+  assert.deepEqual(attempt(), { pid: spawnedPids()[0], bundleVersion: "dev" }, "this build had its go at the database");
   assert.deepEqual(await pins(), backups(), "the pre-migration backup stays pinned");
   assert.equal(backups().length, 1);
   result = await drive(["launch", "3"]);

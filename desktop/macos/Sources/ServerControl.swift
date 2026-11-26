@@ -5,16 +5,26 @@ import Darwin
 ///
 ///  · **在服务的那一份**（`pid` + `bundleVersion`）：确认应答过的那个进程、是哪一版 app 起的。只有确认
 ///    （`confirmServing`）会改它 —— 起服务的人自己说了不算。
-///  · **这一次起服务**（`attempt`）：起之前先记下构建号（pid 还是 0；写不进去就不起），进程起来了补上 pid。
+///  · **这一次起服务**（`attempt`）：起之前先记下构建号和时刻（pid 还是 0；写不进去就不起），进程起来了补上 pid。
 ///    它应答了（不管是起它的那个启动器等到的，还是之后重开 app、登录项、另一个窗口看到的）才升成在服务的那一份。
 ///    没应答就退了、等超时了、端口被别人抢了，它都只是一次没成的尝试，留在 `attempt` 里，在服务的那一份原样不动。
 ///
 /// 分开存是因为起服务的结局启动器自己说不准：被锁挡下、迟迟才退、起了一半又换了人……要是起之前就拿新进程
 /// 盖掉在服务的那一份，任何一条没对上账的路都会让端口上那份旧服务从此「pid 对不上 = 不知道是谁」。
 ///
-/// 库最后交给了哪一版（`lastHandedTo`）：有一次尝试就是那一版 —— 它可能已经动过库（迁移不可逆），恢复点认
-/// 「这一次备过没有」靠的就是它（DatabaseBackup.covers）。在服务的那一份之后又被确认（旧服务缓过来了、接着写库），
-/// 那次尝试就作废：库最后是那一份在写，下一次起之前要照常再备一份。
+/// **确认是一次带时刻的比较交换**：几处（窗口、登录项、另一个 app 进程）各自探活、各自确认，探到和记账之间
+/// 隔着多久谁也说不准。所以读、改、写都在同一把文件锁里（`locked`，恢复点清单的增删也在这把锁里），确认带上
+/// 「这一眼是什么时候发出去的」：
+///  · 应答的是这一次尝试的那个进程：升成在服务的那一份。尝试只有最新的一次（新的尝试会盖掉旧的），所以迟到的
+///    一眼最多确认它自己那一代，盖不掉之后才起的那一次。
+///  · 应答的是在服务的那一份：只有这一眼发出去的时候晚于这一次尝试开始，才算「尝试之后它还在写库」—— 更早
+///    的一眼说明不了尝试之后的事，什么都不改。
+/// current（新开的 MCP 用哪一版运行时，RuntimeStore.follow）在同一处、同一个判断下跟过去，切不过去就整次不记，
+/// 下一眼再来。
+///
+/// 库最后交给了哪一版（`lastHandedTo`）：尝试比最近一次确认晚，就是尝试那一版 —— 它可能已经动过库（迁移不可逆），
+/// 恢复点认「这一次备过没有」靠的就是它（DatabaseBackup.covers）。尝试之后在服务的那一份又被确认过（旧服务
+/// 缓过来了、接着写库），就是在服务的那一版：下一次起之前要照常再备一份。
 ///
 /// 换了新版 app（Sparkle 装完重开、`build.sh --install`）再连上时，在服务的那一份构建号不是自己 = 服务还在跑
 /// 旧版代码。见 UpdateGate 的 `.staleServer`。pid 对不上就是「不知道」，不当成旧版。
@@ -22,46 +32,88 @@ struct ServerRecord: Codable {
   struct Attempt: Codable {
     let pid: Int
     let bundleVersion: String
+    /// 这一次起服务记下的时刻（备份之后、起进程之前）。这之前留的恢复点都是给它的。
+    let startedAt: Date
   }
 
   static let fileName = ".mac-server.json"
   static var url: URL { NaviConfig.dataURL.appendingPathComponent(fileName) }
+  private static var lockURL: URL { NaviConfig.dataURL.appendingPathComponent(fileName + ".lock") }
 
   let pid: Int
   let bundleVersion: String
-  /// 最近一次确认有服务在这份库上起来过的时间（比它早的恢复点作废）。
+  /// 最近一次确认的时刻：比它早的恢复点作废（DatabaseBackup.validPins）。升级确认记的是那次尝试开始的时刻，
+  /// 再确认记的是那一眼发出去的时刻 —— 都不会晚于「看到它在服务」，确认之后别人才留的底不会被它顺带作废。
   var confirmedAt: Date? = nil
-  /// 还没确认应答过的那一次起服务。
+  /// 最近一次起服务（见类型顶部）。
   var attempt: Attempt? = nil
 
   /// 库最后交给了哪一版 app（见类型顶部）。
-  var lastHandedTo: String { attempt?.bundleVersion ?? bundleVersion }
+  var lastHandedTo: String {
+    guard let attempt, attempt.startedAt > (confirmedAt ?? .distantPast) else { return bundleVersion }
+    return attempt.bundleVersion
+  }
 
-  /// 要起服务了：先记下是这一版。写不进去抛错，调用方就别起。
+  /// 要起服务了：先记下是这一版、什么时候起的。写不进去抛错，调用方就别起。
   static func writeAttempt(version: String = NaviConfig.bundleVersion) throws {
-    try save(with(attempt: Attempt(pid: 0, bundleVersion: version)))
+    try locked {
+      try save(with(attempt: Attempt(pid: 0, bundleVersion: version, startedAt: Date())))
+    }
   }
 
-  /// 起出来的进程号。
+  /// 起出来的进程号，补进这一次尝试（没有先记下尝试的 —— 回退时拉起旧版那一下 —— 从现在算起）。
   static func write(pid: Int, version: String = NaviConfig.bundleVersion) {
-    try? save(with(attempt: Attempt(pid: pid, bundleVersion: version)))
+    try? locked {
+      let pending = read()?.attempt.flatMap { $0.pid == 0 && $0.bundleVersion == version ? $0.startedAt : nil }
+      try save(with(attempt: Attempt(pid: pid, bundleVersion: version, startedAt: pending ?? Date())))
+    }
   }
 
-  /// 端口上自己那份应答了：是这一次起出来的那个，就升成在服务的那一份；是在服务的那一份，就再确认一次（它之前
-  /// 那次没成的尝试随之作废）。别的进程不算。
-  static func confirmServing(pid: Int?) {
-    guard let pid, pid > 1, let record = read() else { return }
-    if let attempt = record.attempt, attempt.pid == pid {
-      try? save(ServerRecord(pid: pid, bundleVersion: attempt.bundleVersion, confirmedAt: Date()))
-    } else if record.pid == pid {
-      try? save(ServerRecord(pid: pid, bundleVersion: record.bundleVersion, confirmedAt: Date()))
-    } else { return }
-    DatabaseBackup.releaseRecoveryPoints()
+  /// 端口上自己那份（`pid`，跑的是 `codeDir`）应答了，探活是 `observedAt` 发出去的。按类型顶部那两条记账；
+  /// 记上了，比确认时刻早的恢复点作废。别的进程、过时的一眼不算。
+  static func confirmServing(pid: Int?, codeDir: String? = nil, observedAt: Date) {
+    guard let pid, pid > 1 else { return }
+    try? locked {
+      guard let record = read() else { return }
+      let confirmed: ServerRecord
+      if let attempt = record.attempt, attempt.pid == pid {
+        confirmed = ServerRecord(pid: pid, bundleVersion: attempt.bundleVersion,
+                                 confirmedAt: max(record.confirmedAt ?? .distantPast, attempt.startedAt))
+      } else if record.pid == pid, observedAt > (record.attempt?.startedAt ?? .distantPast) {
+        confirmed = ServerRecord(pid: pid, bundleVersion: record.bundleVersion,
+                                 confirmedAt: max(record.confirmedAt ?? .distantPast, observedAt), attempt: record.attempt)
+      } else { return }
+      guard RuntimeStore.follow(codeDir) else {
+        RuntimeLog.record("server.confirm_deferred", ["serverPid": pid, "step": "runtime"])
+        return
+      }
+      do { try save(confirmed) } catch {
+        RuntimeLog.record("server.confirm_deferred", ["serverPid": pid, "step": "record"])
+        return
+      }
+      DatabaseBackup.dropReleasedPoints()
+    }
   }
 
   static func read() -> ServerRecord? {
     guard let data = try? Data(contentsOf: url) else { return nil }
     return try? JSONDecoder().decode(ServerRecord.self, from: data)
+  }
+
+  /// 原样换回一份（回退到迁移前时，换回切换之前那一份）。
+  static func replace(with record: ServerRecord) throws {
+    try locked { try save(record) }
+  }
+
+  /// 服务记录和恢复点清单的读改写都在这把锁里（跨进程，同一进程里的几个线程也互斥）。不可重入。
+  static func locked<T>(_ body: () throws -> T) throws -> T {
+    let fd = open(lockURL.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+    guard fd >= 0 else { throw SQLiteFile.Failure("打不开服务记录锁（\(String(cString: strerror(errno)))）") }
+    defer { close(fd) }
+    while flock(fd, LOCK_EX) != 0 {
+      guard errno == EINTR else { throw SQLiteFile.Failure("拿不到服务记录锁（\(String(cString: strerror(errno)))）") }
+    }
+    return try body()
   }
 
   private static func with(attempt: Attempt) -> ServerRecord {
