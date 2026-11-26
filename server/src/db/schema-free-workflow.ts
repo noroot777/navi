@@ -212,7 +212,7 @@ export const freeReviewRounds = sqliteTable(
     // 这一轮落 error 且没结论时判出的原因（review-no-verdict.ts）。每个审查回合收尾都按那一回合
     // 重写一次（续本轮之后又断了，原因换成新那一次的），null = 没判过 / 老行。
     noVerdict: text("no_verdict", { mode: "json" }).$type<ReviewNoVerdict>(),
-    // 这一轮实际跑在哪个模型、哪档智能水平上（派发那一刻解析，free-review-round.ts）。null = 老行，没记过。
+    // 这一轮实际跑在哪个模型、哪档智能水平上（审查回合真正拉起时记下，review-continuation.ts commitReviewTurnDelivery）。null = 老行，没记过。
     ranOn: text("ran_on", { mode: "json" }).$type<ReviewRanOn>(),
     startedAt: text("started_at").notNull(),
     endedAt: text("ended_at"),

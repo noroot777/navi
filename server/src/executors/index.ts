@@ -148,33 +148,14 @@ export async function resolveExecutorProfileId(opts: ExecutorResolveOpts): Promi
   return (await pickProfile(opts)).profile?.id ?? null;
 }
 
-// 覆盖值 → profile → 供应商默认：起进程（build）和只拿来展示（effectiveRunConfig）走同一份优先级。
-function runConfigOf(profile: AgentRow | null, relay: RelayConfig | undefined, overrides: ExecutorOverrides) {
-  return {
-    model: overrides.model || profile?.model || relay?.defaultModel || undefined,
-    reasoningEffort: overrides.reasoningEffort || profile?.reasoningEffort || undefined,
-  };
-}
-
-/**
- * 按这份配置起跑会落到哪个模型、哪档思考强度（null = 跟随 CLI 自己的默认）。只解析、不起进程：
- * 给界面说清「这一次是哪个模型跑的」—— 覆盖值常常是空的（跟随执行器），光看它说不出来。
- * 读的是 profile 此刻的样子，profile 后来被改过的话，老记录也跟着显示新的。
- */
-export async function effectiveRunConfig(opts: ExecutorResolveOpts): Promise<{ model: string | null; reasoningEffort: string | null }> {
-  const { profile } = await pickProfile(opts);
-  const relay = profile ? await loadRelay(profile.providerId) : undefined;
-  const { model, reasoningEffort } = runConfigOf(profile, relay, opts);
-  return { model: model ?? null, reasoningEffort: reasoningEffort ?? null };
-}
-
 async function build(
   profile: AgentRow | null,
   type: AgentType,
   overrides: ExecutorOverrides = {},
 ): Promise<AgentExecutor> {
   const relay = profile ? await loadRelay(profile.providerId) : undefined;
-  const { model, reasoningEffort } = runConfigOf(profile, relay, overrides);
+  const model = overrides.model || profile?.model || relay?.defaultModel || undefined;
+  const reasoningEffort = overrides.reasoningEffort || profile?.reasoningEffort || undefined;
   // 档位能力优先用**已探到的** CLI 原话(见 cachedModelEfforts:不触发探测,拿不到就
   // 退回规则表)。报错文案带上来源,因为「谁说这个组合不行」直接决定用户下一步怎么办:
   // 是改配置,还是去查 navi 的规则表写错了。

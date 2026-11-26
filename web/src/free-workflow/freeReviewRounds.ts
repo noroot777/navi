@@ -43,7 +43,7 @@ export function checkModeText(run: FreeReviewRun): string {
 }
 
 /**
- * 这一轮是哪个模型审的：认派发那一刻记下的（`ranOn`）；老记录没记过就只剩 run 上的覆盖值。
+ * 这一轮是哪个模型审的：认审查回合拉起时记下的（`ranOn`）；老记录没记过就只剩 run 上的覆盖值。
  * null = 说不出名字（跟随 CLI 默认，或老记录跟随执行器）。
  */
 export function reviewModelText(run: FreeReviewRun, round: FreeReviewRound): string | null {

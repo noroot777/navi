@@ -1,13 +1,14 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "./db/index.js";
-import { regressionEvidence, scheduledMessages, tasks } from "./db/schema.js";
+import { freeReviewRounds, regressionEvidence, scheduledMessages, tasks } from "./db/schema.js";
+import type { ReviewRanOn } from "@navi/shared/free-workflow";
 import type { ConclusionTransaction } from "./regression-conclusion-commit.js";
 import type { WaitOrigin } from "./db/schema-task-wait.js";
 import { dirname } from "node:path";
 import { freeReviewEvidenceDir } from "./free-review-files.js";
 import { unsettledMonitorResponsibility } from "./monitor-responsibility.js";
 import { isTurnClaimed, type TurnSource } from "./runs.js";
-import { activeReviewEvidence, assertReviewAuthority, reviewDeliveryAuthority, reviewIdentityMatches, ReviewSuperseded,
+import { activeReviewEvidence, activeReviewScope, assertReviewAuthority, reviewDeliveryAuthority, reviewIdentityMatches, ReviewSuperseded,
   reviewTargetIdentity, type ReviewDelivery } from "./review-ownership.js";
 import { recordReviewWait, reviewWaitAuthorized, reviewWaitAtTurnStart, snapshotReviewWait } from "./review-wait.js";
 import { autoCheckpointOwner, questionWaitMatches, questionWaitOrigin, reviewWaitOrigin,
@@ -267,7 +268,9 @@ export async function commitReviewTurnDelivery(taskId: string, receipt: ReviewSt
   process?: { pid: number; unitToken?: string | null },
   persistRunner?: (transaction: ConclusionTransaction) => Promise<void>,
   /** 输入进了哪条会话:「继续本轮审查」认会话只认这一份归属(free-review-retry-identity.ts)。 */
-  sessionId?: string): Promise<void> {
+  sessionId?: string,
+  /** 这一回合**实际拉起**的执行器解析出的模型/智能水平(orchestrator 手里那一份 `ex`)。 */
+  ranOn?: ReviewRanOn): Promise<void> {
   if (!receipt) return;
   await db.transaction(async (transaction) => {
     const task = (await transaction.select().from(tasks).where(eq(tasks.id, taskId)))[0];
@@ -277,6 +280,11 @@ export async function commitReviewTurnDelivery(taskId: string, receipt: ReviewSt
       || start.directory !== receipt.directory || start.generation !== receipt.generation
       || JSON.stringify(start.identity) !== JSON.stringify(receipt.identity) || !reviewIdentityMatches(task, receipt.identity)) throw new ReviewSuperseded();
     await persistRunner?.(transaction);
+    // 这一轮是哪个模型审的:记在核过派发身份的这一笔里,用的是真正拉起进程的那份解析结果 —— 提前在派发时
+    // 另解析一次的话,排队期间改了执行器配置,记下的就是没跑的那个模型。只认自由审查轮(修复回合、验证轮不是)。
+    const scope = ranOn && !receipt.repair ? await activeReviewScope(transaction, task) : undefined;
+    if (scope?.run && scope.directory === receipt.directory) await transaction.update(freeReviewRounds).set({ ranOn })
+      .where(and(eq(freeReviewRounds.runId, scope.run.id), eq(freeReviewRounds.round, scope.round)));
     if (receipt.delivery?.kind === "checkpoint") {
       // 这三列只许由 `task-resume-prompt.ts` 导出的 patch/条件助手写:自己拼 `.set` 会漏掉代次,
       // 而「文字」压根证明不了「还是同一次占用」(那边 `resumePromptHeldBy` 的说明)。

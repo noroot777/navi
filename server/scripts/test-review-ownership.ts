@@ -178,7 +178,13 @@ try {
         return receipt;
       }, { behavior: "immediate" });
       const [receipt] = await Promise.all([resuming, reconcileRegressionSettlements()]);
-      await commitReviewTurnDelivery(owner.id, receipt);
+      const launched = { model: `launched-${mode}`, reasoningEffort: "high" };
+      await commitReviewTurnDelivery(owner.id, receipt, undefined, undefined, undefined, launched);
+      // 「哪个模型审的」记在核过派发身份的这一笔上,值就是拉起进程那一份执行器解析(orchestrator 传进来的);
+      // 只落到自由审查那一轮,验证轮 / 旧式审查任务没有那一行可写。
+      const freeRounds = await db.select().from(schema.freeReviewRounds).where(eq(schema.freeReviewRounds.runId, review.runId));
+      if (mode === "free" || mode === "accepted_merge") assert.deepEqual(freeRounds.find((item) => item.round === review.round)?.ranOn, launched);
+      else assert.equal(freeRounds.length, 0, "non-free reviews have no free round to record on");
       // 真实链路里紧跟着交付凭据的是协议回执那一笔(continueTask → turn-input-settlement.ts);这里没有
       // 执行器,照它补上「收下了」—— 否则凭据停在 spawn 时的 unknown,审查结算会按「送没送到说不清」按住。
       await noteReviewInputAcceptance(owner.id, receipt, "accepted");

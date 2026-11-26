@@ -119,7 +119,7 @@ export interface HandoffFreeReviewRound {
   // 那条谱系就断了 —— 熔断按承接现算，跨机器之后照样要算得出来。老载荷没有 = 没有。
   historyRefs?: string[] | null;
   carries?: { finding: number; from: string }[] | null;
-  // 这一轮跑在哪个模型上（派发那一刻记下的）。对端拿不到当时的执行器配置，不带过去就再也说不出。
+  // 这一轮跑在哪个模型上（审查回合真正拉起时记下的）。对端拿不到当时的执行器配置，不带过去就再也说不出。
   ranOn?: { model: string | null; reasoningEffort: string | null } | null;
   startedAt: string;
   endedAt: string | null;
