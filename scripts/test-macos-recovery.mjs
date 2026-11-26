@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,8 +44,13 @@ if (process.platform !== "darwin") {
 const {DatabaseSync}=require('node:sqlite');
 const data=process.env.NAVI_DATA_DIR,root=fs.realpathSync(__dirname+'/../..');
 if(${JSON.stringify(version)}==='next'&&!fs.existsSync(data+'/.recovery-retry-clear')){
- const database=new DatabaseSync(data+'/navi.db');database.exec('create table failed_migration (id text)');database.close();process.exit(7);
+ const database=new DatabaseSync(data+'/navi.db');database.exec('create table failed_migration (id text)');database.close();
+ if(fs.existsSync(data+'/.recovery-linger')){setTimeout(()=>process.exit(7),7000);return}
+ process.exit(7);
 }
+// 像真 server 一样握着这份库的单实例锁：app 确认在服务只认握着锁的那个进程。
+const startedAt=Date.now()-process.uptime()*1000;
+fs.writeFileSync(data+'/navi.db.navi.lock',JSON.stringify({version:1,pid:process.pid,processStartedAtMs:startedAt,token:'fixture-token'}));
 const event=value=>fs.appendFileSync(data+'/../events.jsonl',JSON.stringify(value)+'\\n');
 const cleanupToken=fs.readFileSync(data+'/.recovery-cleanup-token','utf8');
 const server=http.createServer((request,response)=>{
@@ -384,7 +389,20 @@ server.listen(0,'127.0.0.1',()=>writeFileSync(${JSON.stringify(ready)},JSON.stri
       database.close();
       assert.equal(existsSync(join(data, ".mac-runtime-recovery.json")), false);
     });
-    console.log("✓ failed migration restores the real database and previous runtime from the recorded recovery point");
+    await scenario({ incompatible: true }, async ({ run, data }) => {
+      const sleeper = spawn(process.execPath, ["-e", "setTimeout(()=>{},60000)"], { stdio: "ignore" });
+      try {
+        const output = await run(0, { HELD_ROLLBACK_PID: String(sleeper.pid), HELD_ROLLBACK_STARTED: String(Date.now()) });
+        assert.match(output, new RegExp(`REFUSED_HELD .*服务进程 ${sleeper.pid} 开着库`), output);
+        const database = new DatabaseSync(join(data, "navi.db"));
+        assert.ok(database.prepare("select name from sqlite_master where name='failed_migration'").get(), "the database is not swapped");
+        database.close();
+        assert.equal(existsSync(join(data, ".mac-runtime-recovery.json")), true, "and the recovery is still on record");
+      } finally {
+        sleeper.kill("SIGKILL");
+      }
+    });
+    console.log("✓ failed migration restores the real database and previous runtime from the recorded recovery point, never under a live lock holder");
 
     for (const [mode, expected, extra] of [["update", 0, {}], ["quit", 0, {}], ["update", 1, { HOLD_BUNDLE_LOCK: "1" }]]) {
       await scenario({}, async ({ run, pid, recorded }) => {
@@ -451,6 +469,17 @@ server.listen(0,'127.0.0.1',()=>writeFileSync(${JSON.stringify(ready)},JSON.stri
       database.close();
       assert.equal(realpathSync(join(data, ".mac-runtimes/current")), realpathSync(previous));
     });
+    await scenario({}, async ({ run, previous, data }) => {
+      // 新版迁移后不应答、启动器等满时限放弃之后才退：从授权切换到它退出，current 一直是旧版。
+      execFileSync(process.execPath, [join(root, "desktop/shared/runtime-store.mjs"), "activate", previous, join(data, ".mac-runtimes")]);
+      writeFileSync(join(data, ".recovery-linger"), "");
+      const output = await run(0, { START_FAILED_MIGRATION: "1", LATE_EXIT: "1" });
+      assert.match(output, /OUTCOME failed/, output);
+      assert.ok(output.includes(`CURRENT_WHILE_STARTING ${realpathSync(previous)}`), output);
+      assert.ok(output.includes(`CURRENT_AFTER_EXIT ${realpathSync(previous)} SERVING previous`), output);
+      assert.equal(realpathSync(join(data, ".mac-runtimes/current")), realpathSync(previous));
+    });
+    console.log("✓ a switched-to runtime becomes current only once it answers: one that exits after the launcher gave up never does");
     await scenario({}, async ({ run, next }) => {
       const output = await run(0, { START_FAILED_MIGRATION: "1", RETRY_AFTER_ROLLBACK: "1", ANSWERS: "recover,recover,recover,recover" });
       assert.ok(output.includes(`RETRY_TARGET ${realpathSync(next)}`), output);

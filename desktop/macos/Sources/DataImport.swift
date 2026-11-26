@@ -43,7 +43,7 @@ enum DataImport {
 
   /// 数据根里本来就会有的 app 自己的东西：导入前它们可以在，源目录里同名的不搬。
   static let appOwned: Set<String> = ["logs", "downloads", "backups", ".mac-launch.lock", ServerRecord.fileName,
-                                      Maintenance.fileName, ".mac-runtimes", ".DS_Store"]
+                                      ServerRecord.lockFileName, Maintenance.fileName, ".mac-runtimes", ".DS_Store"]
   private static let journalName = ".import-publishing.json"
   private static let stagingPrefix = ".import-staging-"
 
@@ -66,7 +66,7 @@ enum DataImport {
     if try instanceMode(of: db) == "multi" {
       throw Failure("这份数据是多人模式的。app 只以本机自用模式运行，多人数据转不回自用，没法导入。")
     }
-    return Source(url: url, db: db, livePID: DatabaseFile.lockFiles(of: db).lazy.compactMap(livePID).first)
+    return Source(url: url, db: db, livePID: DatabaseFile.liveHolder(of: db)?.pid)
   }
 
   /// 导进 `dest`（app 的数据根）。数据根在这期间被别人用上了就整次作罢，那份数据一个字节不碰。
@@ -142,9 +142,17 @@ enum DataImport {
   // MARK: 发布
 
   /// 在锁里：数据根还空着才发布。挪进去的条目先记清单，库最后挪，挪完清单作废。
+  /// 启动锁之外还拿服务记录锁（顺序：启动锁 → 服务记录锁），在里面重查没有活着的服务握着这份数据根的库锁：
+  /// 确认在服务（ServerRecord.confirmServing）从查锁到记下「是哪份库」都在这把锁里，换库就插不进那一段。
   private static func publish(_ staging: URL, into dest: URL) throws {
+    // 先在锁外查一遍：明摆着导不了的，连服务记录锁文件都不建。作数的那一次在锁里（publishLocked）。
+    try requirePublishable(dest, except: staging.lastPathComponent)
+    try ServerRecord.locked(timeout: 60) { try publishLocked(staging, into: dest) }
+  }
+
+  private static func publishLocked(_ staging: URL, into dest: URL) throws {
     let fm = FileManager.default
-    try requireEmpty(dest, except: staging.lastPathComponent)
+    try requirePublishable(dest, except: staging.lastPathComponent)
     // 库是单个文件（seal）；它旁边残留的 -shm 只是共享内存索引，不跟着挪。
     let db = DatabaseFile.name
     let entries = try fm.contentsOfDirectory(atPath: staging.path).filter { ![db, "\(db)-shm", "\(db)-journal"].contains($0) }
@@ -156,6 +164,14 @@ enum DataImport {
     }
     try fm.moveItem(at: staging.appendingPathComponent(db), to: dest.appendingPathComponent(db))
     try? fm.removeItem(at: journal)
+  }
+
+  /// 没有活着的服务握着这份数据根的库锁（库被挪走了它也还开着那份），数据根也是空的。
+  private static func requirePublishable(_ dest: URL, except ownStaging: String) throws {
+    if let holder = DatabaseFile.liveHolder(in: dest) {
+      throw Failure("还有一份 Navi 服务（进程 \(holder.pid)）开着 \(dest.path) 里的库。这次没有导入，先停掉它再来。")
+    }
+    try requireEmpty(dest, except: ownStaging)
   }
 
   /// 数据根里没有库、除了 app 自己的东西也没有别的。上一次挪到一半的（清单上那些）和已经没人在写的
@@ -246,13 +262,5 @@ enum DataImport {
 
   private static func contains(_ outer: String, _ inner: String) -> Bool {
     inner.hasPrefix(outer.hasSuffix("/") ? outer : outer + "/")
-  }
-
-  /// server 的单实例锁是 JSON，`pid` 那一项还活着就是有人开着这份库。
-  private static func livePID(_ lock: URL) -> Int32? {
-    guard let data = try? Data(contentsOf: lock),
-          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let pid = json["pid"] as? Int, pid > 1, let pid32 = Int32(exactly: pid) else { return nil }
-    return kill(pid32, 0) == 0 || errno == EPERM ? pid32 : nil
   }
 }

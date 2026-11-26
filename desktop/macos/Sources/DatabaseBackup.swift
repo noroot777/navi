@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import SQLite3
 
 /// 拷 SQLite 库只走在线备份：库可能正被 server 开着（WAL 模式、随时在写），按文件拷到一半的
@@ -108,17 +109,20 @@ enum SQLiteFile {
 ///  · 起服务前按它们判断这一次是不是已经备过了（`covers`）。只认「留它的时候，库最后一次是交给
 ///    哪一版起的」和现在一样的那份 —— 之后又有别的版本起过（哪怕没人看到它起来），那份就不是
 ///    这一次的底了，照常再备一份。
-/// 确认之后它们作废：记录里留着确认时间，比它早的一律不算，删不掉那个文件也不会被误当成这一次
-/// 的底。恢复点写不进去就算备份失败：没有它就没人记得哪一份才是原件。
+/// 确认之后它们作废：记录里留着确认时间和那份库，同一份库比它早的一律不算，删不掉那个文件也不会被误当成这一次
+/// 的底（别的库的照样固定，见 Pin.database）。恢复点写不进去就算备份失败：没有它就没人记得哪一份才是原件。
 enum DatabaseBackup {
   static let keep = 5
   private static var pinsURL: URL { NaviConfig.backupURL.appendingPathComponent("recovery-points.json") }
 
   private struct Pin: Codable {
     let file: String
-    /// 留它的时候库最后一次交给哪一版起（ServerRecord 的构建号；没有记录是 "unknown"）。
+    /// 留它的时候库最后一次交给哪一版起（ServerRecord.lastHandedTo；没有记录是 "unknown"）。
     let lastServedBy: String
     let since: Date
+    /// 备的是哪一份库（DatabaseFile.identity）。别的库的恢复点照样固定着、照样留，但不算眼前这份库备过，
+    /// 也不当成它的恢复入口；眼前这份库的确认也不作废它。没记（旧版留下的）的哪份库都不算，也不被作废。
+    var database: String? = nil
   }
 
   /// 备份当前数据根里的库，固定成恢复点。`fromVersion` 只用来起文件名。数据根里还没有库（从没
@@ -141,40 +145,86 @@ enum DatabaseBackup {
     }
     let partial = target.appendingPathExtension("partial")
     try? FileManager.default.removeItem(at: partial)
+    let database = DatabaseFile.identity(in: NaviConfig.dataURL)
     do {
       try SQLiteFile.snapshot(from: db, to: partial)
+      try setOrigin(database, of: partial)
       try FileManager.default.moveItem(at: partial, to: target)
     } catch {
       try? FileManager.default.removeItem(at: partial)
       throw error
     }
-    let pin = Pin(file: target.lastPathComponent, lastServedBy: ServerRecord.read()?.bundleVersion ?? "unknown", since: Date())
-    try JSONEncoder().encode(validPins() + [pin]).write(to: pinsURL, options: .atomic)
+    try ServerRecord.locked {
+      let pin = Pin(file: target.lastPathComponent, lastServedBy: ServerRecord.read()?.lastHandedTo ?? "unknown", since: Date(),
+                    database: database)
+      try JSONEncoder().encode(validPins() + [pin]).write(to: pinsURL, options: .atomic)
+    }
     prune(dir)
     return target
   }
 
-  /// 还固定着的恢复点（之后没有服务确认起来过），新的在前。第一个就是离现在最近的那次更新前的底。
+  /// 还固定着的恢复点（之后没有服务确认起来过），新的在前。不分是哪份库的（轮换不碰它们）。
   static func recoveryPoints() -> [URL] {
     validPins().reversed().map { NaviConfig.backupURL.appendingPathComponent($0.file) }
   }
 
-  /// 这一次（库最后交给 `lastServedBy` 那一版起）是不是已经备过了。
-  static func covers(lastServedBy version: String) -> Bool {
-    validPins().contains { $0.lastServedBy == version }
+  /// 眼前这份库还固定着的恢复点，新的在前。第一个就是离现在最近的那次更新前的底。
+  static func recoveryPointsOfCurrentDatabase() -> [URL] {
+    let current = DatabaseFile.identity(in: NaviConfig.dataURL)
+    return validPins().filter { DatabaseFile.isSame($0.database, as: current) }.reversed()
+      .map { NaviConfig.backupURL.appendingPathComponent($0.file) }
   }
 
-  /// 有一份服务在这份库上真起来了（迁移跑完了）：恢复点回到普通轮换里。删不掉也不要紧 ——
-  /// 比确认时间早的恢复点本来就不算（见 `validPins`）。
-  static func releaseRecoveryPoints() {
-    try? FileManager.default.removeItem(at: pinsURL)
+  /// 起不来时指给人看的那份：眼前这份库最近的恢复点；没有就是确定备的是它的最近一份备份（解除固定之后也认得出，
+  /// 见 `origin`）。认不出是哪份库的（改这套记账之前留下的、别的库的）一律不算，宁可不指。
+  static func newestBackupOfCurrentDatabase() -> URL? {
+    let current = DatabaseFile.identity(in: NaviConfig.dataURL)
+    return recoveryPointsOfCurrentDatabase().first
+      ?? existing().first { DatabaseFile.isSame(origin(of: $0), as: current) }
+  }
+
+  /// 每份备份备的是哪份库，记在它自己的扩展属性里：跟着文件走，轮换删掉它也就没了，解除固定不影响。
+  /// 记不上就算这份备份没做成：解除固定之后就再也认不出它是哪份库的了。
+  private static let originAttribute = "dev.navi.database"
+
+  private static func setOrigin(_ database: String, of url: URL) throws {
+    let status = database.withCString { value in setxattr(url.path, originAttribute, value, strlen(value), 0, 0) }
+    guard status == 0 else {
+      throw SQLiteFile.Failure("备份 \(url.lastPathComponent) 记不下它备的是哪份库（\(String(cString: strerror(errno)))）")
+    }
+  }
+
+  static func origin(of url: URL) -> String? {
+    let size = getxattr(url.path, originAttribute, nil, 0, 0, 0)
+    guard size > 0 else { return nil }
+    var buffer = [UInt8](repeating: 0, count: size)
+    guard getxattr(url.path, originAttribute, &buffer, size, 0, 0) == size else { return nil }
+    return String(decoding: buffer, as: UTF8.self)
+  }
+
+  /// 眼前这份库这一次（库最后交给 `lastServedBy` 那一版起）是不是已经备过了。
+  static func covers(lastServedBy version: String) -> Bool {
+    let current = DatabaseFile.identity(in: NaviConfig.dataURL)
+    return validPins().contains { $0.lastServedBy == version && DatabaseFile.isSame($0.database, as: current) }
+  }
+
+  /// 刚记上一次确认（ServerRecord.confirmServing，在它那把锁里调）：比确认时刻早的恢复点回到普通轮换里，清单里
+  /// 只留还固定着的（确认之后别人才留的底照样固定）。写不回去也不要紧 —— 比确认时刻早的本来就不算（`validPins`）。
+  static func dropReleasedPoints() {
+    let pins = validPins()
+    if pins.isEmpty { try? FileManager.default.removeItem(at: pinsURL) }
+    else { try? JSONEncoder().encode(pins).write(to: pinsURL, options: .atomic) }
   }
 
   private static func validPins() -> [Pin] {
     guard let data = try? Data(contentsOf: pinsURL), let pins = try? JSONDecoder().decode([Pin].self, from: data) else { return [] }
-    let confirmed = ServerRecord.read()?.confirmedAt ?? .distantPast
-    return pins.filter {
-      $0.since > confirmed && FileManager.default.fileExists(atPath: NaviConfig.backupURL.appendingPathComponent($0.file).path)
+    // 确认作废的只是认得准就是被确认那份库的恢复点：哪一边没记着是哪份库（旧版留下的），就不作废、一直固定着。
+    let record = ServerRecord.read()
+    let confirmed = record?.confirmedAt ?? .distantPast
+    let confirmedDatabase = record?.database
+    return pins.filter { pin in
+      (pin.since > confirmed || !(confirmedDatabase.map { DatabaseFile.isSame(pin.database, as: $0) } ?? false))
+        && FileManager.default.fileExists(atPath: NaviConfig.backupURL.appendingPathComponent(pin.file).path)
     }
   }
 

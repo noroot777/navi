@@ -65,6 +65,8 @@ extension BrowserWindowController {
     case .occupied(let explanation):
       offlineView.show(title: "\(NaviConfig.port) 端口被占着", detail: explanation, actions: [retry])
       startHealthPolling(takeOverWhenFree: true)
+    case .unresponsive(let holder, let explanation):
+      showUnresponsive(holder, detail: explanation, force: false)
     case .failed(let reason):
       let log = ServerLauncher.shared.logURL
       var actions = [retry]
@@ -74,9 +76,10 @@ extension BrowserWindowController {
       // 刚装完新版就起不来，多半是新版的迁移出了问题：指一下更新前的库备份在哪（怎么回到旧版见 README）。
       // 有固定着的恢复点就指最近那个 —— 它是这一版迁移之前的库（之后没有服务起来过），再往后的
       // 状态都可能是失败的迁移改出来的。更早的几个也还在（中间那几版可能也没起来过），提一句。
+      // 只指确定是眼前这份库的：换过库（导入了另一份）时，别的库的备份不是它的底；认不出是哪份库的也不指。
       var detail = reason
-      let points = DatabaseBackup.recoveryPoints()
-      if let backup = points.first ?? DatabaseBackup.existing().first {
+      let points = DatabaseBackup.recoveryPointsOfCurrentDatabase()
+      if let backup = DatabaseBackup.newestBackupOfCurrentDatabase() {
         detail += "\n\n刚更新过的话：更新前的库备份在 \(backup.path)，配上那一版 app 能回到旧版。"
         if points.count > 1 {
           detail += "\n更早几次没确认起来过的更新前备份也还留着（同一目录，共 \(points.count) 份）。"
@@ -88,6 +91,30 @@ extension BrowserWindowController {
       offlineView.show(title: "Navi 服务没起来", detail: detail, actions: actions)
       startHealthPolling()
     }
+  }
+
+  /// 服务进程还在、却一直没应答（ServerLauncher.Outcome.unresponsive）：缓过来就自动接上；停不停由用户点。
+  /// `force`：上一次点「停掉它」它没理会，这次的按钮是 SIGKILL。
+  private func showUnresponsive(_ holder: LockHolder, detail: String, force: Bool) {
+    let retry = OfflineView.Action(title: "重试") { [weak self] in self?.loadHome() }
+    let stop = OfflineView.Action(title: force ? "强制结束" : "停掉它") { [weak self] in
+      guard let self else { return }
+      offlineView.show(title: "正在停止 Navi 服务", detail: "进程 \(holder.pid)", busy: true)
+      // 停的这十秒里它可能缓过来、窗口已经接上了（健康轮询 → loadHome）：那时迟到的结果不再动这一屏。
+      let generation = connectionGeneration
+      DispatchQueue.global(qos: .userInitiated).async {
+        let result = ServerShutdown.stopUnresponsive(holder, force: force)
+        DispatchQueue.main.async { [weak self] in
+          guard let self, self.connectionGeneration == generation else { return }
+          guard case .stillRunning = result else { self.loadHome(); return }
+          self.showUnresponsive(holder, detail: "进程 \(holder.pid) 收到停止信号后 10 秒还在，多半是卡死了、处理不了信号。\n\n"
+            + "「强制结束」会立刻杀掉它（kill -9），它来不及收尾。", force: true)
+        }
+      }
+    }
+    offlineView.show(title: "Navi 服务没有应答", detail: detail, actions: [stop, retry])
+    // 缓过来了就接上；它自己退了（锁的持有者不在了）也接着起，不用等人点「重试」。
+    startHealthPolling(takeOverWhen: { !holder.isAlive })
   }
 
   /// 端口上那份是旧版 app 起的（见 ServerRecord）：过 UpdateGate 换成新版。

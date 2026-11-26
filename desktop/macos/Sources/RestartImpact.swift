@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// 「现在重启服务会打断谁」—— 问的是 server 的 `/api/restart-impact`，与 `npm run restart` 的安全闸
 /// 同一条口径（判据和分类的依据都在 server/src/reattach.ts）。换 app 就是重启它里面的服务，所以
@@ -393,5 +393,47 @@ enum RestartFreeze {
     }.resume()
     done.wait()
     return result
+  }
+}
+
+/// 问用户的那一下（UpdateGate 缺省的 `ask`）：一个 NSAlert，会被打断的任务多时放进可滚动的清单里。
+extension UpdateGate {
+  static func runAlert(_ prompt: Prompt) -> Choice {
+    let alert = NSAlert()
+    alert.messageText = prompt.title
+    alert.informativeText = prompt.detail
+    if prompt.choices == [.cancel, .recover] { alert.alertStyle = .critical }
+    if !prompt.affectedTasks.isEmpty {
+      let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 440, height: 180))
+      let text = NSTextView(frame: scroll.bounds)
+      text.isEditable = false
+      text.isVerticallyResizable = true
+      text.autoresizingMask = [.width]
+      text.drawsBackground = false
+      text.font = .systemFont(ofSize: 13)
+      text.string = prompt.affectedTasks.joined(separator: "\n\n")
+      text.textContainer?.widthTracksTextView = true
+      text.textContainer?.containerSize = NSSize(width: 440, height: CGFloat.greatestFiniteMagnitude)
+      text.layoutManager?.ensureLayout(for: text.textContainer!)
+      let height = text.layoutManager?.usedRect(for: text.textContainer!).height ?? 180
+      text.setFrameSize(NSSize(width: 440, height: max(180, height + 16)))
+      scroll.hasVerticalScroller = true
+      scroll.documentView = text
+      alert.accessoryView = scroll
+    }
+    for title in prompt.buttons { alert.addButton(withTitle: title) }
+    alert.buttons.first?.keyEquivalent = "\r"
+    if let cancel = prompt.choices.firstIndex(of: .cancel) { alert.buttons[cancel].keyEquivalent = "\u{1b}" }
+    alert.window.defaultButtonCell = alert.buttons.first?.cell as? NSButtonCell
+    let cancelMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+      guard event.keyCode == 53, event.window === alert.window,
+            let cancel = prompt.choices.firstIndex(of: .cancel) else { return event }
+      alert.buttons[cancel].performClick(nil)
+      return nil
+    }
+    defer { if let cancelMonitor { NSEvent.removeMonitor(cancelMonitor) } }
+    NSApp.activate(ignoringOtherApps: true)
+    let index = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+    return prompt.choices.indices.contains(index) ? prompt.choices[index] : .cancel
   }
 }

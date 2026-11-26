@@ -206,6 +206,31 @@ enum DatabaseFile {
     return choice.url
   }
 
+  /// 数据根里眼前是哪一份库：那个文件的设备号 + inode + 创建时刻。换上另一份库（导入发布、回退到迁移前都是
+  /// 改名换上去的）就变，同一个文件改名（ash.db → navi.db）、写入不变。没有库是 "none"，认不准是 "unclear"。
+  static func identity(in dir: URL) -> String {
+    let found: URL?
+    do { found = try existing(in: dir) } catch { return "unclear" }
+    guard let url = found else { return "none" }
+    var info = stat()
+    guard stat(url.path, &info) == 0 else { return "unclear" }
+    return "\(info.st_dev)-\(info.st_ino)-\(info.st_birthtimespec.tv_sec).\(info.st_birthtimespec.tv_nsec)"
+  }
+
+  /// 记下的库身份（`identity`）说的确定就是眼前这份。没记（改这套记账之前留下的）、记的或眼前的是 "unclear"，都算
+  /// 不知道 —— 不能拿它证明眼前这份库备过、或者哪份备份是它的、或者确认作废了它。
+  static func isSame(_ recorded: String?, as current: String) -> Bool {
+    isKnown(recorded) && recorded == current
+  }
+
+  /// 记下的库身份确定不是眼前这份（哪一边不知道都不算）。确认在用的：端口上那份服务正开着数据根里这份库，它的应答
+  /// 就是「眼前这份」的证据，没记的账由它补上；记着的明明是另一份，才不认。
+  static func contradicts(_ recorded: String?, _ current: String) -> Bool {
+    isKnown(recorded) && isKnown(current) && recorded != current
+  }
+
+  private static func isKnown(_ identity: String?) -> Bool { identity != nil && identity != "unclear" }
+
   /// 这个数据目录用过没有：两代库名、改名账本，有一样就算 —— 认不准的情形交给服务起来时说清楚，不当成第一次用。
   static func isInitialized(_ dir: URL) -> Bool {
     [name, LegacyIdentity.databaseFile, renameJournal].contains { FileManager.default.fileExists(atPath: dir.appendingPathComponent($0).path) }
@@ -214,6 +239,59 @@ enum DatabaseFile {
   /// 这份库的单例锁，两代名字（新版服务两份都写，改名之前的只写旧名）。
   static func lockFiles(of db: URL) -> [URL] {
     [".navi.lock", LegacyIdentity.singletonLockSuffix].map { URL(fileURLWithPath: db.path + $0) }
+  }
+
+  /// 此刻开着这份库的服务进程（看它的单实例锁）。nil = 没人开着。
+  static func liveHolder(of db: URL) -> LockHolder? {
+    lockFiles(of: db).lazy.compactMap(LockHolder.init(lock:)).first
+  }
+
+  /// 数据根里不管哪一代库名，有没有活着的服务握着它的单实例锁。认库之前就要问（库认不准时照样有人可能开着），
+  /// 所以两代库名都看。
+  static func liveHolder(in dir: URL) -> LockHolder? {
+    [name, LegacyIdentity.databaseFile].lazy.compactMap { liveHolder(of: dir.appendingPathComponent($0)) }.first
+  }
+}
+
+/// server 单实例锁（server/src/singleton.ts）的持有者。认活的判据同 server 的 staleLockReason：pid 活着，
+/// 而且进程的启动时刻跟锁里记的对得上（差 10 秒以内）—— 只看 pid 活着会把一个被复用了的 pid 当成那个服务。
+/// 不看心跳：事件循环被同步活儿堵住时心跳也停，那时它恰恰还活着、还握着库。
+struct LockHolder: Equatable {
+  let pid: Int32
+  /// 进程的启动时刻（内核记的）。停它之前拿它再认一次是不是同一个进程。
+  let startedAt: Date
+  /// 锁里记的它听的端口（没记是 nil）。
+  let port: Int?
+
+  init?(lock: URL) {
+    guard let data = try? Data(contentsOf: lock),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let raw = json["pid"] as? Int, raw > 1, let pid = Int32(exactly: raw),
+          let (startedAt, command) = Self.inspect(pid) else { return nil }
+    if let recorded = json["processStartedAtMs"] as? Double {
+      guard abs(startedAt.timeIntervalSince1970 * 1000 - recorded) <= 10_000 else { return nil }
+    } else if command != "node" {
+      // 锁里没记启动时刻（很早的服务）：退一步认命令名，server 一律由 node 跑。
+      return nil
+    }
+    self.pid = pid
+    self.startedAt = startedAt
+    port = json["port"] as? Int
+  }
+
+  /// 还是不是认过的那一个进程（没退、pid 没被复用）。
+  var isAlive: Bool { Self.inspect(pid)?.startedAt == startedAt }
+
+  /// 内核记的进程启动时刻和命令名；进程不在了（或只剩僵尸）是 nil。
+  private static func inspect(_ pid: Int32) -> (startedAt: Date, command: String)? {
+    var info = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0, info.kp_proc.p_pid == pid,
+          info.kp_proc.p_stat != SZOMB else { return nil }
+    let start = info.kp_proc.p_un.__p_starttime
+    let command = withUnsafeBytes(of: info.kp_proc.p_comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+    return (Date(timeIntervalSince1970: Double(start.tv_sec) + Double(start.tv_usec) / 1_000_000), command)
   }
 }
 
@@ -274,7 +352,36 @@ enum RuntimeStore {
     if activate { prepared = true }
   }
 
+  /// 数据根里已经有 current 指针（指着一份发布过的运行时）。
+  static var hasCurrent: Bool { currentID.map { contains(root.appendingPathComponent($0).path) } ?? false }
+
+  private static var currentID: String? {
+    try? FileManager.default.destinationOfSymbolicLink(atPath: root.appendingPathComponent("current").path)
+  }
+
+  /// current 跟着确认在服务的那一份走：新开的 MCP（mcp.sh）用的就是端口上那份服务的那一版。只由
+  /// ServerRecord.confirmServing 在它那把锁里、认准了这一眼不是过时的之后调。端口上是数据根里发布过的某一版
+  /// （`codeDir`）、而 current 指着别处才改；包内旧布局起的服务不在仓库里，不动。切不过去返回 false。
+  static func follow(_ codeDir: String?) -> Bool {
+    guard let codeDir, contains(codeDir) else { return true }
+    let runtime = URL(fileURLWithPath: NaviHealth.realPath(codeDir), isDirectory: true)
+    guard currentID != runtime.lastPathComponent else { return true }
+    return (try? select(runtime)) != nil
+  }
+
+  /// 往回切：把 current 指回确认服务过的那一版（回退到迁移前、回退暂停里再起），并记下这一次起服务用的是它
+  /// （`restored`，NaviConfig.runtimeURL）。往前切只有 follow 一条路。
   static func activate(_ runtime: URL) throws {
+    try select(runtime)
+    restored = runtime
+  }
+
+  /// 这一次起服务用这一版 app 带的那一版（NaviConfig.targetRuntimeURL），current 不动：它应答了才跟过去（follow）。
+  static func launchTarget() {
+    restored = nil
+  }
+
+  private static func select(_ runtime: URL) throws {
     guard contains(runtime.path) else { throw SQLiteFile.Failure("恢复运行时身份不符") }
     let process = Process()
     process.executableURL = NaviConfig.bundledRuntimeURL.appendingPathComponent("node/bin/node")
@@ -283,9 +390,18 @@ enum RuntimeStore {
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
     try process.run()
-    process.waitUntilExit()
+    // 确认时它在服务记录那把锁里跑（ServerRecord.confirmServing）：卡住了不能把锁一直攥着，收尾也不无限等它。
+    func exited(within seconds: TimeInterval) -> Bool {
+      let deadline = Date().addingTimeInterval(seconds)
+      while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+      return !process.isRunning
+    }
+    if !exited(within: 30) {
+      process.terminate()
+      if !exited(within: 3) { kill(process.processIdentifier, SIGKILL); _ = exited(within: 2) }
+      throw SQLiteFile.Failure("切换运行时 30 秒没完成")
+    }
     guard process.terminationStatus == 0 else { throw SQLiteFile.Failure("恢复运行时校验失败") }
-    restored = runtime
   }
 
   static func reclaim() {
