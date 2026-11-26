@@ -101,7 +101,17 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.equal(verified[7], "node:fs", "不是那个模块公开导出的名字：只留位置");
   assert.equal(verified[8], "node:internal");
   assert.ok(!/CustomerAcquisitionBudget|OpenAI/.test(JSON.stringify(verified)));
-  assert.equal(serverCodeLocations.exists("server/../../../etc/hosts"), false, "跳出代码目录的不认");
+  assert.equal(serverCodeLocations.resolve("server/../../../etc/hosts"), null, "跳出代码目录的不认");
+  // 规范化之后存在的不算：被规范化掉的那一段可以是任何东西（第 2 轮复审实测客户名这样带进了导出）。
+  const aliased = [
+    `f server/src/CustomerBudgetSecret/../runtime-log/journal.ts:3`,
+    "server/src/./runtime-log/journal.ts:3",
+    "server/src//runtime-log/journal.ts:3",
+    `${at}:0`,
+    `${at}:123456789`,
+  ];
+  assert.deepEqual(shared.verifyFrames(aliased, serverCodeLocations), aliased.map(() => "<other>"), "只认规范写法、有效的行列号");
+  assert.equal(shared.verifyFrames([`${at}:7`], serverCodeLocations)[0], `${at}:7`, "输出是核对结果重新拼的");
   assert.deepEqual(shared.verifyFrames(["f ", "", "nospace", "f :1", `${at}`], serverCodeLocations), ["<other>", "<other>", "<other>", "<other>", at],
     "形状不对的帧当成认不出的一帧，不抛");
 
@@ -120,7 +130,7 @@ function serverLines(): Array<Record<string, unknown>> {
     "页面产物带列号：压成一行的产物只有它能定位");
 
   // 页面报上来的：同一道核对，外加标识换成摘要。
-  const locations = { exists: (file: string) => file === "assets/a.js", nameAt: () => null };
+  const locations = { resolve: (file: string) => (file === "assets/a.js" ? file : null), nameAt: () => null };
   const options = { locations, digest: digestPageId };
   const web = shared.sanitizeWebEvent({
     ev: "page.error", kind: "error", name: "Error", msg: "保存「客户名单」失败", title: "机密", shell: "mac", tab: "abc123", load: "Customer42", ago: 1500,
@@ -131,9 +141,13 @@ function serverLines(): Array<Record<string, unknown>> {
     frames: ["assets/a.js:1:5", "assets/a.js:1:9", "<other>", "<native>", "<other>"],
   }, "页面报的函数名一个都不留：文件真在、词在产物里出现过都不算");
   assert.ok(!/abc123|Customer|OpenAI/.test(JSON.stringify(web)), "页面生成的标识只留摘要");
-  assert.equal(webCodeLocations.exists("src/lib/runtimeLog.ts"), true, "开发时的页面源码按磁盘上的文件核对");
+  assert.equal(webCodeLocations.resolve("src/lib/runtimeLog.ts"), "src/lib/runtimeLog.ts", "开发时的页面源码按磁盘上的文件核对");
+  const smuggled = shared.sanitizeWebEvent({ ev: "page.error", kind: "error", name: "Error",
+    frames: ["f src/CustomerAcquisitionBudget/../lib/runtimeLog.ts:1:1", "src/QuarterlyMergerPlan/../lib/runtimeLog.ts:2:3", "src/lib/runtimeLog.ts:2:3"] },
+  { locations: webCodeLocations, digest: digestPageId });
+  assert.deepEqual(smuggled!.frames, ["<other>", "<other>", "src/lib/runtimeLog.ts:2:3"], "带 .. 的位置原串不进日志");
   assert.equal(webCodeLocations.nameAt("src/lib/runtimeLog.ts", 1, "reportPageCrash"), null, "页面报的名字一个都不收");
-  assert.equal(webCodeLocations.exists("src/../../server/src/main.ts"), false);
+  assert.equal(webCodeLocations.resolve("src/../../server/src/main.ts"), null);
   assert.equal(shared.sanitizeWebEvent({ ev: "page.crash", name: "TypeError", msg: "客户收购预算 500 万元" }, options)!.msg, undefined, "页面报的 msg 必须正好是固定说法里的一句");
   assert.equal(shared.sanitizeWebEvent({ ev: "page.crash", name: "TypeError", msg: "Cannot read properties of undefined/null" }, options)!.msg, "Cannot read properties of undefined/null");
   assert.equal(shared.sanitizeWebEvent({ ev: "task.content", text: "x" }, options), null, "名单外的事件不收");
@@ -206,6 +220,8 @@ function serverLines(): Array<Record<string, unknown>> {
 {
   for (let i = 0; i < 40; i += 1) runtimeLog("test.flood", { i });
   const flood = serverLines().filter((line) => line.ev === "test.flood");
+  assert.deepEqual(serverLines().filter((line) => line.ev === "log.dropping").map((line) => line.of), ["test.flood"],
+    "开始丢的那一刻就记下，不等下一条同类事件；一个窗口只记一次");
   assert.equal(flood.length, 30, "同一个事件每分钟最多 30 条");
   assert.equal(flood[0]!.src, "server");
   assert.equal(flood[0]!.pid, process.pid);
@@ -481,9 +497,17 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.deepEqual(bothSaw.causes, { window: { refused_connection: 1 }, page: { page_error: 1 } });
   assert.equal(shared.observedCounts(bothSaw), "窗口看到 1 次（连接被拒 1）；页面看到 1 次（页面脚本出错 1）");
   assert.ok(!/2 次/.test(renderRuntimeLogReport(bothSaw)), "不把两边的次数加成一个总数");
-  // 页面那边的状态变化被限流挡掉过：明说次数只是下限。
+  // 页面那边的状态变化被限流挡掉过：明说次数只是下限。只有开始丢的那一条（风暴之后再没有同类事件）也要说。
   const throttled = analyzeRuntimeLog([W(100, "page.boot", { nav: "reload", tab: "t", load: "l2" }), W(160, "log.dropped", { of: "page.boot", count: 4 })], []);
-  assert.ok(throttled.notes.some((note) => note.includes("4 条") && note.includes("下限")), JSON.stringify(throttled.notes));
+  assert.ok(throttled.notes.some((note) => note.includes("至少 4 条") && note.includes("下限")), JSON.stringify(throttled.notes));
+  const startedDropping = analyzeRuntimeLog([W(100, "page.boot", { nav: "reload", tab: "t", load: "l2" }), W(101, "log.dropping", { of: "page.reload" })], []);
+  assert.ok(startedDropping.notes.some((note) => note.includes("下限")), JSON.stringify(startedDropping.notes));
+  // 整页崩溃的那一条排在证据最前，前面的普通报错是上下文。
+  const crashAfterErrors = analyzeRuntimeLog([
+    ...[1, 2, 3].map((n) => W(100 + n, "page.error", { kind: "error", name: "RangeError", tab: "t", load: "lc" })),
+    W(110, "page.crash", { kind: "error", name: "TypeError", tab: "t", load: "lc" }),
+  ], []);
+  assert.ok(crashAfterErrors.incidents[0]!.evidence[0]!.startsWith("页面报错 TypeError"), JSON.stringify(crashAfterErrors.incidents[0]!.evidence));
 
   // 壳发现实例号变了：重启是壳自己看见的；服务那一侧的启动记录离得远（进程号复用、日志对不上）就不附。
   const reused = analyzeRuntimeLog([

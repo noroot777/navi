@@ -132,8 +132,10 @@ function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Inci
   // 同一次载入里报过的错（页面自己那条线，按载入身份认）；没有载入标识的老记录只认这一次自己那几条。
   const pageErrors = all.filter((r) => r.src === "web" && (r.ev === "page.crash" || r.ev === "page.error")
     && (loadKey(r) ? occurrence.loads.has(loadKey(r)!) : seen.includes(r)));
+  // 整页崩溃那一条排在最前：它才是换成错误屏的那一下，前面的普通报错只是上下文。
   const describeErrors = () => {
-    for (const error of pageErrors.slice(0, 2)) {
+    const ordered = [...pageErrors.filter((r) => r.ev === "page.crash"), ...pageErrors.filter((r) => r.ev !== "page.crash")];
+    for (const error of ordered.slice(0, 2)) {
       const where = error.kind === "boundary" ? "页面里一块的兜底接住了报错" : "页面报错";
       evidence.push(`${where} ${error.name ?? "?"}${error.msg ? `：${error.msg}` : ""}${Array.isArray(error.frames) && error.frames.length ? `（${(error.frames as string[])[0]}）` : ""}`);
     }
@@ -278,10 +280,13 @@ export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummar
   const notes: string[] = [];
   if (!counts.server) notes.push("没有服务端运行日志：服务端可能还是加日志之前的版本。");
   if (!counts.mac && !counts.win) notes.push("没有桌面壳的运行日志：用的是浏览器，或桌面 app 还是旧版本。");
-  // 服务端按事件限流（journal.ts）：页面那边的状态变化被挡掉过，次数就只是下限，明说。
-  const droppedStates = sorted.filter((r) => r.ev === "log.dropped" && r.src === "web" && PAGE_STATES.includes(String(r.of)))
-    .reduce((sum, r) => sum + Number(r.count ?? 0), 0);
-  if (droppedStates) notes.push(`页面那边有 ${droppedStates} 条载入 / 重载 / 崩溃记录超过每分钟上限没记下来，页面看到的次数只是下限。`);
+  // 服务端按事件限流（journal.ts）：页面那边的状态变化被挡掉过，次数就只是下限，明说。开始丢的那一刻就有
+  // `log.dropping`，带个数的 `log.dropped` 要等下一条同类事件才写（风暴停了、服务重启了就没有）。
+  const dropRecords = sorted.filter((r) => (r.ev === "log.dropped" || r.ev === "log.dropping") && r.src === "web" && PAGE_STATES.includes(String(r.of)));
+  if (dropRecords.length) {
+    const counted = dropRecords.filter((r) => r.ev === "log.dropped").reduce((sum, r) => sum + Number(r.count ?? 0), 0);
+    notes.push(`页面那边有${counted ? `至少 ${counted} 条` : "一些"}载入 / 重载 / 崩溃记录超过每分钟上限没记下来，页面看到的次数只是下限。`);
+  }
 
   return {
     from: sorted[0]?.at ?? null,

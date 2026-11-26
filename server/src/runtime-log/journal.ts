@@ -6,8 +6,9 @@
 // 三条约束：
 //   · **写入一律 best-effort**：这份日志跑在卡顿检测、退出路径上，磁盘满、权限不对都只能丢这一条，
 //     不能让它反过来把服务搞崩或搞慢 —— 所以同步追加、吞掉异常，单条有长度上限。
-//   · **按事件限流**：一条坏路径每秒抛几百次异常时，日志不能跟着涨成几个 G。超出的只数个数，
-//     下一次放行时补一条 `log.dropped`。
+//   · **按事件限流**：一条坏路径每秒抛几百次异常时，日志不能跟着涨成几个 G。开始丢的那一刻就记一条
+//     `log.dropping`（丢了这件事本身不能等下一条同类事件来补——风暴停了、服务重启了，就再也没有下一条），
+//     超出的只数个数，下一次放行时补一条带个数的 `log.dropped`。
 //   · **轮转只改名**（同 exit-ledger.ts 的理由）：同一个目录可能有别的进程在追加（被单例锁挡回去
 //     的那一份也会记一条 `server.refused`），读-改-写会吞掉别人刚写的记录。
 import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
@@ -46,7 +47,8 @@ function rotateIfLarge(file: string): void {
   }
 }
 
-function admit(ev: string, now: number): number | null {
+/** 放行：返回上一个窗口里丢了几条（0 = 没丢）；不放行：`"first"` 是这个窗口里第一次丢，其余是 null。 */
+function admit(ev: string, now: number): number | null | "first" {
   const bucket = buckets.get(ev) ?? { windowStart: now, used: 0, dropped: 0 };
   if (now - bucket.windowStart >= 60_000) {
     const dropped = bucket.dropped;
@@ -60,7 +62,7 @@ function admit(ev: string, now: number): number | null {
   buckets.set(ev, bucket);
   if (bucket.used >= PER_MINUTE) {
     bucket.dropped += 1;
-    return null;
+    return bucket.dropped === 1 ? "first" : null;
   }
   bucket.used += 1;
   return 0;
@@ -98,7 +100,8 @@ function append(record: RuntimeLogRecord, retry = true): void {
 export function runtimeLog(ev: string, fields: Record<string, unknown> = {}, src: RuntimeLogSource = "server", agoMs = 0): void {
   const now = Date.now();
   const dropped = admit(`${src}:${ev}`, now);
-  if (dropped === null) return;
+  if (dropped === "first") append({ at: new Date(now).toISOString(), src, pid: process.pid, ev: "log.dropping", of: ev });
+  if (dropped === null || dropped === "first") return;
   if (dropped > 0) append({ at: new Date(now).toISOString(), src, pid: process.pid, ev: "log.dropped", of: ev, count: dropped });
   // 页面攒一批再发，`agoMs` 是事件发生在收到之前多久：记发生的时刻，跨来源对时间线才对得上。
   append({ at: new Date(now - agoMs).toISOString(), src, pid: process.pid, ev, ...fields });

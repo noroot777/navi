@@ -170,15 +170,22 @@ export function scrubFrame(
 
 /** 栈帧出处：服务端按磁盘上的代码回答（server/src/runtime-log/code-symbols.ts）。 */
 export type CodeLocations = {
-  /** 这个代码位置在不在：`server/dist/x.js`、`assets/a.js`、`node:fs`、`node_modules/hono`（位置去掉行列号）。 */
-  exists(file: string): boolean;
+  /**
+   * 这个代码位置在不在，在就给出**核对过的那个位置本身**：`server/dist/x.js`、`assets/a.js`、`node:fs`、
+   * `node_modules/hono`（位置去掉行列号）；不在、或者写法不是规范写法（带 `.` / `..` / 空段）就是 null。
+   * 落盘只用这个返回值，不用上报的原串——原串里核对时被规范化掉的那几段（`src/客户名/../lib/x.ts`）什么都能装。
+   */
+  resolve(file: string): string | null;
   /** 这一帧能带的名字：只有 Node 内置模块、且 `reported` 是它公开导出的名字（封闭集合）；其余一律 null，只留位置。 */
   nameAt(file: string, line: number | null, reported: string): string | null;
 };
 
+/** 行列号：正整数，超过这么大的不是真代码里的位置。 */
+const MAX_LINE_OR_COLUMN = 10_000_000;
+
 /**
  * 栈帧候选过出处核对，输出代码位置（Node 内置模块的公开导出带名字）：
- *   · 位置不在 → `<other>`；
+ *   · 位置不在 → `<other>`；输出的位置由核对结果（`resolve` 的返回值）和重新格式化的行列号拼成，不回写上报的原串；
  *   · 上报的函数名不留：它可以是运行时拼出来的（`{ [title]: () => {} }`、`Object.defineProperty(fn, "name", …)`），
  *     页面还能随便填；核对「这个词在代码文件里出现过」也挡不住（第 3 轮审查实测 `OpenAI` 就这样带了出去）。
  */
@@ -194,15 +201,18 @@ export function verifyFrames(frames: unknown, locations: CodeLocations, limit = 
       kept.push(location);
       continue;
     }
-    const match = /^(.+?)(?::(\d+))?(?::\d+)?$/.exec(location);
-    if (!match || !locations.exists(match[1]!)) {
+    const match = /^(.+?)(?::(\d{1,8}))?(?::(\d{1,8}))?$/.exec(location);
+    const file = match ? locations.resolve(match[1]!) : null;
+    const line = match?.[2] ? Number(match[2]) : null;
+    const column = match?.[3] ? Number(match[3]) : null;
+    if (!file || [line, column].some((n) => n !== null && (n < 1 || n > MAX_LINE_OR_COLUMN))) {
       kept.push("<other>");
       continue;
     }
-    const [, file, line] = match;
+    const verified = `${file}${line !== null ? `:${line}${column !== null ? `:${column}` : ""}` : ""}`;
     const reported = split > 0 ? frame.slice(0, split).replace(/^(?:async|new) /, "").replace(/ \[as [^\]]*\]$/, "") : "";
-    const name = locations.nameAt(file!, line ? Number(line) : null, reported);
-    kept.push(name ? `${name} ${location}` : location);
+    const name = locations.nameAt(file, line, reported);
+    kept.push(name ? `${name} ${verified}` : verified);
   }
   return kept;
 }

@@ -1,7 +1,7 @@
 // 「运行日志」设置节：最近几天窗口闪过几次、各是什么原因、服务重启过几次，以及把日志导出成一个文件发给别人分析。
 // 记什么、不记什么见 @navi/shared/runtime-log 顶部；分析口径见 server/src/runtime-log/analyze.ts。
 import { useCallback, useEffect, useState } from "react";
-import { observedCounts, type RuntimeLogReport } from "@navi/shared/runtime-log";
+import { OBSERVER_LABELS, observedCounts, type RuntimeLogReport } from "@navi/shared/runtime-log";
 import { ApiError, apiPath, request } from "../lib/apiClient.ts";
 import { localeDateTime } from "../lib/localeFormat.ts";
 import { Button } from "../components/ui.tsx";
@@ -62,7 +62,7 @@ export function RuntimeLogSettings({ notify }: { notify: (message: string) => vo
       {report && (
         <>
           <p className="rtlog-summary">
-            最近 {DAYS} 天{observed ? `，${observed}` : "窗口没有闪过"}
+            最近 {DAYS} 天{observed ? `，${observed}` : "没有记录到窗口闪一下"}
             {report.restarts.length > 0 && <>。服务重启 {report.restarts.length} 次</>}
             {report.stalls.total > 0 && <>。服务卡顿 {report.stalls.total} 次，最长 {secs(report.stalls.maxMs)}</>}
           </p>
@@ -71,7 +71,7 @@ export function RuntimeLogSettings({ notify }: { notify: (message: string) => vo
               {incidents.map((incident) => (
                 <li key={`${incident.seenBy}:${incident.at}`}>
                   <time>{localeDateTime(incident.at)}</time>
-                  <strong>{incident.summary}</strong>
+                  <strong>{OBSERVER_LABELS[incident.seenBy]}：{incident.summary}</strong>
                   {incident.evidence.map((line) => <span key={line}>{line}</span>)}
                 </li>
               ))}

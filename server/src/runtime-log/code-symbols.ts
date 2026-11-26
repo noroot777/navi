@@ -1,5 +1,5 @@
-// 栈帧出处（`CodeLocations`，见 @navi/shared/runtime-log 的 verifyFrames）：位置是不是磁盘上真有的 navi 代码，
-// 这一帧能不能带名字。
+// 栈帧出处（`CodeLocations`，见 @navi/shared/runtime-log 的 verifyFrames）：位置是不是磁盘上真有的 navi 代码
+// （是就交回核对过的那个规范写法），这一帧能不能带名字。
 //
 // **日志里不存函数名**，只存核对过的代码位置（文件:行[:列]），拿到日志的人对着代码看那一行就知道是哪个函数。
 // 唯一带名字的是 Node 内置模块的公开导出（`execFileSync node:child_process`）：那是一份封闭名单，跟错误名一样。
@@ -27,9 +27,13 @@ function isCodeFile(file: string): boolean {
   }
 }
 
-/** `rel` 落在 `root` 底下的这几个子目录之一，返回绝对路径；跳出去的（`..`）不认。 */
+/**
+ * `rel` 落在 `root` 底下的这几个子目录之一，返回绝对路径。只认规范写法：带 `.` / `..` / 空段的一律不认——
+ * 规范化之后存在不代表原串可信，`src/客户名/../lib/x.ts` 规范化掉的那一段可以是任何东西。
+ */
 function inside(root: string, dirs: readonly string[], rel: string): string | null {
   if (!/^[\w./@-]{1,160}$/.test(rel) || !dirs.some((dir) => rel.startsWith(`${dir}/`))) return null;
+  if (rel.split("/").some((part) => part === "" || part === "." || part === "..")) return null;
   const target = normalize(join(root, rel));
   return dirs.some((dir) => target.startsWith(join(root, dir) + sep)) ? target : null;
 }
@@ -63,14 +67,17 @@ function serverFile(file: string): string | null {
 }
 
 export const serverCodeLocations: CodeLocations = {
-  exists(file) {
-    if (file.startsWith("node:")) return builtinId(file) !== null;
+  resolve(file) {
+    if (file.startsWith("node:")) {
+      const id = builtinId(file);
+      return id === null ? null : `node:${id}`;
+    }
     if (file.startsWith("node_modules/")) {
       const target = inside(CODE_DIR, ["node_modules"], file);
-      return target !== null && existsSync(target);
+      return target !== null && existsSync(target) ? file : null;
     }
     const target = serverFile(file);
-    return target !== null && isCodeFile(target);
+    return target !== null && isCodeFile(target) ? file : null;
   },
   nameAt(file, _line, reported) {
     return file.startsWith("node:") ? builtinName(file, reported) : null;
@@ -85,9 +92,9 @@ function webFile(file: string): string | null {
 }
 
 export const webCodeLocations: CodeLocations = {
-  exists(file) {
+  resolve(file) {
     const target = webFile(file);
-    return target !== null && isCodeFile(target);
+    return target !== null && isCodeFile(target) ? file : null;
   },
   // 页面报上来的名字一个都不收（页面没有 Node 内置模块）。
   nameAt: () => null,
