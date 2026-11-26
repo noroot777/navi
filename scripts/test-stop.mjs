@@ -154,6 +154,14 @@ await withTestResources(async () => {
       assert.doesNotMatch(out, /已停止|没有重启前冻结/, out);
     }, [() => server.fixture.dispose()]);
   }
+  // --wait:冻结之下才看得到的(即时判据一直是空的)放开再等,隔一会儿再冻;等待上限管整次操作,不是每轮从头算。
+  const sticky = await fakeServer("freeze-sticky", EMPTY, "widen");
+  await withTestResources(async () => {
+    const out = await stop(["--wait"], 3, { WAIT_TIMEOUT: "1" });
+    assert.match(out, /WAIT 超时\(1s\),冻结之下仍有 1 个会被挡下[\s\S]*冻结时才看到的任务/, out);
+    assert.equal(sticky.freezeCalls(), "acquire,release,acquire,release", `每轮都放掉冻结、隔一会儿才再冻\n${out}`);
+    assert.ok(isPidAlive(sticky.pid), out);
+  }, [() => sticky.fixture.dispose()]);
   const clean = await fakeServer("freeze-clean", EMPTY, "clean");
   await withTestResources(async () => {
     const out = await stop([], 0);
@@ -164,7 +172,7 @@ await withTestResources(async () => {
     for (let i = 0; i < 25 && isPidAlive(clean.pid); i++) await sleep(40);
     assert.ok(!isPidAlive(clean.pid) && await quiet(), out);
   }, [() => clean.fixture.dispose()]);
-  console.log("✓ 重启前冻结:快照或续期时多出来的拦住并放掉冻结、冻结被占就中止、干净的续期后停;老服务如实退回");
+  console.log("✓ 重启前冻结:快照或续期时多出来的拦住并放掉冻结、冻结被占就中止、--wait 的上限管到冻结后的重试、干净的续期后停;老服务如实退回");
 
   // 会打断任务:默认中止、不动它;--force 照停。
   const busy = await fakeServer("busy", { ...EMPTY, interrupted: [{ title: "接管不了的任务", reason: "测试" }] });

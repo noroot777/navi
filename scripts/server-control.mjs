@@ -140,15 +140,17 @@ export function explainNoVerdict(data, { say, lockFile, log }) {
  * --wait 用:轮询到「不再有会被打断的任务」为止,把「人守着等」换成「脚本替你等」。
  * `count` 每次都得走调用方的 fail-closed 判据(中途凭证失效同样会把 busy 读成 0)。
  * 等到了返回 true;超时返回 false(那句话已经说了),由调用方中止(退出码 3)。
+ * `deadline`(绝对时刻,毫秒)给了就按它算超时:一次操作里要等好几轮(冻结之下又多出来、放开再等)时,
+ * 每一轮耗的是同一份 WAIT_TIMEOUT,不是每轮从头算。
  */
-export async function drainWait({ count, waitTimeout, say, verb }) {
+export async function drainWait({ count, waitTimeout, deadline = waitDeadline(waitTimeout), say, verb }) {
   let n = await count();
   if (!n) return true;
   say(`  ⏳ WAIT:还有 ${n} 个任务${verb}会被打断,等它们跑完(Ctrl-C 可随时放弃)…`);
   let elapsed = 0;
   const step = 5;
   while (n > 0) {
-    if (waitTimeout !== null && elapsed >= waitTimeout) {
+    if (deadline !== null && Date.now() >= deadline) {
       say(`  ✕ WAIT 超时(${waitTimeout}s),仍有 ${n} 个会被打断 —— 已中止,未${verb}服务端。`);
       return false;
     }
@@ -159,6 +161,11 @@ export async function drainWait({ count, waitTimeout, say, verb }) {
   }
   say("  ✓ 已经没有会被打断的任务了,继续。");
   return true;
+}
+
+/** WAIT_TIMEOUT(秒,null = 不设上限)从此刻起算的截止时刻。 */
+export function waitDeadline(waitTimeout) {
+  return waitTimeout === null || waitTimeout === undefined ? null : Date.now() + waitTimeout * 1000;
 }
 
 /**
@@ -268,9 +275,12 @@ export async function takeDown({ port, lockFile, log, force, wait, waitTimeout, 
   };
   let data = await ask();
   let held = gate.held(data);
+  // 整次操作只有一份等待上限:普通判据的排空、冻结之下又多出来之后的重试,耗的都是它。
+  const deadline = waitDeadline(waitTimeout);
+  let retried = false;
   for (;;) {
     if (held.length && wait && !force) {
-      const drained = await drainWait({ count: async () => gate.held(await ask()).length, waitTimeout, say, verb: gate.verb });
+      const drained = await drainWait({ count: async () => gate.held(await ask()).length, waitTimeout, deadline, say, verb: gate.verb });
       if (!drained) return abort(3);
       data = await ask();
       held = gate.held(data);
@@ -306,6 +316,17 @@ export async function takeDown({ port, lockFile, log, force, wait, waitTimeout, 
     if (!held.length || force) break;
     // 冻结之下多出了会被挡的(冻结那一刻还在起跑的那种):放开冻结,回到上面拦下,或者 --wait 再等一轮。
     await letGo();
+    if (wait) {
+      // 普通判据看不到它们(只在冻结快照里),排空那一步会立刻放行:隔一会儿再冻,别空转着反复冻结整份服务。
+      if (deadline !== null && Date.now() >= deadline) {
+        say(`  ✕ WAIT 超时(${waitTimeout}s),冻结之下仍有 ${held.length} 个会被挡下 —— 已中止,${gate.tail}`);
+        for (const t of held.slice(0, 8)) say(`     · ${t.title}${t.reason ? ` —— ${t.reason}` : ""}`);
+        return abort(3);
+      }
+      if (!retried) say(`  ⏳ WAIT:冻结之下还有 ${held.length} 个会被挡下(正在起跑或正在操作工作区),过一会儿再试…`);
+      retried = true;
+      await sleep(5000);
+    }
   }
   const safe = countOf(data, "survives");
   const lead = countOf(data, "resumes");

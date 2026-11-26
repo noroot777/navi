@@ -120,6 +120,7 @@ final class UpdateGate {
     guard hasPending, phase == .waiting || phase == .idle || phase == .blocked else { return }
     stopPolling()
     handoverFailures = 0
+    frozenWidenings = 0
     evaluate(allowPrompt: true)
   }
 
@@ -300,14 +301,14 @@ final class UpdateGate {
       : "等会被打断的任务跑完，每 \(Int(pollInterval)) 秒再问一次")
     stopPolling()
     let mine = epoch
-    let interval = preservingRuntime ? min(60, pollInterval * pow(2, Double(handoverFailures))) : pollInterval
+    let interval = min(60, pollInterval * pow(2, Double(preservingRuntime ? handoverFailures : frozenWidenings)))
     pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
       guard let self, !self.polling, self.phase == .waiting, mine == self.epoch else { return }
       self.polling = true
       self.assess { verdict in
         guard mine == self.epoch else { return }
         self.polling = false
-        if self.phase == .waiting && !verdict.needsConsent { self.prepare(verdict.target, agreed: verdict) }
+        if self.phase == .waiting && !verdict.needsConsent { self.prepare(verdict.target, agreed: verdict, fromWaiting: true) }
       }
     }
   }
@@ -329,12 +330,18 @@ final class UpdateGate {
   private var preservingRuntime = false
   /// 端口上那份服务认不认「重启前冻结」（最近一次评估时）；不认就在确认框里如实说。
   private var freezable = true
+  /// 这一次放行是用户选了「等」之后轮询到的：冻结之下仍有会被打断的就接着等，不再弹同一个确认框。
+  private var preparedFromWaiting = false
+  /// 等待中冻结复核连着没过的次数：轮询跟着退避，别每几秒就冻一次整份服务。
+  private var frozenWidenings = 0
   private var handoverBlock: String?
 
   /// 放行。`target` 是评估时端口上那一份；nil = 用户在确认不了时点了「现在」。`agreed` 是用户同意过（或判定
   /// 没人会被打断）的那份，停服务之前拿冻结之下的快照跟它比；强制切换（`recovery`）不带。
-  private func prepare(_ target: ServiceTarget?, agreed: ImpactVerdict? = nil, recovery: ServiceRecoveryIdentity? = nil) {
+  private func prepare(_ target: ServiceTarget?, agreed: ImpactVerdict? = nil, recovery: ServiceRecoveryIdentity? = nil,
+                       fromWaiting: Bool = false) {
     guard phase != .preparing && phase != .prepared else { return }
+    preparedFromWaiting = fromWaiting
     stopPolling()
     phase = .preparing
     let mine = epoch
@@ -419,9 +426,12 @@ final class UpdateGate {
       case .refused(let why):
         maintenance.end()
         return .failed("服务这会儿冻结不了接活（\(why)），先没停服务，更新没装。")
-      case .unfrozen(let fresh, let freezable):
-        // 认冻结、却在冻结那一下认不出是刚才那份服务：回去重新评估。不认冻结的老服务照旧凭评估时的结论停。
-        if freezable, case .unknown(let why) = fresh { maintenance.end(); return .changed(why) }
+      case .unfrozen:
+        break // 明确不认冻结的老服务（或端口上不是自己那份）：照旧凭评估时的结论停，ServerShutdown 只停评估过的那一份。
+      case .undetermined(let why):
+        // 分不出认不认冻结：不退回不冻的老路，按「确认不了」比 —— 用户同意过的不是「确认不了」就重新问。
+        let now = ImpactVerdict.unknown(why)
+        if agreed.widened(to: now) { maintenance.end(); return .widened(now) }
       case .frozen(let lease, let now):
         freeze = lease
         if agreed.widened(to: now) { maintenance.end(); return .widened(now) }
@@ -432,8 +442,9 @@ final class UpdateGate {
       guard beforeStop() else { return false }
       guard let freeze, let agreed else { return true }
       renewal = RestartFreeze.check(freeze, agreed: agreed, includingShutdown: false)
-      if case .valid = renewal { return true }
-      return false
+      guard case .valid = renewal else { return false }
+      // 续期是一次网络往返，这期间这一轮可能已经作废（Sparkle 放弃了）：下刀前的授权只认等完之后的那一眼。
+      return beforeStop()
     }, didSignal: didSignal)
     switch stopped {
     case .changed(let why):
@@ -499,9 +510,17 @@ final class UpdateGate {
         answerQuit(false)
       } else { releaseHold(); evaluate() }
     case .widened(let verdict):
+      releaseHold()
+      // 用户已经选了「等」：冻结之下仍有会被打断的（多半是即时评估看不到的那几个）就放开冻结接着等，不再弹同一个框；
+      // 他从菜单主动重试时才重新问。
+      if preparedFromWaiting {
+        frozenWidenings += 1
+        log("冻结之下仍有会被打断的任务，接着等")
+        startWaiting()
+        return
+      }
       // 冻结之下多出了用户没同意过的：拿这份重新问（即时评估未必看得到冻结那一刻还在起跑的那几个）。
       log("停服务之前名单变多了，重新问")
-      releaseHold()
       phase = .checking
       epoch += 1
       decide(verdict, epoch: epoch, allowPrompt: true, changed: true)
@@ -511,6 +530,7 @@ final class UpdateGate {
   }
 
   private func finish(stale: Bool) {
+    frozenWidenings = 0
     let run = proceeds
     let replies = quitReplies
     proceeds = []
@@ -568,7 +588,7 @@ final class UpdateGate {
 
   private func prompt(for verdict: ImpactVerdict, quitting: Bool, changed: Bool = false) -> Prompt {
     let title: String
-    var lines: [String] = changed ? ["刚才确认之后又多了会被打断的任务，按现在的样子再确认一次。"] : []
+    var lines: [String] = changed ? ["刚才确认之后情况变了，按现在的样子再确认一次。"] : []
     let (waitTitle, nowTitle): (String, String)
     switch purpose {
     case .staleServer(let from):

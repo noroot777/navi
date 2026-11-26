@@ -74,6 +74,7 @@ async function startFake({ dataDir = data, stubborn = false } = {}) {
   const source = `
     const http = require('node:http'); const fs = require('node:fs');
     ${stubborn ? "process.on('SIGTERM', () => {});" : ""}
+    let impactAsked = 0;
     http.createServer((req, res) => {
       res.setHeader('content-type', 'application/json');
       const id = 'fake-' + process.pid;
@@ -91,6 +92,8 @@ async function startFake({ dataDir = data, stubborn = false } = {}) {
             shutdown: { version: 1, resources: mode === 'clean' ? [{ kind: 'terminal', id: 't1', label: '终端 zsh' }] : [] } };
           if (what === 'release') return res.end(JSON.stringify({ protocol: 1, released: true }));
           if (what === 'renew') {
+            // 续期答得慢：答复还在路上时这一轮可能已经作废。
+            if (mode === 'slow-renew') return setTimeout(() => res.end(JSON.stringify({ protocol: 1, valid: true, expiresInMs: 30000, impact })), 1500);
             if (mode === 'grow') impact.mcpDisrupted = [{ id: 'mid', title: '冻结之后拉起 MCP 的任务', pid: 9 }];
             return res.end(JSON.stringify({ protocol: 1, valid: true, expiresInMs: 30000, impact }));
           }
@@ -104,6 +107,11 @@ async function startFake({ dataDir = data, stubborn = false } = {}) {
         if (req.headers['x-ash-instance'] !== id) { res.statusCode = 409; return res.end('{"error":"不是这一份"}'); }
         const raw = fs.readFileSync(${JSON.stringify(impactFile)}, 'utf8');
         if (raw === 'refuse') { res.statusCode = 401; return res.end('{"error":"请先登录"}'); }
+        // 第一次答一份认冻结的空名单，之后一律 503（服务一时忙不过来）。
+        if (raw === 'freeze-then-503') {
+          if (impactAsked++) { res.statusCode = 503; return res.end('{"ok":false}'); }
+          return res.end(JSON.stringify({ survives: [], resumes: [], interrupted: [], mcpDisrupted: [], restartFreeze: 1 }));
+        }
         return res.end(raw);
       }
       const health = fs.existsSync(${JSON.stringify(healthFile)}) ? fs.readFileSync(${JSON.stringify(healthFile)}, 'utf8') : 'ok';
@@ -204,8 +212,8 @@ try {
   // grow：续期时多出的同样重新问；busy：冻结被占（另一处拿着交接许可）→ 不停、不备份、如实报。
   for (const [mode, answers, calls, asks] of [
     ["clean", "", "acquire,renew", null],
-    ["widen", "now", "acquire,release,acquire,renew", /又多了会被打断的任务.*冻结时才看到的任务 —— 会被判失败：正在起跑/],
-    ["grow", "now", "acquire,renew,release,acquire,renew", /又多了会被打断的任务.*冻结之后拉起 MCP 的任务 —— 手里握着 Navi MCP/],
+    ["widen", "now", "acquire,release,acquire,renew", /情况变了.*冻结时才看到的任务 —— 会被判失败：正在起跑/],
+    ["grow", "now", "acquire,renew,release,acquire,renew", /情况变了.*冻结之后拉起 MCP 的任务 —— 手里握着 Navi MCP/],
   ]) {
     setImpact({ ...clear, restartFreeze: 1 });
     setFreeze(mode);
@@ -230,8 +238,48 @@ try {
   assert.equal(backups().length, beforeBusy);
   fake.kill("SIGKILL");
   await once(fake, "exit");
+
+  // 续期还在路上时 Sparkle 放弃了：续期答复回来也不下刀，冻结放掉。
+  setFreeze("slow-renew");
+  fake = await startFake();
+  result = await drive(["abandon-renewing", "10"], { extraEnv: { FREEZE_LOG: freezeLog } });
+  assert.equal(result.status, 0, result.out);
+  assert.match(result.out, /ABANDONED[\s\S]*PHASE idle PENDING false/, result.out);
+  assert.equal(freezeCalls(), "acquire,renew,release", result.out);
+  assert.equal(alive(fake), true, "an update abandoned while the renewal was in flight must not stop the service");
+  fake.kill("SIGKILL");
+  await once(fake, "exit");
+
+  // 认冻结的服务第二次一时答不上来：分不出认不认冻结不是「老服务」，不冻就停的老路不走 —— 按确认不了重新问。
+  setImpact("freeze-then-503");
+  setFreeze("clean");
+  fake = await startFake();
+  result = await drive(["update", "3"], { answers: "cancel" });
+  assert.equal(result.status, 2, result.out);
+  assert.match(result.out, /ASK .*刚才确认之后情况变了.*确认不了重启会不会打断任务/, result.out);
+  assert.equal(freezeCalls(), "", "nothing to freeze while the service cannot be identified");
+  assert.equal(alive(fake), true, "an undetermined freeze capability does not fall back to stopping unfrozen");
+  fake.kill("SIGKILL");
+  await once(fake, "exit");
+
+  // 选了「等」之后冻结之下仍有（即时评估看不到的那种）：接着等、不再弹同一个框；没了才冻结、续期、停。
+  setImpact({ ...clear, restartFreeze: 1 });
+  setFreeze("widen");
+  fake = await startFake();
+  const frozenWait = driveAsync(["update", "15"], "wait");
+  for (let i = 0; i < 200 && (freezeCalls().match(/acquire/g) ?? []).length < 3; i++) await delay(50);
+  assert.ok((freezeCalls().match(/acquire/g) ?? []).length >= 3, `waiting re-checks under the freeze\n${frozenWait.output()}`);
+  assert.equal(alive(fake), true);
+  setFreeze("clean");
+  result = await frozenWait.done;
+  assert.equal(result.status, 0, result.out);
+  assert.equal((result.out.match(/^ASK /gm) ?? []).length, 1, `asked again while waiting\n${result.out}`);
+  assert.match(result.out, /PROCEED/);
+  assert.equal(freezeCalls(), "acquire,renew", result.out);
+  await delay(100);
+  assert.equal(alive(fake), false);
   rmSync(freezeFile);
-  console.log("PASS: restart freeze: stops on the frozen snapshot after renewing; a longer list is asked again; a held freeze stops nothing");
+  console.log("PASS: restart freeze: stops on the frozen snapshot after renewing; a longer list is asked again, or keeps waiting once 'wait' was chosen; a held freeze, an abandon during renewal or an undetermined capability stops nothing");
 
   // ── 问不出来 = 当成会打断 ──
   setImpact("refuse");

@@ -93,7 +93,9 @@ enum RemoteAccessSwitch {
         var now: (verdict: ImpactVerdict, freezable: Bool)?
         switch RestartFreeze.acquire() {
         case .refused(let why): failure = "服务这会儿冻结不了接活（\(why)），这次没有重启。"
-        case .unfrozen(let fresh, let freezable): now = (fresh, freezable)
+        case .unfrozen(let fresh): now = (fresh, false)
+        // 分不出认不认冻结：按「确认不了」比 —— 同意过的不是「确认不了」就重新问，不退回不冻的老路。
+        case .undetermined(let why): now = (.unknown(why), false)
         case .frozen(let held, let fresh):
           lease = held
           now = (fresh, true)

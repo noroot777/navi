@@ -86,6 +86,18 @@ case "abandon-waiting":
   emit("PHASE \(gate.phase) PENDING \(gate.hasPending)")
   exit(proceeded ? 1 : 0)
 
+case "abandon-renewing":
+  // 下刀前续期还在路上时 Sparkle 放弃了：续期答复回来也不许下刀（FREEZE_LOG 里出现 renew 就放弃）。
+  var proceeded = false
+  let freezeLog = env["FREEZE_LOG"] ?? ""
+  gate.request(.update(version: "9.9")) { proceeded = true; emit("PROCEED") }
+  _ = runUntil(Double(args[2])!) { ((try? String(contentsOfFile: freezeLog, encoding: .utf8)) ?? "").contains("renew") }
+  gate.abandon("测试里的安装错误")
+  emit("ABANDONED")
+  _ = runUntil(3) { false }
+  emit("PHASE \(gate.phase) PENDING \(gate.hasPending)")
+  exit(proceeded ? 1 : 0)
+
 case "stop":
   // ServerShutdown 只停评估过的那一份：stop <ours:pid | absent | consented>
   let spec = args[2]
