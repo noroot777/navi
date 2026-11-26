@@ -15,8 +15,9 @@
 //   turn:<种类>    其余几种「下一步」（提问、失败、待裁定、讨论闸口）上次见到的是哪一回，代次同 im/attention.ts。
 //   interrupt      最近一个回合（单飞会话、团队调度台）挂了、任务却没落失败（续聊挂了，原来的结果还在；调度台挂了回到待命）：
 //                  那一回合。落了失败的由 turn:failed 说。
-//   stop           被停下的那一次：任务落了 canceled 认那一次落位；没落 canceled（续聊被停、原来的状态放回去；分组暂停；
-//                  调度台被停回到待命）认那个被停的回合自己（session_turns.outcome = stopped）。同一次停止只记一样，不重复说。
+//   stop           被停下的那一次：认那个被停的回合自己（session_turns.outcome = stopped；续聊被停、原来的状态放回去，分组暂停，
+//                  调度台被停回到待命，跑着被停落 canceled 都是它）；没有被停的回合（排着就被取消了）才认 canceled 那一下的落位。
+//                  同一次停止只记一样，不重复说。
 //   result/gate/review  结局账，同 im/outcomes.ts。
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { TaskNotifyKind } from "@navi/shared";
@@ -134,8 +135,10 @@ export async function entriesOf(view: TaskView, facts: Facts): Promise<Entry[]> 
     });
   }
   const stopped = { kind: "stopped" as const, body: task.status === "paused" ? "已暂停" : "已停止" };
-  if (task.status === "canceled") entries.push({ kind: "stop", value: `canceled:${task.endedAt ?? task.updatedAt}`, said: stopped });
-  else if (last?.outcome === "stopped") entries.push({ kind: "stop", value: `turn:${last.id}`, said: stopped });
+  // 认那个被停的回合；没有（排着就被取消了）才认 canceled 那一下的落位。先认落位的话，停完又重新排上、还没开新回合时
+  // 身份就从落位换成了回合，同一次停止说两遍。
+  if (last?.outcome === "stopped") entries.push({ kind: "stop", value: `turn:${last.id}`, said: stopped });
+  else if (task.status === "canceled") entries.push({ kind: "stop", value: `canceled:${task.endedAt ?? task.updatedAt}`, said: stopped });
   for (const outcome of await outcomesOf(view)) entries.push({ kind: outcome.kind, value: outcome.value, said: outcomeWords(view, outcome) });
   return entries;
 }

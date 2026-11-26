@@ -97,6 +97,9 @@ export function makeEventFilter(actor: Actor): {
       if (ev.type === "task.actions.stale.all") return true;
       // 「服务正在准备重启」：说的是整份服务，不带任何任务。
       if (ev.type === "service.freeze") return true;
+      // 系统通知自带项目（服务端判的），直接按它核，不走下面的归属缓存：缓存没命中时那一条会被丢掉，别的事件下一条
+      // 就补上了，通知却是一次性的 —— 服务端已经记了账，不会再推（重启后收拾出来的中断就是这样丢的）。
+      if (ev.type === "task.notify") return !!visible?.has(ev.projectId);
       const taskId = taskIdOf(ev);
       // 认不出归属的事件一律**不推**。宁可漏一条无害的广播,也好过默认放行 ——
       // 将来新增一种事件时,忘了在这里登记的后果是「少显示了点东西」而不是越权。

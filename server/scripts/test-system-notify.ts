@@ -12,10 +12,11 @@
 // ⑦ 自用模式下 SSE 照推；
 // ⑧ 续聊挂了、原来的 done 放回去（真结算）：不说「完成了」，说「这一轮中断了」；续聊真完成了才是新的一次完成；
 // ⑨ 被停下推一条，不重复：落了 canceled 的、续聊被停放回原 done 的、失败任务上续聊被停的（不再说「中断了」）、
-//    分组暂停的；
+//    分组暂停的；停完重新排上、还没开新回合，不再说一遍；
 // ⑩ 完成之后再派审：审查没通过推「审查没通过」；审着的时候完成的那一版，审查通过才推「审查通过，等你验收」；
 // ⑪ 团队调度台：回合挂了回到待命，不说「完成了」，说「这一轮中断了」；正常收口的回合才是新的一版；
-// ⑫ 多人模式：被移出项目的成员收不到那个项目里的通知（一条一条推，过滤器逐件核可见性）。
+// ⑫ 多人模式：被移出项目的成员收不到那个项目里的通知（一条一条推，过滤器逐件核可见性）；有权限的成员，任务头一回
+//    经过过滤器（归属缓存是冷的，比如重启后收拾出来的中断）也照推。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -236,6 +237,8 @@ try {
   await turnOf("t7b", "stopped");
   assert.equal((await settleTaskStatus("t7b", 1, "canceled")).status, "canceled");
   assert.deepEqual(kinds(await reconcile("t7b")), [["t7b", "stopped"]], "回合停了、任务也 canceled：同一次停止只说一次");
+  await set("t7b", { status: "backlog" });
+  assert.deepEqual(await reconcile("t7b"), [], "停完重新排上、还没开新回合：不再说一遍");
   // 续聊被停，放回原 done
   await db.insert(tasks).values(task({ id: "t7c", title: "续聊被停", status: "done", doneSeq: 1, endedAt: at() }) as never);
   await reconcile("t7c");
@@ -341,6 +344,18 @@ try {
   await member.refresh();
   assert.deepEqual(secret.filter((notice) => member.allow(notice)), [], "看不见的项目：一条都不推给他");
   member.stop();
+
+  await db.insert(users).values({ id: "m", name: "项目成员", role: "member", dirName: "m", status: "active", createdAt: at(), updatedAt: at() } as never);
+  await addProjectMember({ projectId: "p2", userId: "m", role: "member", addedBy: null });
+  await db.insert(tasks).values(task({ id: "cold", projectId: "p2", ownerUserId: "m", title: "重启时在跑", status: "running" }) as never);
+  await reconcile("cold");
+  await set("cold", { status: "failed", endedAt: at() });
+  const cold = await reconcile("cold");
+  assert.deepEqual(kinds(cold), [["cold", "failed"]]);
+  const owner2 = makeEventFilter({ kind: "user", userId: "m", role: "member", name: "项目成员" } as never);
+  await owner2.refresh();
+  assert.ok(owner2.allow(cold[0]!), "归属缓存是冷的：有权限照推，不丢这一次");
+  owner2.stop();
 
   notifier.stop();
   console.log("test-system-notify: ok");

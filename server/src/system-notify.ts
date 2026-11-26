@@ -92,18 +92,21 @@ export class SystemNotifier {
     const at = now();
     await reviewOutcomesSince();
     const all = await db.select({ id: tasks.id }).from(tasks);
-    await this.run(() => this.reconcile(all.map((row) => row.id), { quiet: true }));
+    // 有任务没记上就不算记完：标了「记过底」，没记上的那几个下次头一眼会被当成新事，把历史推一遍。下次全量对账再记
+    const missed = await this.run(() => this.reconcile(all.map((row) => row.id), { quiet: true }));
+    if (missed) throw new Error(`系统通知记底时 ${missed} 个任务没记上，下次再记`);
     await writeMeta(SWEPT, at);
     await writeMeta(BASELINED, at);
   }
 
   /** 启动几秒后、定时：把可能要人管的任务对一遍。 */
   async full(): Promise<void> {
+    // 记底没记完就一直攒着：账上缺的任务头一眼会被当成新事。下一次定时再记
+    await this.baseline();
     try {
-      await this.baseline();
       await this.sweep();
     } finally {
-      // 头一次出错也放开：之后的动静照常对，全量对账等下一次定时
+      // 全量对账出错也放开：之后的动静照常对，全量对账等下一次定时
       this.held = false;
       this.schedule();
     }
@@ -135,10 +138,11 @@ export class SystemNotifier {
 
   /**
    * quiet = 只记账不推（记底）。一个任务记完账就把它那几条推出去，一个任务出错只记一句、不连累别的：先把一批都记了账
-   * 再一起推的话，后面一个出错，前面记过账的就再也推不出去了（下一次对账身份已经一样）。
+   * 再一起推的话，后面一个出错，前面记过账的就再也推不出去了（下一次对账身份已经一样）。返回出错的个数。
    */
-  async reconcile(taskIds: string[], { quiet = false }: { quiet?: boolean } = {}): Promise<void> {
+  async reconcile(taskIds: string[], { quiet = false }: { quiet?: boolean } = {}): Promise<number> {
     const ids = await withTeamLeads(taskIds);
+    let failed = 0;
     for (let i = 0; i < ids.length; i += BATCH) {
       const batch = ids.slice(i, i + BATCH);
       const [views, facts] = await Promise.all([viewsOf(batch), factsOf(batch)]);
@@ -153,10 +157,12 @@ export class SystemNotifier {
           if (!quiet && this.stillSettling(taskId, view, entries)) continue;
           for (const notice of await this.advance(view, entries, quiet)) this.publish(notice);
         } catch (error) {
+          failed += 1;
           console.error(`[navi] 系统通知对账出错 task=${taskId}:`, error);
         }
       }
     }
+    return failed;
   }
 
   /** 有事要人管、回合锁却还占着：这一轮还在结算，先不动，锁放开再对（同 im/reconcile.ts stillSettling）。 */
