@@ -3,12 +3,14 @@
 // 会话生命周期(创建/清场/回收)在 terminal.ts,进程树/wrapper 纯函数在
 // terminal-process-tree.ts。
 import { existsSync, statSync } from "node:fs";
+import { basename } from "node:path";
 import { randomUUID } from "node:crypto";
 import { clearEnv, withLegacyEnvNames } from "@navi/shared/env-names";
 import { resolveBin } from "./executors/bin-resolve.js";
 import { expandHome } from "./git.js";
 import { IS_WINDOWS, encodePowerShellCommand } from "./platform.js";
 import { LSOF_PATH, PS_PATH } from "./terminal-process-tree.js";
+import { zshStartupEnvironment } from "./terminal-zsh.js";
 
 export function terminalSize(value: unknown, fallback: number, min: number, max: number): number {
   return typeof value === "number" && Number.isFinite(value)
@@ -154,6 +156,13 @@ export function ptyEnvironment(extra: Record<string, string> = {}): Record<strin
     NAVI_PS: PS_PATH ?? "",
     NAVI_LSOF: LSOF_PATH ?? "",
   };
+}
+
+export function interactivePtyEnvironment(shell: string, args: string[]): Record<string, string> {
+  const env = ptyEnvironment();
+  delete env.NAVI_ZSH_DOTDIR;
+  if (IS_WINDOWS || basename(shell) !== "zsh" || args.length !== 1 || args[0] !== "-l") return env;
+  return { ...env, ...zshStartupEnvironment(process.env.ZDOTDIR) };
 }
 
 export function resolveTerminalDirectory(repoPath: string | null | undefined): string | null {

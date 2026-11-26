@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TerminalSessionManager } from "../../server/src/terminal.ts";
@@ -10,8 +10,8 @@ import { build, preview } from "vite";
 import { webkit } from "playwright-core";
 import { Hono } from "hono";
 import { getRequestListener } from "@hono/node-server";
-import { streamSSE } from "hono/streaming";
 import { responseCompression } from "../../server/src/response-compression.ts";
+import { terminalEventStream } from "../../server/src/terminal-event-stream.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -24,10 +24,19 @@ assert.equal(chunks.join(""), unicode);
 assert.ok(chunks.every((chunk) => Buffer.byteLength(chunk) <= 64 * 1024 && chunk.isWellFormed()));
 
 const scratch = mkdtempSync(join(tmpdir(), "navi-terminal-interaction-"));
+const zsh = existsSync("/bin/zsh");
+if (zsh) {
+  process.env.ZDOTDIR = scratch;
+  process.env.EDITOR = "vi";
+  process.env.VISUAL = "vi";
+  writeFileSync(join(scratch, ".zshenv"), "export NAVI_TEST_ZSHENV=loaded\n");
+  writeFileSync(join(scratch, ".zshrc"), "unset HISTFILE\nbindkey -M viins '^H' backward-kill-word\n");
+}
 const manager = new TerminalSessionManager();
 const projectId = "terminal-interaction";
 const inputs = [];
 const streams = [];
+const streamResponses = new Map();
 const sizes = new Map();
 const outputOf = (sessionId) => manager.eventsAfter(sessionId, projectId, 0)
   ?.filter((event) => event.type === "data").map((event) => event.data).join("") ?? "";
@@ -36,23 +45,13 @@ eventApp.use("*", responseCompression());
 eventApp.get("*", (context) => {
   context.header("access-control-allow-origin", "*");
   const sessionId = context.req.path.split("/").at(-2);
-  const after = Number(context.req.header("last-event-id") ?? context.req.query("after") ?? 0);
-  streams.push({ sessionId, after });
-  return streamSSE(context, async (stream) => {
-    const write = (event) => stream.writeSSE({ id: String(event.seq), data: JSON.stringify(event) });
-    const stop = manager.subscribe(sessionId, projectId, (event) => void write(event));
-    stream.onAbort(() => stop?.());
-    try {
-      for (const event of manager.eventsAfter(sessionId, projectId, after) ?? []) await write(event);
-      while (!stream.aborted) {
-        await stream.writeSSE({ event: "ping", data: "1" });
-        await stream.sleep(250);
-      }
-    } finally { stop?.(); }
-  });
+  const lastEventId = context.req.header("last-event-id");
+  const after = Number(lastEventId ?? context.req.query("after") ?? 0);
+  streams.push({ sessionId, after, lastEventId });
+  return terminalEventStream(context, manager, projectId, sessionId);
 });
 const eventRequest = getRequestListener(eventApp.fetch);
-const backend = createServer(async (request, response) => {
+async function handleBackendRequest(request, response) {
   response.setHeader("access-control-allow-origin", "*");
   response.setHeader("access-control-allow-headers", "content-type,last-event-id,x-navi-human-action-token");
   response.setHeader("access-control-allow-methods", "GET,POST,DELETE,OPTIONS");
@@ -68,6 +67,7 @@ const backend = createServer(async (request, response) => {
   if (path.startsWith(base)) {
     const [, sessionId, action] = path.slice(base.length).split("/");
     if (action === "events") {
+      streamResponses.set(sessionId, response);
       return eventRequest(request, response);
     }
     const parts = [];
@@ -75,7 +75,7 @@ const backend = createServer(async (request, response) => {
     const raw = Buffer.concat(parts).toString("utf8");
     const body = raw ? JSON.parse(raw) : {};
     if (path === base && request.method === "POST") {
-      const options = existsSync("/bin/zsh") ? { shell: "/bin/zsh", shellArgs: ["-f"] } : {};
+      const options = zsh ? { shell: "/bin/zsh" } : {};
       return json(await manager.createAsync(projectId, scratch, { ...body, ...options }));
     }
     if (action === "input") {
@@ -92,7 +92,8 @@ const backend = createServer(async (request, response) => {
     if (request.method === "DELETE") { await manager.destroy(sessionId, projectId); return json({}); }
   }
   return json({ error: "not found" }, 404);
-});
+}
+const backend = createServer(handleBackendRequest);
 await new Promise((resolve) => backend.listen(0, "127.0.0.1", resolve));
 const origin = `http://127.0.0.1:${backend.address().port}`;
 process.env.NAVI_PROXY = origin;
@@ -105,10 +106,21 @@ try {
   await build({ root, logLevel: "error", build: { outDir, rollupOptions: {
     input: join(root, "scripts/fixtures/terminal-interaction.html"),
   } } });
-  const server = await preview({ root, logLevel: "error", build: { outDir }, preview: {
-    host: "127.0.0.1", port: 0, strictPort: false,
-    proxy: { "/api": { target: origin, changeOrigin: true } },
-  } });
+  const server = await preview({
+    root,
+    logLevel: "error",
+    build: { outDir },
+    preview: { host: "127.0.0.1", port: 0, strictPort: false },
+    plugins: [{
+      name: "terminal-interaction-backend",
+      configurePreviewServer({ middlewares }) {
+        middlewares.use((request, response, next) => {
+          if (!request.url?.startsWith("/api/")) return next();
+          void handleBackendRequest(request, response).catch(next);
+        });
+      },
+    }],
+  });
   const address = server.httpServer.address();
   web = { origin: `http://127.0.0.1:${address.port}`, close: () => new Promise((resolve, reject) => {
     server.httpServer.closeAllConnections();
@@ -174,10 +186,6 @@ async function runBrowser() {
       }
     };
   });
-  await page.route("**/api/**", (route) => {
-    const url = new URL(route.request().url());
-    return route.continue({ url: origin + url.pathname + url.search });
-  });
   await page.goto(`${web.origin}/scripts/fixtures/terminal-interaction.html`);
   await page.getByRole("button", { name: "终端", exact: true }).click();
   const viewport = page.locator(".project-terminal__viewport:not([hidden])");
@@ -188,9 +196,10 @@ async function runBrowser() {
       if (await predicate()) return;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    console.error("INPUT", JSON.stringify(inputs.slice(-20)));
+    console.error("INPUT", JSON.stringify(inputs.slice(-20).map(({ sessionId, data }) => ({ sessionId, data: data.slice(0, 250) }))));
     console.error("OUTPUT", JSON.stringify(manager.listForProject(projectId).map((session) => outputOf(session.id).slice(-2500))));
-    console.error("SCREEN", await viewport.innerText());
+    console.error("STREAMS", streams.slice(-10));
+    console.error("SCREEN", (await viewport.innerText()).slice(-2500));
     console.error("ERRORS", errors);
     await page.screenshot({ path: "/tmp/navi-terminal-failure.png" });
     throw new Error(`Timed out: ${description}`);
@@ -205,7 +214,7 @@ async function runBrowser() {
   assert.equal(await page.getByTestId("palette").textContent(), "false");
   await page.keyboard.press("Control+c");
 
-  if (existsSync("/usr/bin/vi") && existsSync("/bin/zsh")) {
+  if (existsSync("/usr/bin/vi") && zsh) {
     await page.keyboard.type("bindkey -e; printf '__ZLE_READY__\\n'");
     await page.keyboard.press("Enter");
     await waitFor(() => outputOf(first).includes("\r\n__ZLE_READY__\r\n"), "emacs shell keymap ready");
@@ -238,6 +247,25 @@ async function runBrowser() {
     await page.keyboard.press("Enter");
     await waitFor(() => viewport.innerText().then((text) => text.includes("__VI_EXIT_READY__")), "shell return rendered after vi");
 
+    const firstTab = () => page.getByRole("button", { name: /^交互验证（/ });
+    const beforeReload = inputs.length;
+    await page.reload();
+    await page.getByRole("button", { name: "终端", exact: true }).click();
+    await firstTab().click();
+    await waitFor(() => viewport.innerText().then((text) => text.includes("__VI_EXIT_READY__")), "history restored after reload");
+    await waitFor(() => input.isEditable(), "input enabled after replay");
+    await input.focus();
+    await page.keyboard.type("printf '\\137RELOADED__\\n'");
+    await page.keyboard.press("Enter");
+    await waitFor(() => outputOf(first).includes("\r\n_RELOADED__\r\n"), "shell accepts a clean command after reload");
+    assert.doesNotMatch(inputs.slice(beforeReload).map((entry) => entry.data).join(""), /\x1b(?:\]|\[\?12;)/, "history must not reply to Vim queries");
+
+    const beforeLiveQuery = inputs.length;
+    await page.keyboard.type("printf '\\033[?12$p'; IFS= read -rst 3 -d y reply; printf '\\137LIVE_%s__\\n' \"$?\"");
+    await page.keyboard.press("Enter");
+    await waitFor(() => outputOf(first).includes("\x1b[?12$p_LIVE_0__\r\n"), "live terminal query received an answer");
+    assert.match(inputs.slice(beforeLiveQuery).map((entry) => entry.data).join(""), /\x1b\[\?12;\d+\$y/);
+
     const paste = async (text) => input.evaluate((element, text) => {
       const clipboardData = new DataTransfer();
       clipboardData.setData("text/plain", text);
@@ -256,6 +284,20 @@ async function runBrowser() {
     await page.keyboard.press("Enter");
     await waitFor(() => outputOf(first).includes("\r\nalphX\r\nbeta\r\n"), "first line of multiline paste edited");
 
+    await page.keyboard.type("bindkey -v; bindkey -M viins '^H'; printf '\\137VIINS_%s__\\n' \"$NAVI_TEST_ZSHENV\"");
+    await page.keyboard.press("Enter");
+    await waitFor(() => outputOf(first).includes("\r\n_VIINS_loaded__\r\n"), "login shell profile and vi keymap");
+    assert.match(outputOf(first), /"\^H" backward-kill-word/);
+    const beforeDelete = inputs.length;
+    const deletedPaste = "echo PASTED-FIRST\necho PASTED-SECOND";
+    await paste(deletedPaste);
+    await waitFor(() => inputs.slice(beforeDelete).some((entry) => entry.data.includes("\x1b[201~")), "vi-mode multiline paste delivered");
+    for (let count = 0; count < deletedPaste.length; count += 1) await page.keyboard.press("Backspace");
+    await page.keyboard.type("printf '\\137AFTER_DELETE__\\n'");
+    await page.keyboard.press("Enter");
+    await waitFor(() => outputOf(first).includes("_AFTER_DELETE__\r\n"), "vi-mode backspace crosses pasted newline");
+    assert.doesNotMatch(outputOf(first), /\r\nPASTED-(?:FIRST|SECOND)\r\n/);
+
     const start = inputs.length;
     await paste("#" + unicode);
     await waitFor(() => inputs.slice(start).map((entry) => entry.data).join("").endsWith("\x1b[201~"), "large Unicode paste delivered in order");
@@ -266,7 +308,39 @@ async function runBrowser() {
       actual: sent.slice(mismatch, mismatch + 60), expected: expected.slice(mismatch, mismatch + 60) }));
     assert.ok(inputs.slice(start).every((entry) => Buffer.byteLength(entry.data) <= 64 * 1024));
     await page.keyboard.press("Control+c");
-    console.log("PASS: vi editing, alternate-screen tab switch, multiline paste editing, large Unicode paste");
+    console.log("PASS: vi editing, silent history replay, live replies, multiline backspace and large Unicode paste");
+
+    for (const automatic of [false, true]) {
+      const mode = automatic ? "RECONNECT" : "REOPEN";
+      const streamCount = streams.length;
+      const flood = "awk 'BEGIN { for (i=0;i<8000;i++) print \"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-abcdefghijklmnopqrstuvwxyz\" }'";
+      await input.focus();
+      await page.keyboard.type(`printf '\\033[?1049h\\033[H\\137ALT_${mode}__'; read -r line; printf '\\033[?1049l'; ${flood}; printf '\\137TAIL_${mode}__\\n'`);
+      await page.keyboard.press("Enter");
+      await waitFor(() => viewport.innerText().then((text) => text.includes(`_ALT_${mode}__`)), "alternate screen before history gap");
+      const lastBeforeGap = manager.eventsAfter(first, projectId, 0).at(-1).seq;
+      if (automatic) {
+        streamResponses.get(first).destroy();
+      } else {
+        await page.getByRole("button", { name: "收起终端（shell 与服务继续跑）" }).click();
+      }
+      manager.write(first, projectId, "\r");
+      await waitFor(() => outputOf(first).includes(`\r\n_TAIL_${mode}__\r\n`), "output exceeded replay buffer");
+      assert.ok(manager.eventsAfter(first, projectId, 0)[0].seq > lastBeforeGap + 1);
+      if (!automatic) await page.getByRole("button", { name: "终端", exact: true }).click();
+      await waitFor(() => streams.slice(streamCount).some((entry) => entry.sessionId === first && entry.after > 0 && (!automatic || entry.lastEventId)), "cursor sent on resumed stream");
+      await waitFor(() => viewport.innerText().then((text) => text.includes(`_TAIL_${mode}__`)), "retained tail rendered");
+      await waitFor(() => input.isEditable(), "input enabled after truncated replay");
+      await input.focus();
+      await page.keyboard.type(`printf '\\033[?1047l\\137MAIN_${mode}__\\n'`);
+      await page.keyboard.press("Enter");
+      await waitFor(() => viewport.innerText().then((text) => text.includes(`_MAIN_${mode}__`)), "main screen remains usable after gap");
+      const screen = await viewport.innerText();
+      assert.ok(screen.includes(`_TAIL_${mode}__`), `switching to the main buffer must retain the replayed tail (${mode}): ${screen}`);
+      assert.doesNotMatch(screen, new RegExp(`_ALT_${mode}__`));
+    }
+    assert.equal(await page.getByTestId("notices").textContent(), "部分终端输出已超出保留范围\n部分终端输出已超出保留范围");
+    console.log("PASS: evicted output recovers on drawer reopen and automatic SSE reconnect");
   }
 
   const connections = streams.length;

@@ -20,7 +20,7 @@ import { killAllSessionTrees, killSessionTree, terminateSession, type KillResult
 import { withLaunchHandover, withSessionLock } from "./terminal-management-lock.js";
 import { sampleLaunchClocks, settleLaunchClocks, type LaunchIdentity } from "./terminal-launch-survivors.js";
 import { TerminalWatcher } from "./terminal-session-watch.js";
-import { commandLaunch, ptyEnvironment, shellCommand, terminalSize } from "./terminal-shell.js";
+import { commandLaunch, interactivePtyEnvironment, ptyEnvironment, shellCommand, terminalSize } from "./terminal-shell.js";
 import { spawnWindowsPty, type TerminalProcess } from "./terminal-pty.js";
 import { TerminalCapacity } from "./terminal-capacity.js";
 import { registerShutdownCleanup } from "./shutdown-resources.js";
@@ -245,7 +245,7 @@ export class TerminalSessionManager {
       cols: terminalSize(options.cols, 100, 20, 400),
       rows: terminalSize(options.rows, 24, 5, 200),
       cwd,
-      env: ptyEnvironment(launchToken ? { [LAUNCH_ID_ENV]: launchToken } : {}),
+      env: launchToken ? ptyEnvironment({ [LAUNCH_ID_ENV]: launchToken }) : interactivePtyEnvironment(shell, args),
     });
     const session: TerminalSession = {
       id: id(),

@@ -240,6 +240,12 @@ function TerminalPane({
     if (!terminal) return;
     let alive = true;
     let ended = tabRef.current.status === "ended";
+    let replaying = false;
+    const setReplay = (value: boolean) => {
+      if (replaying === value) return;
+      replaying = value;
+      terminal.write("", () => { terminal.options.disableStdin = value; });
+    };
     const source = new EventSource(api.terminalEventsUrl(project.id, establishedId, lastSeqRef.current));
     // attach tab 的状态点表达会话/服务事实,由集中轮询驱动,连接事件不碰它。
     source.onopen = () => { if (alive && !ended && !tab.attachSessionId) onMeta(tab.id, { status: "ready" }); };
@@ -247,30 +253,39 @@ function TerminalPane({
       if (!alive) return;
       const event = JSON.parse(message.data) as TerminalEvent;
       if (event.seq <= lastSeqRef.current) return;
+      setReplay(event.replayThrough !== undefined);
+      if (event.seq > lastSeqRef.current + 1) {
+        terminal.write("\x18", () => terminal.reset());
+        announcedRef.current = { detached: false, ended: false };
+        notify("部分终端输出已超出保留范围");
+      }
       lastSeqRef.current = event.seq;
       if (event.type === "data") {
         terminal.write(event.data);
-        return;
-      }
-      ended = true;
-      if (tab.attachSessionId) {
-        // 组长退了 ≠ 命令死了(daemonize),结论归集中轮询;这里只按已知事实补写说明
-        // (重放场景:上一条连接写过的说明被 reset 冲掉了,exit 是重放的收尾信号)。
-        announce();
       } else {
-        onMeta(tab.id, { status: "ended" });
-        terminal.write(`\r\n\x1b[90m进程已退出（${event.exitCode}）\x1b[0m\r\n`);
+        ended = true;
+        if (tab.attachSessionId) {
+          // 组长退了 ≠ 命令死了(daemonize),结论归集中轮询;这里只按已知事实补写说明
+          // (重放场景:上一条连接写过的说明被 reset 冲掉了,exit 是重放的收尾信号)。
+          announce();
+        } else {
+          onMeta(tab.id, { status: "ended" });
+          terminal.write(`\r\n\x1b[90m进程已退出（${event.exitCode}）\x1b[0m\r\n`);
+        }
       }
+      if (event.seq === event.replayThrough) setReplay(false);
     };
     source.onerror = () => {
+      setReplay(false);
       if (!alive || ended || tab.attachSessionId) return;
       onMeta(tab.id, { status: "reconnecting" });
     };
     return () => {
       alive = false;
       source.close();
+      if (terminalRef.current === terminal) setReplay(false);
     };
-  }, [active, establishedId, project.id, tab.id, tab.attachSessionId, onMeta, announce]);
+  }, [active, establishedId, project.id, tab.id, tab.attachSessionId, onMeta, announce, notify]);
 
   return (
     <div
