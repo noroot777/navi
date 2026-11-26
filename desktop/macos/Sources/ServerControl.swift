@@ -38,6 +38,13 @@ struct ServerRecord: Codable {
     DatabaseBackup.releaseRecoveryPoints()
   }
 
+  /// 记录文件此刻原样的内容（没有是 nil）。起出来的进程一次都没应答就退了时拿它放回去（ServerLauncher）。
+  static func snapshot() -> Data? { try? Data(contentsOf: url) }
+
+  static func restore(_ snapshot: Data?) {
+    if let snapshot { try? snapshot.write(to: url, options: .atomic) } else { try? FileManager.default.removeItem(at: url) }
+  }
+
   static func read() -> ServerRecord? {
     guard let data = try? Data(contentsOf: url) else { return nil }
     return try? JSONDecoder().decode(ServerRecord.self, from: data)
@@ -45,6 +52,12 @@ struct ServerRecord: Codable {
 
   private static func save(_ record: ServerRecord) throws {
     try JSONEncoder().encode(record).write(to: url, options: .atomic)
+  }
+
+  /// 正在应答的这份（pid）就是这一版 app 起的：记录里那个进程、构建号是自己。记录对不上是 false（不知道）。
+  static func servesThisBuild(pid: Int?) -> Bool {
+    guard let pid, let record = read() else { return false }
+    return record.pid == pid && record.bundleVersion == NaviConfig.bundleVersion
   }
 
   /// 正在应答的这份（pid）是不是由别的构建号的 app 起的；是就返回那个构建号。
@@ -140,6 +153,23 @@ enum ServerShutdown {
       didSignal()
       return waitGone(pid, timeout: timeout)
     }
+  }
+
+  enum HolderStop { case stopped, stillRunning, changed }
+
+  /// 用户在「服务没有应答」那一屏点了「停掉它」（`force`：它不理会、再点了「强制结束」）。只停认过的那一个进程：
+  /// 它还活着、还握着这份库的锁、这会儿还是没应答；换了人或者缓过来了，一律不停（`changed`，回去重新认）。
+  /// SIGTERM 要它自己的事件循环转起来才会处理，真卡死的进程等不到 —— 那时如实说（`stillRunning`），SIGKILL 由用户再点。
+  static func stopUnresponsive(_ holder: LockHolder, force: Bool, timeout: TimeInterval = 10) -> HolderStop {
+    guard DatabaseFile.liveHolder(in: NaviConfig.dataURL) == holder else { return .changed }
+    if case .navi(let instance) = NaviHealth.probeSync(), instance.pid == Int(holder.pid) { return .changed }
+    if kill(holder.pid, force ? SIGKILL : SIGTERM) != 0 { return errno == ESRCH ? .stopped : .changed }
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+      if !holder.isAlive { return .stopped }
+      Thread.sleep(forTimeInterval: 0.2)
+    }
+    return .stillRunning
   }
 
   private static func waitGone(_ pid: Int, timeout: TimeInterval) -> Result {

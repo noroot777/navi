@@ -215,6 +215,59 @@ enum DatabaseFile {
   static func lockFiles(of db: URL) -> [URL] {
     [".navi.lock", LegacyIdentity.singletonLockSuffix].map { URL(fileURLWithPath: db.path + $0) }
   }
+
+  /// 此刻开着这份库的服务进程（看它的单实例锁）。nil = 没人开着。
+  static func liveHolder(of db: URL) -> LockHolder? {
+    lockFiles(of: db).lazy.compactMap(LockHolder.init(lock:)).first
+  }
+
+  /// 数据根里不管哪一代库名，有没有活着的服务握着它的单实例锁。认库之前就要问（库认不准时照样有人可能开着），
+  /// 所以两代库名都看。
+  static func liveHolder(in dir: URL) -> LockHolder? {
+    [name, LegacyIdentity.databaseFile].lazy.compactMap { liveHolder(of: dir.appendingPathComponent($0)) }.first
+  }
+}
+
+/// server 单实例锁（server/src/singleton.ts）的持有者。认活的判据同 server 的 staleLockReason：pid 活着，
+/// 而且进程的启动时刻跟锁里记的对得上（差 10 秒以内）—— 只看 pid 活着会把一个被复用了的 pid 当成那个服务。
+/// 不看心跳：事件循环被同步活儿堵住时心跳也停，那时它恰恰还活着、还握着库。
+struct LockHolder: Equatable {
+  let pid: Int32
+  /// 进程的启动时刻（内核记的）。停它之前拿它再认一次是不是同一个进程。
+  let startedAt: Date
+  /// 锁里记的它听的端口（没记是 nil）。
+  let port: Int?
+
+  init?(lock: URL) {
+    guard let data = try? Data(contentsOf: lock),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let raw = json["pid"] as? Int, raw > 1, let pid = Int32(exactly: raw),
+          let (startedAt, command) = Self.inspect(pid) else { return nil }
+    if let recorded = json["processStartedAtMs"] as? Double {
+      guard abs(startedAt.timeIntervalSince1970 * 1000 - recorded) <= 10_000 else { return nil }
+    } else if command != "node" {
+      // 锁里没记启动时刻（很早的服务）：退一步认命令名，server 一律由 node 跑。
+      return nil
+    }
+    self.pid = pid
+    self.startedAt = startedAt
+    port = json["port"] as? Int
+  }
+
+  /// 还是不是认过的那一个进程（没退、pid 没被复用）。
+  var isAlive: Bool { Self.inspect(pid)?.startedAt == startedAt }
+
+  /// 内核记的进程启动时刻和命令名；进程不在了（或只剩僵尸）是 nil。
+  private static func inspect(_ pid: Int32) -> (startedAt: Date, command: String)? {
+    var info = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0, info.kp_proc.p_pid == pid,
+          info.kp_proc.p_stat != SZOMB else { return nil }
+    let start = info.kp_proc.p_un.__p_starttime
+    let command = withUnsafeBytes(of: info.kp_proc.p_comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+    return (Date(timeIntervalSince1970: Double(start.tv_sec) + Double(start.tv_usec) / 1_000_000), command)
+  }
 }
 
 enum RuntimeStore {

@@ -164,6 +164,14 @@ enum DatabaseBackup {
     validPins().contains { $0.lastServedBy == version }
   }
 
+  /// 这一份不再是恢复点（留它之后库还在被别的服务写，它不是哪一次迁移前的底）：回到普通轮换里，文件留着。
+  static func unpin(_ backup: URL) {
+    let pins = validPins()
+    let kept = pins.filter { $0.file != backup.lastPathComponent }
+    guard kept.count != pins.count else { return }
+    try? JSONEncoder().encode(kept).write(to: pinsURL, options: .atomic)
+  }
+
   /// 有一份服务在这份库上真起来了（迁移跑完了）：恢复点回到普通轮换里。删不掉也不要紧 ——
   /// 比确认时间早的恢复点本来就不算（见 `validPins`）。
   static func releaseRecoveryPoints() {

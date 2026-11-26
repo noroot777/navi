@@ -111,7 +111,11 @@ const SCHEMA: Record<string, Record<string, Check>> = {
   "app.launch": { version, os: shape(/^Version [\d.]{1,16} \(Build [0-9A-Za-z]{1,16}\)$/) },
   "app.quit": {},
   "server.spawn": { serverPid: num, version },
-  "server.ensure": { outcome: oneOf(["ready", "needs_setup", "occupied", "failed"]), ms: num },
+  // 端口上没人应答、库锁还在一个活着的服务手里：不起，等它（ServerLauncher.waitForLockHolder）。
+  "server.held": { holderPid: num },
+  // 起出来的进程被那个服务的库锁挡下、一次没应答就退了。
+  "server.spawn_refused": { serverPid: num, holderPid: num },
+  "server.ensure": { outcome: oneOf(["ready", "needs_setup", "occupied", "unresponsive", "failed"]), ms: num },
   "cover.show": { kind: oneOf(["starting", "maintenance"]) },
   "cover.hide": {},
   "page.presented": {},

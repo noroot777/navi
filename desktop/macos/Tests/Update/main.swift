@@ -130,6 +130,7 @@ case "launch":
   case .ready: emit("LAUNCH ready")
   case .needsSetup: emit("LAUNCH needs-setup")
   case .occupied(let why): emit("LAUNCH occupied \(why)")
+  case .unresponsive(let holder, let why): emit("LAUNCH unresponsive \(holder.pid) \(why.replacingOccurrences(of: "\n", with: " / "))")
   case .failed(let why): emit("LAUNCH failed \(why.replacingOccurrences(of: "\n", with: " / "))")
   }
 
@@ -142,6 +143,15 @@ case "record":
   }
   emit("STALE \(ServerRecord.staleVersion(servingPID: Int(args[2])!) ?? "none")")
   emit("STALE-OTHER-PID \(ServerRecord.staleVersion(servingPID: Int(args[2])! + 1) ?? "none")")
+
+case "staleness":
+  // 只读：端口上那份（pid）认不认得出是别的构建号起的。
+  emit("STALE \(ServerRecord.staleVersion(servingPID: Int(args[2])!) ?? "none")")
+
+case "stop-unresponsive":
+  // 「服务没有应答」那一屏的「停掉它」（term）/「强制结束」（kill）：停此刻握着库锁的那一个。
+  guard let holder = DatabaseFile.liveHolder(in: NaviConfig.dataURL) else { emit("STOP-HOLDER none"); exit(0) }
+  emit("STOP-HOLDER \(ServerShutdown.stopUnresponsive(holder, force: args[2] == "kill", timeout: 2))")
 
 case "backups":
   // 连做 n 份（时间各差一秒），看只留最近几份、名字按时间排。

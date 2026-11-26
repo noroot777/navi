@@ -23,6 +23,9 @@ func outcomeCode(_ outcome: ServerLauncher.Outcome) -> Int32 {
   case .occupied(let explanation):
     print("OCCUPIED: \(explanation)")
     return 2
+  case .unresponsive(let holder, let explanation):
+    print("UNRESPONSIVE \(holder.pid): \(explanation)")
+    return 4
   case .failed(let reason):
     print("FAILED: \(reason)")
     return 1

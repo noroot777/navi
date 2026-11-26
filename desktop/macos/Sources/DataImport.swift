@@ -66,7 +66,7 @@ enum DataImport {
     if try instanceMode(of: db) == "multi" {
       throw Failure("这份数据是多人模式的。app 只以本机自用模式运行，多人数据转不回自用，没法导入。")
     }
-    return Source(url: url, db: db, livePID: DatabaseFile.lockFiles(of: db).lazy.compactMap(livePID).first)
+    return Source(url: url, db: db, livePID: DatabaseFile.liveHolder(of: db)?.pid)
   }
 
   /// 导进 `dest`（app 的数据根）。数据根在这期间被别人用上了就整次作罢，那份数据一个字节不碰。
@@ -246,13 +246,5 @@ enum DataImport {
 
   private static func contains(_ outer: String, _ inner: String) -> Bool {
     inner.hasPrefix(outer.hasSuffix("/") ? outer : outer + "/")
-  }
-
-  /// server 的单实例锁是 JSON，`pid` 那一项还活着就是有人开着这份库。
-  private static func livePID(_ lock: URL) -> Int32? {
-    guard let data = try? Data(contentsOf: lock),
-          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let pid = json["pid"] as? Int, pid > 1, let pid32 = Int32(exactly: pid) else { return nil }
-    return kill(pid32, 0) == 0 || errno == EPERM ? pid32 : nil
   }
 }

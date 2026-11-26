@@ -65,6 +65,8 @@ extension BrowserWindowController {
     case .occupied(let explanation):
       offlineView.show(title: "\(NaviConfig.port) 端口被占着", detail: explanation, actions: [retry])
       startHealthPolling(takeOverWhenFree: true)
+    case .unresponsive(let holder, let explanation):
+      showUnresponsive(holder, detail: explanation, force: false)
     case .failed(let reason):
       let log = ServerLauncher.shared.logURL
       var actions = [retry]
@@ -88,6 +90,26 @@ extension BrowserWindowController {
       offlineView.show(title: "Navi 服务没起来", detail: detail, actions: actions)
       startHealthPolling()
     }
+  }
+
+  /// 服务进程还在、却一直没应答（ServerLauncher.Outcome.unresponsive）：缓过来就自动接上；停不停由用户点。
+  /// `force`：上一次点「停掉它」它没理会，这次的按钮是 SIGKILL。
+  private func showUnresponsive(_ holder: LockHolder, detail: String, force: Bool) {
+    let retry = OfflineView.Action(title: "重试") { [weak self] in self?.loadHome() }
+    let stop = OfflineView.Action(title: force ? "强制结束" : "停掉它") { [weak self] in
+      self?.offlineView.show(title: "正在停止 Navi 服务", detail: "进程 \(holder.pid)", busy: true)
+      DispatchQueue.global(qos: .userInitiated).async {
+        let result = ServerShutdown.stopUnresponsive(holder, force: force)
+        DispatchQueue.main.async {
+          guard let self else { return }
+          guard case .stillRunning = result else { self.loadHome(); return }
+          self.showUnresponsive(holder, detail: "进程 \(holder.pid) 收到停止信号后 10 秒还在，多半是卡死了、处理不了信号。\n\n"
+            + "「强制结束」会立刻杀掉它（kill -9），它来不及收尾。", force: true)
+        }
+      }
+    }
+    offlineView.show(title: "Navi 服务没有应答", detail: detail, actions: [stop, retry])
+    startHealthPolling()
   }
 
   /// 端口上那份是旧版 app 起的（见 ServerRecord）：过 UpdateGate 换成新版。

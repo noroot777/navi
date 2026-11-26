@@ -269,10 +269,19 @@ final class UpdateGate {
   }
 
   private func assess(_ completion: @escaping (ImpactVerdict) -> Void) {
-    let canPreserve: Bool = { if case .staleServer = purpose { return RuntimeStore.destination != nil }; return false }()
+    let stale: Bool = { if case .staleServer = purpose { return true }; return false }()
+    let canPreserve = stale && RuntimeStore.destination != nil
+    let (mine, quitting) = (epoch, !quitReplies.isEmpty)
     DispatchQueue.global(qos: .userInitiated).async { [self] in
+      let probe = NaviHealth.probeSync()
+      // 在等着换掉旧服务的时候，端口上已经换成这一版起的那份了（旧服务自己退了、窗口用新版起了一份）：没有要换的了。
+      // 不收掉的话，下一次轮询会把这份新服务当成旧的再接管、停掉一遍。
+      if stale, quitting == false, case .navi(let instance) = probe, instance.isOurs, ServerRecord.servesThisBuild(pid: instance.pid) {
+        DispatchQueue.main.async { self.retireStale(epoch: mine) }
+        return
+      }
       let preservingRuntime: Bool = {
-        guard canPreserve, case .navi(let instance) = NaviHealth.probeSync(), instance.isOurs,
+        guard canPreserve, case .navi(let instance) = probe, instance.isOurs,
               let codeDir = instance.codeDir else { return false }
         return RuntimeStore.contains(codeDir)
       }()
@@ -291,6 +300,16 @@ final class UpdateGate {
         completion(verdict)
       }
     }
+  }
+
+  /// 排着的「换掉旧服务」已经不用做了（见 assess）：什么都不停，闸回到空闲，排着的回调照常放行。
+  /// 有人在退出（退出时要装下好的更新）就不收：那一下的答复归装更新的那道闸，不能被这里顺手放行。
+  private func retireStale(epoch mine: Int) {
+    guard mine == epoch, case .staleServer = purpose, quitReplies.isEmpty, phase == .checking || phase == .waiting else { return }
+    log("端口上已经是这一版起的服务，不用再切换")
+    stopPolling()
+    epoch += 1
+    finish(stale: true)
   }
 
   private func answerQuit(_ allowed: Bool) {
@@ -645,45 +664,6 @@ final class UpdateGate {
       choices.append(.cancel)
     }
     return Prompt(title: title, detail: lines.joined(separator: "\n"), buttons: buttons, choices: choices)
-  }
-
-  static func runAlert(_ prompt: Prompt) -> Choice {
-    let alert = NSAlert()
-    alert.messageText = prompt.title
-    alert.informativeText = prompt.detail
-    if prompt.choices == [.cancel, .recover] { alert.alertStyle = .critical }
-    if !prompt.affectedTasks.isEmpty {
-      let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 440, height: 180))
-      let text = NSTextView(frame: scroll.bounds)
-      text.isEditable = false
-      text.isVerticallyResizable = true
-      text.autoresizingMask = [.width]
-      text.drawsBackground = false
-      text.font = .systemFont(ofSize: 13)
-      text.string = prompt.affectedTasks.joined(separator: "\n\n")
-      text.textContainer?.widthTracksTextView = true
-      text.textContainer?.containerSize = NSSize(width: 440, height: CGFloat.greatestFiniteMagnitude)
-      text.layoutManager?.ensureLayout(for: text.textContainer!)
-      let height = text.layoutManager?.usedRect(for: text.textContainer!).height ?? 180
-      text.setFrameSize(NSSize(width: 440, height: max(180, height + 16)))
-      scroll.hasVerticalScroller = true
-      scroll.documentView = text
-      alert.accessoryView = scroll
-    }
-    for title in prompt.buttons { alert.addButton(withTitle: title) }
-    alert.buttons.first?.keyEquivalent = "\r"
-    if let cancel = prompt.choices.firstIndex(of: .cancel) { alert.buttons[cancel].keyEquivalent = "\u{1b}" }
-    alert.window.defaultButtonCell = alert.buttons.first?.cell as? NSButtonCell
-    let cancelMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-      guard event.keyCode == 53, event.window === alert.window,
-            let cancel = prompt.choices.firstIndex(of: .cancel) else { return event }
-      alert.buttons[cancel].performClick(nil)
-      return nil
-    }
-    defer { if let cancelMonitor { NSEvent.removeMonitor(cancelMonitor) } }
-    NSApp.activate(ignoringOtherApps: true)
-    let index = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
-    return prompt.choices.indices.contains(index) ? prompt.choices[index] : .cancel
   }
 
   /// 记进系统日志（Console.app 里按子系统 = bundle id、类别 update 过滤）：事后查「为什么没装 / 为什么问了」。
