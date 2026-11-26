@@ -305,6 +305,11 @@ export class TerminalSessionManager {
     const session = this.session(sessionId, projectId);
     return session ? sessionInfo(session) : null;
   }
+  screen(sessionId: string, projectId: string) {
+    const session = this.session(sessionId, projectId);
+    if (session) session.lastAccessedAt = Date.now();
+    return session?.process.screen;
+  }
 
   eventsAfter(sessionId: string, projectId: string, seq: number): TerminalEvent[] | null {
     const session = this.session(sessionId, projectId);
@@ -490,7 +495,7 @@ export class TerminalSessionManager {
     let closed = 0;
     for (const session of this.sessions.values()) {
       // A subscriber means the CLI is still open, even when the shell is silent.
-      if (session.listeners.size > 0 || session.lastAccessedAt >= cutoff) continue;
+      if (session.listeners.size > 0 || session.process.screen?.observed || session.lastAccessedAt >= cutoff) continue;
       // 活着的会话一律不回收:命令会话是「常驻服务」,交互 shell 是**持久终端**(VSCode
       // 语义:关抽屉只是收起,回来还要原样在,结束它的只有 tab 上的关闭按钮和它自己
       // exit)。判「活」含 daemonize 形状(组长退了、子进程还在):回收会话就没人能停

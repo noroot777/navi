@@ -54,8 +54,7 @@ eventApp.get("*", (context) => {
   context.header("access-control-allow-origin", "*");
   const sessionId = context.req.path.split("/").at(-2);
   const lastEventId = context.req.header("last-event-id");
-  const after = Number(lastEventId ?? context.req.query("after") ?? 0);
-  streams.push({ sessionId, after, lastEventId });
+  streams.push({ sessionId, view: context.req.query("view"), lastEventId });
   return terminalEventStream(context, manager, projectId, sessionId);
 });
 const eventRequest = getRequestListener(eventApp.fetch);
@@ -197,11 +196,17 @@ async function runBrowser() {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
     window.__terminalOpens = [];
+    window.__terminalFrames = [];
     const NativeEventSource = window.EventSource;
     window.EventSource = class extends NativeEventSource {
       constructor(url, options) {
         super(url, options);
         this.addEventListener("open", () => window.__terminalOpens.push(String(url)));
+        this.addEventListener("message", (message) => {
+          const { seq, full, drop, base, length, lines } = JSON.parse(message.data);
+          window.__terminalFrames.push({ url: String(url), seq, full, drop, base, length, updates: lines.length });
+          if (window.__terminalFrames.length > 12) window.__terminalFrames.shift();
+        });
       }
     };
   });
@@ -218,6 +223,7 @@ async function runBrowser() {
     console.error("INPUT", JSON.stringify(inputs.slice(-20).map(({ sessionId, data }) => ({ sessionId, data: data.slice(0, 250) }))));
     console.error("OUTPUT", JSON.stringify(manager.listForProject(projectId).map((session) => outputOf(session.id).slice(-2500))));
     console.error("STREAMS", streams.slice(-10));
+    console.error("FRAMES", await page.evaluate(() => window.__terminalFrames));
     console.error("SCREEN", (await viewport.innerText()).slice(-2500));
     console.error("ERRORS", errors);
     await page.screenshot({ path: "/tmp/navi-terminal-failure.png" });
@@ -247,14 +253,17 @@ async function runBrowser() {
     await page.keyboard.type("tail");
     await page.keyboard.press("Escape");
     await waitFor(() => viewport.innerText().then((text) => text.includes("tail")), "vi inserted text");
+    const attachedStreams = () => streams.filter((entry) => entry.sessionId === first && entry.view === "screen").length;
+    const beforeReopen = attachedStreams();
     await page.getByRole("button", { name: "收起终端（shell 与服务继续跑）" }).click();
     assert.equal(await page.locator(".project-terminal").isVisible(), false);
     await page.getByRole("button", { name: "终端", exact: true }).click();
-    await waitFor(() => streams.some((entry) => entry.sessionId === first && entry.after > 0), "drawer preserves alternate screen");
+    await waitFor(() => attachedStreams() > beforeReopen && viewport.innerText().then((text) => text.includes("tail")), "drawer preserves alternate screen");
     await page.getByRole("button", { name: "新建 CLI" }).click();
     await waitFor(() => manager.listForProject(projectId).length === 2, "second shell created");
+    const beforeTabReturn = attachedStreams();
     await page.getByRole("button", { name: /^交互验证（/ }).click();
-    await waitFor(() => streams.some((entry) => entry.sessionId === first && entry.after > 0), "resume without replaying old screen");
+    await waitFor(() => attachedStreams() > beforeTabReturn, "tab returns to the authoritative screen");
     await input.focus();
     await page.keyboard.type("gg0iTOP-");
     await page.keyboard.press("Escape");
@@ -313,13 +322,63 @@ async function runBrowser() {
       await input.focus();
     }
 
-    const otherPage = await browser.newPage({ viewport: { width: 1100, height: 850 } });
+    const displayed = (panel) => panel.evaluate((element) => {
+      const key = Object.keys(element).find((name) => name.startsWith("__reactFiber$"));
+      for (let fiber = element[key]; fiber; fiber = fiber.return) {
+        for (let state = fiber.memoizedState; state?.next; state = state.next) {
+          const terminal = state.memoizedState?.current;
+          if (!terminal?.buffer?.active || !terminal?.textarea) continue;
+          const buffer = terminal.buffer.active;
+          return {
+            cols: terminal.cols, rows: terminal.rows, base: buffer.baseY, view: buffer.viewportY,
+            row: buffer.cursorY + 1, col: buffer.cursorX + 1,
+            lines: Array.from({ length: terminal.rows }, (_, index) => buffer.getLine(buffer.baseY + index).translateToString(true)),
+            background: terminal.options.theme.background,
+          };
+        }
+      }
+      throw new Error("terminal instance not found");
+    });
+    const waitingCommand = [
+      "for i in {1..80}; do print -r ROW-$i; done",
+      "printf '\\137GEOMETRY_READY__\\r\\n'",
+      "for phase in TALL SHARED; do read -sk 1 trigger; printf '\\033[6n'; IFS= read -rst 2 -d R reply; printf '\\r\\n\\137CURSOR_%s_%s__\\n' \"$phase\" \"${reply##*\\[}\"; done",
+    ].join("; ");
+    await page.keyboard.type(waitingCommand);
+    await page.keyboard.press("Enter");
+    await waitFor(() => viewport.innerText().then((text) => text.includes("_GEOMETRY_READY__")), "scrollback present before drag");
+    const small = await displayed(viewport);
+    assert.ok(small.base > 0);
+    const separator = page.getByRole("separator", { name: /调整 CLI 高度/ });
+    await separator.dispatchEvent("pointerdown", { button: 0, clientY: 400 });
+    await separator.dispatchEvent("pointermove", { clientY: 180 });
+    await separator.dispatchEvent("pointerup", { clientY: 180 });
+    await waitFor(async () => (await displayed(viewport)).rows > small.rows, "drag applies server geometry");
+    const tall = await displayed(viewport);
+    assert.ok(tall.row > small.row, "growing the terminal pulls history into the viewport");
+    await page.keyboard.type("x");
+    const tallReport = `_CURSOR_TALL_${tall.row};${tall.col}__`;
+    await waitFor(() => viewport.innerText().then((text) => text.includes(tallReport)), "PTY cursor report matches the taller display");
+    const beforeGeometryReconnect = attachedStreams();
+    await settleTerminalRequests();
+    streamResponses.get(first).destroy();
+    await waitFor(() => attachedStreams() > beforeGeometryReconnect, "tall terminal reconnects");
+    const otherPage = await browser.newPage({ viewport: { width: 750, height: 850 } });
     try {
       await otherPage.goto(`${web.origin}/scripts/fixtures/terminal-interaction.html`);
       await otherPage.getByRole("button", { name: "终端", exact: true }).click();
       await otherPage.getByRole("button", { name: /^交互验证（/ }).click();
       const otherTerminal = otherPage.locator(".project-terminal__viewport:not([hidden])");
-      await waitFor(() => otherTerminal.innerText().then((text) => text.includes("_ANSWER_RECONNECT__")), "second window caught up");
+      await waitFor(() => otherTerminal.innerText().then((text) => text.includes(tallReport)), "second window caught up");
+      await waitFor(async () => (await displayed(otherTerminal)).cols < tall.cols, "narrow window proposes a new grid");
+      await waitFor(async () => {
+        const primary = await displayed(viewport);
+        return primary.cols < tall.cols && JSON.stringify(primary) === JSON.stringify(await displayed(otherTerminal));
+      }, "both windows render the same reflow, cursor and colors");
+      const shared = await displayed(viewport);
+      await page.screenshot({ path: "/tmp/navi-terminal-geometry.png" });
+      manager.write(first, projectId, "x");
+      await waitFor(() => outputOf(first).includes(`_CURSOR_SHARED_${shared.row};${shared.col}__\r\n`), "PTY cursor report matches both displays after reflow and reconnect");
       const beforeDual = inputs.length;
       manager.write(first, projectId, "printf '\\033[6n'; IFS= read -rst 2 -d R reply; firstReply=$?; IFS= read -rst 1 -d R repeated; printf '\\r\\n\\137DUAL_%s_%s__\\n' \"$firstReply\" \"$?\"\r");
       await waitFor(() => outputOf(first).includes("_DUAL_0_1__\r\n"), "two windows see only one terminal reply");
@@ -393,13 +452,17 @@ async function runBrowser() {
       await waitFor(() => outputOf(first).includes(`\r\n_TAIL_${mode}__\r\n`), "output exceeded replay buffer");
       assert.ok(manager.eventsAfter(first, projectId, 0)[0].seq > lastBeforeGap + 1);
       if (!automatic) await page.getByRole("button", { name: "终端", exact: true }).click();
-      await waitFor(() => streams.slice(streamCount).some((entry) => entry.sessionId === first && entry.after > 0 && (!automatic || entry.lastEventId)), "cursor sent on resumed stream");
+      await waitFor(() => streams.slice(streamCount).some((entry) => entry.sessionId === first && entry.view === "screen" && (!automatic || entry.lastEventId)), "screen stream resumed");
       await waitFor(() => viewport.innerText().then((text) => text.includes(`_TAIL_${mode}__`)), "retained tail rendered");
       await waitFor(() => input.isEditable(), "input enabled after truncated replay");
       await input.focus();
       await page.keyboard.type(`printf '\\033[?1047l\\137MAIN_${mode}__\\n'`);
       await page.keyboard.press("Enter");
-      await waitFor(() => viewport.innerText().then((text) => text.includes(`_MAIN_${mode}__`)), "main screen remains usable after gap");
+      await waitFor(async () => {
+        const state = await displayed(viewport);
+        return state.lines.some((line) => line.includes(`_MAIN_${mode}__`));
+      }, "main screen receives new output after gap");
+      await waitFor(() => viewport.innerText().then((text) => text.includes(`_MAIN_${mode}__`)), "viewport follows live output after gap");
       const screen = await viewport.innerText();
       assert.ok(screen.includes(`_TAIL_${mode}__`), `switching to the main buffer must retain the replayed tail (${mode}): ${screen}`);
       assert.doesNotMatch(screen, new RegExp(`_ALT_${mode}__`));

@@ -1,6 +1,8 @@
 import headless from "@xterm/headless";
 import { terminalThemes, type TerminalTheme } from "@navi/shared/terminal-themes";
+import { TERMINAL_SCROLLBACK } from "@navi/shared/terminal-screen";
 import type { TerminalProcess } from "./terminal-pty.js";
+import { createTerminalScreen } from "./terminal-screen.js";
 
 type RGB = [number, number, number];
 type ColorRequest = { type: 0; index: number } | { type: 1; index: number; color: RGB } | { type: 2; index?: number };
@@ -36,13 +38,16 @@ export function withTerminalProtocol(
   rows: number,
   theme: TerminalTheme = "graphite",
 ): TerminalProcess {
-  const terminal = new headless.Terminal({ cols, rows, scrollback: 0, cursorBlink: true, allowProposedApi: true });
+  const terminal = new headless.Terminal({ cols, rows, scrollback: TERMINAL_SCROLLBACK, cursorBlink: true, allowProposedApi: true });
   let exited = false;
+  let screenFailed = false;
   let focused = false;
   let palette = theme;
   const overrides = new Map<number, RGB>();
+  const screen = createTerminalScreen(terminal, () => palette, () =>
+    [...overrides].map(([index, [red, green, blue]]) => [index, (red << 16) | (green << 8) | blue]));
   const reply = (data: string) => {
-    if (!exited) {
+    if (!exited && !screenFailed) {
       try { process.write(data); } catch { /* PTY closed */ }
     }
   };
@@ -67,20 +72,38 @@ export function withTerminalProtocol(
     }
   });
   terminal.onData(reply);
-  process.onData((data) => { if (!exited) terminal.write(data); });
-  process.onExit(() => {
+  const parse = (data: string, then: () => void) => {
+    if (screenFailed) return false;
+    try {
+      terminal.write(data, then);
+      return true;
+    } catch {
+      screenFailed = true;
+      screen.fail();
+      return false;
+    }
+  };
+  process.onData((data) => {
+    if (!exited) parse(data, () => screen.schedule());
+  });
+  process.onExit(({ exitCode }) => {
     exited = true;
-    terminal.dispose();
+    const finish = () => {
+      screen.finish(exitCode);
+      terminal.dispose();
+    };
+    if (!parse("", finish)) finish();
   });
 
   return {
     pid: process.pid,
     ptsName: process.ptsName,
+    screen,
     onData: (listener) => process.onData(listener),
     onExit: (listener) => process.onExit(listener),
     kill: (signal) => process.kill(signal),
     write(data, nextFocus) {
-      if (nextFocus !== undefined) terminal.write("", () => {
+      if (nextFocus !== undefined) parse("", () => {
         if (exited || focused === nextFocus) return;
         focused = nextFocus;
         if (terminal.modes.sendFocusMode) reportFocus();
@@ -88,13 +111,15 @@ export function withTerminalProtocol(
       if (data) process.write(data);
     },
     resize(nextCols, nextRows, nextTheme) {
-      terminal.write("", () => {
+      parse("", () => {
         if (exited) return;
         if (palette !== nextTheme && nextTheme !== undefined) {
           palette = nextTheme;
           overrides.clear();
         }
+        const resized = terminal.cols !== nextCols || terminal.rows !== nextRows;
         terminal.resize(nextCols, nextRows);
+        screen.schedule(resized);
       });
       process.resize(nextCols, nextRows);
     },

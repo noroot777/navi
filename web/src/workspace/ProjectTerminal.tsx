@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProjectView } from "@navi/shared";
+import { TERMINAL_SCROLLBACK, type TerminalScreenFrame } from "@navi/shared/terminal-screen";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { api, type TerminalEvent } from "../lib/api.ts";
+import { api } from "../lib/api.ts";
 import { TerminalTabStrip } from "./TerminalTabStrip.tsx";
 import type { ProjectTerminalTab } from "./terminalTabs.ts";
 import type { TerminalDock } from "./useTerminalDock.ts";
@@ -11,6 +12,7 @@ import { TerminalAppearanceMenu } from "./TerminalAppearanceMenu.tsx";
 import { readTerminalAppearance, terminalThemes, TERMINAL_APPEARANCE_KEY, type TerminalAppearance } from "./terminalAppearance.ts";
 import { terminalInputChunks } from "./terminalInput.ts";
 import { onTerminalUserInput } from "./terminalUserInput.ts";
+import { terminalScreenView } from "./terminalScreenView.ts";
 
 const TERMINAL_HEIGHT_KEY = "navi:terminal-height";
 const DEFAULT_HEIGHT = 280;
@@ -38,6 +40,20 @@ function initialHeight(): number {
   return Number.isFinite(stored) && stored > 0 ? preferredHeight(stored) : DEFAULT_HEIGHT;
 }
 
+function sessionStatus(tab: ProjectTerminalTab, exitCode: number | undefined, wasDetached: boolean) {
+  const code = tab.exitCode ?? exitCode ?? 0;
+  if (tab.status === "detached") return tab.kind === "command"
+    ? `启动脚本已退出（${code}），服务仍在运行 —— 停止/重启在状态栏`
+    : `shell 已退出（${code}），它启动的后台进程仍在运行`;
+  if (tab.status !== "ended") return null;
+  if (tab.kind === "command") {
+    if (tab.stop?.kind === "unresolved") return "已停止，但没能确认停净 —— 详情看状态栏的常用命令";
+    if (tab.stoppedByUser) return "服务已停止";
+    if (wasDetached) return "服务已退出";
+  }
+  return `进程已退出（${code}）`;
+}
+
 function TerminalPane({
   active,
   project,
@@ -55,75 +71,25 @@ function TerminalPane({
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
-  const queueResizeRef = useRef<((cols: number, rows: number) => void) | null>(null);
+  const measureRef = useRef<(() => void) | null>(null);
+  const renderRef = useRef<ReturnType<typeof terminalScreenView> | null>(null);
+  const frameReady = useRef(false);
+  const lastSeqRef = useRef(0);
+  const discardedRef = useRef(0);
+  const [exitCode, setExitCode] = useState<number>();
+  const [screenError, setScreenError] = useState(false);
   const themeRef = useRef(appearance.theme);
   themeRef.current = appearance.theme;
-  const lastSeqRef = useRef(0);
   // 已经有会话的 tab(attach 来的,或自己建完回填了 sessionId)一挂上就能收发;只有全新的
   // shell tab 要等 create 完才有 id。流 effect 等这个。
   const sessionIdRef = useRef<string | null>(tab.attachSessionId ?? tab.sessionId ?? null);
   const [establishedId, setEstablishedId] = useState<string | null>(tab.attachSessionId ?? tab.sessionId ?? null);
   const tabRef = useRef(tab);
   tabRef.current = tab;
-  // 同一份 xterm 屏幕内,每种说明只写一次;重建屏幕后才重新补写。
-  const announcedRef = useRef({ detached: false, ended: false });
-  const prevStatusRef = useRef(tab.status);
-
-  // attach tab 的正文说明:按当前会话事实追加一行灰字,措辞按 tab 身份分两套(命令日志
-  // 说「服务」,恢复的交互 shell 说「进程」)。触发点有二 —— 状态转变(集中轮询推进
-  // detached/ended)和 SSE replay 到 exit(重连后补写,否则 reset 把上一条连接写的说明
-  // 冲掉了)。
-  const announce = useCallback(() => {
-    const terminal = terminalRef.current;
-    const current = tabRef.current;
-    if (!terminal || !current.attachSessionId) return;
-    const flags = announcedRef.current;
-    const isCommand = current.kind === "command";
-    if (current.status === "detached" && !flags.detached) {
-      flags.detached = true;
-      terminal.write(isCommand
-        ? `\r\n\x1b[90m启动脚本已退出（${current.exitCode ?? 0}），服务仍在运行 —— 停止/重启在状态栏\x1b[0m\r\n`
-        : `\r\n\x1b[90mshell 已退出（${current.exitCode ?? 0}），它启动的后台进程仍在运行\x1b[0m\r\n`);
-    } else if (current.status === "ended" && !flags.ended) {
-      flags.ended = true;
-      terminal.write(!isCommand
-        ? `\r\n\x1b[90m进程已退出（${current.exitCode ?? 0}）\x1b[0m\r\n`
-        : current.stop?.kind === "unresolved"
-          // 停过,但这次停止**证明不到**停净(端口超额:没记下的端口谁都没问过)。
-          // 写「服务已停止」就是拿一句谎话收尾 —— 照实说,并指一下还能去哪儿看。
-          ? "\r\n\x1b[90m已停止，但没能确认停净 —— 详情看状态栏的常用命令\x1b[0m\r\n"
-          : current.stoppedByUser
-            ? "\r\n\x1b[90m服务已停止\x1b[0m\r\n"
-            : flags.detached
-              ? "\r\n\x1b[90m服务已退出\x1b[0m\r\n"
-              : `\r\n\x1b[90m进程已退出（${current.exitCode ?? 0}）\x1b[0m\r\n`);
-    }
-  }, []);
-
+  const wasDetached = useRef(false);
   useEffect(() => {
-    if (prevStatusRef.current === tab.status) return;
-    prevStatusRef.current = tab.status;
-    announce();
-  }, [tab.status, announce]);
-
-  useEffect(() => {
-    if (!active) return;
-    requestAnimationFrame(() => {
-      try { fitRef.current?.fit(); terminalRef.current?.focus(); } catch { /* pane was removed */ }
-    });
-  }, [active]);
-
-  useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal) return;
-    terminal.options.theme = terminalThemes[appearance.theme].colors;
-    terminal.options.fontSize = appearance.fontSize;
-    if (active) {
-      fitRef.current?.fit();
-      queueResizeRef.current?.(terminal.cols, terminal.rows);
-    }
-  }, [appearance, active]);
+    if (tab.status === "detached") wasDetached.current = true;
+  }, [tab.status]);
 
   // 基座:xterm 实例、输入/резize 通道、shell 会话的创建与关闭。日志流不在这里 ——
   // 它跟随 active(见下一个 effect),隐藏 tab 不占长连接。
@@ -135,29 +101,30 @@ function TerminalPane({
     let inputTimer: number | null = null;
     let inputChain = Promise.resolve();
     let resizeTimer: number | null = null;
-    let pendingSize: { cols: number; rows: number } | null = null;
+    let pendingSize: { cols: number; rows: number; theme: TerminalAppearance["theme"] } | null = null;
+    let lastRequested = "";
     const terminal = new Terminal({
       cursorBlink: true,
       cursorStyle: "block",
       fontFamily: 'ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace',
       fontSize: appearance.fontSize,
       lineHeight: 1.25,
-      scrollback: 5000,
+      scrollback: TERMINAL_SCROLLBACK,
       theme: terminalThemes[appearance.theme].colors,
     });
     const fit = new FitAddon();
     terminalRef.current = terminal;
-    fitRef.current = fit;
     terminal.loadAddon(fit);
     terminal.open(host);
     lastSeqRef.current = 0;
-    announcedRef.current = { detached: false, ended: false };
+    discardedRef.current = 0;
+    frameReady.current = false;
+    renderRef.current = terminalScreenView(terminal);
 
     const showConnectionError = (reason: unknown) => {
       if (!alive) return;
       onMeta(tab.id, { status: "error" });
       const message = reason instanceof Error ? reason.message : String(reason);
-      terminal.write(`\r\n\x1b[31mCLI 连接失败：${message}\x1b[0m\r\n`);
       notify(`CLI 连接失败：${message}`);
     };
     const flushInput = () => {
@@ -174,6 +141,8 @@ function TerminalPane({
         .catch(showConnectionError);
     };
     const queueInput = (data: string) => {
+      if (!frameReady.current) return;
+      if (resizeTimer !== null) flushResize();
       inputBuffer += data;
       if (inputTimer === null) inputTimer = window.setTimeout(flushInput, 12);
     };
@@ -183,42 +152,46 @@ function TerminalPane({
       flushInput();
       inputChain = inputChain.then(() => api.writeTerminalSession(project.id, sessionId, "", focused)).catch(showConnectionError);
     };
-    const focus = () => reportFocus(true);
+    const focus = () => { measure(); reportFocus(true); };
     const blur = () => reportFocus(false);
     const flushResize = () => {
+      if (resizeTimer !== null) window.clearTimeout(resizeTimer);
       resizeTimer = null;
       const sessionId = sessionIdRef.current;
       if (!sessionId || !pendingSize) return;
       const size = pendingSize;
       pendingSize = null;
-      void api.resizeTerminalSession(project.id, sessionId, { ...size, theme: themeRef.current }).catch(showConnectionError);
+      const key = JSON.stringify(size);
+      if (key === lastRequested) return;
+      lastRequested = key;
+      flushInput();
+      inputChain = inputChain.then(() => api.resizeTerminalSession(project.id, sessionId, size)).catch((error) => {
+        if (lastRequested === key) lastRequested = "";
+        showConnectionError(error);
+      });
     };
-    const queueResize = (cols: number, rows: number) => {
-      pendingSize = { cols, rows };
+    const measure = () => {
+      if (!alive || host.offsetParent === null) return;
+      const size = fit.proposeDimensions();
+      if (!size || !Number.isFinite(size.cols) || !Number.isFinite(size.rows)) return;
+      pendingSize = { ...size, theme: themeRef.current };
       if (resizeTimer === null) resizeTimer = window.setTimeout(flushResize, 80);
     };
-    queueResizeRef.current = queueResize;
+    measureRef.current = measure;
 
     const input = onTerminalUserInput(terminal, queueInput);
     const textarea = terminal.textarea!;
     textarea.addEventListener("focus", focus);
     textarea.addEventListener("blur", blur);
-    const resize = terminal.onResize(({ cols, rows }) => queueResize(cols, rows));
-    const observer = new ResizeObserver(() => {
-      if (host.offsetParent === null) return;
-      try { fit.fit(); } catch { /* hidden during teardown */ }
-    });
+    const observer = new ResizeObserver(measure);
     observer.observe(host);
-    requestAnimationFrame(() => {
-      if (host.offsetParent === null) return;
-      try { fit.fit(); queueResize(terminal.cols, terminal.rows); terminal.focus(); } catch { /* component was removed */ }
-    });
 
     // 只有「还没有任何会话」的 tab 才新建。光看 attachSessionId 不够 —— 前端自己建的 shell
     // 把会话 id 回填在 sessionId 上,这种 tab 要是又走一遍创建(挂到别的项目、或基座 effect
     // 因依赖变化重跑),就会平白多起一个 shell(第 1 轮逻辑审查:切项目时 create 了两次)。
     if (!tab.attachSessionId && !tab.sessionId) {
-      void api.createTerminalSession(project.id, { cols: terminal.cols, rows: terminal.rows, theme: themeRef.current })
+      const initialSize = host.offsetParent === null ? undefined : fit.proposeDimensions();
+      void api.createTerminalSession(project.id, { ...(initialSize ?? { cols: terminal.cols, rows: terminal.rows }), theme: themeRef.current })
         .then((session) => {
           if (!alive) {
             // 会话建成前 tab 就没了(关抽屉/StrictMode 重挂):还没人看过一眼,直接收掉,
@@ -232,7 +205,7 @@ function TerminalPane({
           setEstablishedId(session.id);
           flushInput();
           if (document.activeElement === textarea) focus();
-          queueResize(terminal.cols, terminal.rows);
+          measure();
         })
         .catch(showConnectionError);
     }
@@ -244,11 +217,10 @@ function TerminalPane({
       textarea.removeEventListener("focus", focus);
       textarea.removeEventListener("blur", blur);
       input.dispose();
-      resize.dispose();
       terminal.dispose();
       terminalRef.current = null;
-      fitRef.current = null;
-      queueResizeRef.current = null;
+      renderRef.current = null;
+      measureRef.current = null;
       if (inputTimer !== null) window.clearTimeout(inputTimer);
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
       // 会话是持久的(VSCode 语义):unmount 发生在收起 tab/切项目,这些都不杀
@@ -256,63 +228,79 @@ function TerminalPane({
     };
   }, [notify, onMeta, project.id, tab.id, tab.attachSessionId]);
 
-  // 日志流:只有激活 tab 保持 SSE。每个隐藏 tab 一条常驻长连接会把 Chrome 的同源
-  // 连接池(HTTP/1.1 同主机 6 条)占满,停止/重启和一切状态轮询全部 pending,控制面
-  // 冻结(第 1 轮审查实锤:6 条活命令即可复现)。切走即断,切回沿当前屏幕的 seq 续接。
   useEffect(() => {
-    if (!active || !establishedId) return;
+    if (!active) return;
+    const request = requestAnimationFrame(() => terminalRef.current?.focus());
+    return () => cancelAnimationFrame(request);
+  }, [active]);
+
+  useEffect(() => {
     const terminal = terminalRef.current;
     if (!terminal) return;
+    terminal.options.fontSize = appearance.fontSize;
+    if (active) measureRef.current?.();
+  }, [appearance, active]);
+
+  useEffect(() => {
+    if (!active || !establishedId) return;
+    const render = renderRef.current;
+    if (!render) return;
     let alive = true;
     let ended = tabRef.current.status === "ended";
-    const source = new EventSource(api.terminalEventsUrl(project.id, establishedId, lastSeqRef.current));
-    // attach tab 的状态点表达会话/服务事实,由集中轮询驱动,连接事件不碰它。
-    source.onopen = () => { if (alive && !ended && !tab.attachSessionId) onMeta(tab.id, { status: "ready" }); };
-    source.onmessage = (message) => {
-      if (!alive) return;
-      const event = JSON.parse(message.data) as TerminalEvent;
-      if (event.seq <= lastSeqRef.current) return;
-      if (event.seq > lastSeqRef.current + 1) {
-        terminal.write("\x18", () => terminal.reset());
-        announcedRef.current = { detached: false, ended: false };
-        notify("部分终端输出已超出保留范围");
-      }
-      lastSeqRef.current = event.seq;
-      if (event.type === "data") {
-        terminal.write(event.data);
-      } else {
-        ended = true;
-        if (tab.attachSessionId) {
-          // 组长退了 ≠ 命令死了(daemonize),结论归集中轮询;这里只按已知事实补写说明
-          // (重放场景:上一条连接写过的说明被 reset 冲掉了,exit 是重放的收尾信号)。
-          announce();
-        } else {
-          onMeta(tab.id, { status: "ended" });
-          terminal.write(`\r\n\x1b[90m进程已退出（${event.exitCode}）\x1b[0m\r\n`);
+    let source: EventSource;
+    const connect = () => {
+      let initial = true;
+      source = new EventSource(api.terminalScreenUrl(project.id, establishedId));
+      source.onopen = () => { initial = true; };
+      source.onmessage = (message) => {
+        if (!alive) return;
+        const frame = JSON.parse(message.data) as TerminalScreenFrame;
+        if (!frame.full && (initial || frame.seq !== lastSeqRef.current + 1)) {
+          source.close();
+          connect();
+          return;
         }
-      }
+        render(frame);
+        if (initial && lastSeqRef.current && frame.discarded > discardedRef.current) {
+          notify("部分终端输出已超出保留范围");
+        }
+        if (initial && !ended && !tab.attachSessionId && frame.exitCode === undefined) onMeta(tab.id, { status: "ready" });
+        initial = false;
+        frameReady.current = true;
+        lastSeqRef.current = frame.seq;
+        discardedRef.current = frame.discarded;
+        setScreenError(frame.error === true);
+        if (frame.exitCode !== undefined && !ended) {
+          ended = true;
+          setExitCode(frame.exitCode);
+          if (!tab.attachSessionId) onMeta(tab.id, { status: "ended" });
+        }
+      };
+      source.onerror = () => {
+        if (!alive || ended || tab.attachSessionId) return;
+        onMeta(tab.id, { status: "reconnecting" });
+      };
     };
-    source.onerror = () => {
-      if (!alive || ended || tab.attachSessionId) return;
-      onMeta(tab.id, { status: "reconnecting" });
-    };
+    connect();
     return () => {
       alive = false;
       source.close();
     };
-  }, [active, establishedId, project.id, tab.id, tab.attachSessionId, onMeta, announce, notify]);
+  }, [active, establishedId, project.id, tab.id, tab.attachSessionId, onMeta, notify]);
 
+  const status = screenError ? "终端画面可能不完整" : sessionStatus(tab, exitCode, wasDetached.current);
   return (
-    <div
-      ref={hostRef}
-      id={`terminal-panel-${tab.id}`}
-      className="project-terminal__viewport"
-      // 不用 tabpanel:tab 条搬到状态栏后,它在抽屉收起时照样在,tab/tabpanel 那套配对
-      // 就凑不齐了(收着的时候根本没有 panel)。一块有名字的区域,说清楚是谁的现场即可。
-      role="group"
-      aria-label={`${tab.label} 终端内容`}
-      hidden={!active}
-    />
+    <>
+      <div
+        ref={hostRef}
+        id={`terminal-panel-${tab.id}`}
+        className="project-terminal__viewport"
+        role="group"
+        aria-label={`${tab.label} 终端内容`}
+        hidden={!active}
+      />
+      {active && status && <div className="project-terminal__status">{status}</div>}
+    </>
   );
 }
 
