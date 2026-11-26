@@ -112,11 +112,12 @@ final class ServerLauncher {
     }
     catch { return .failed("无法启用新版运行时，未启动服务：\(error.localizedDescription)") }
     let version = pause?.version ?? NaviConfig.bundleVersion
-    if let failure = Self.backUpBeforeMigration(version: version) { return .failed(failure) }
+    // 缺件就根本起不了：先查，不备份、不记尝试。
     let parts = ["node/bin/node", "server/dist/index.js", "scripts/start-detached.mjs"].map { runtime.appendingPathComponent($0) }
     if let missing = parts.first(where: { !FileManager.default.fileExists(atPath: $0.path) }) {
       return .failed("app 里自带的 Navi 不完整（缺 \(missing.path)）。重新装一次 Navi.app。")
     }
+    if let failure = Self.backUpBeforeMigration(version: version, runtime: runtime) { return .failed(failure) }
     do {
       try FileManager.default.createDirectory(at: NaviConfig.logURL, withIntermediateDirectories: true)
     } catch {
@@ -128,7 +129,7 @@ final class ServerLauncher {
       // 进程一起来就记下 pid（记在这一次尝试里，不碰在服务的那一份）：这个启动器等不到它应答（被退掉、超时、
       // 端口被人抢了）也不要紧，之后谁看到它应答都能认出是它、替它确认（见 settle）；它一直没应答，就只是一次
       // 没成的尝试，端口上原来那份照样认得出是哪一版起的。
-      if !ServerRecord.write(pid: Int(pid), version: version) {
+      if !ServerRecord.write(pid: Int(pid), version: version, runtime: runtime) {
         RuntimeLog.record("server.confirm_deferred", ["serverPid": Int(pid), "step": "attempt"])
       }
       RuntimeLog.record("server.spawn", ["serverPid": Int(pid), "version": version])
@@ -147,7 +148,7 @@ final class ServerLauncher {
             case .failure(let reason): return .failed("已恢复迁移前数据库，但旧服务启动失败：\(reason)")
             case .success(let previousPID):
               let previousVersion = ServerRecord.read()?.bundleVersion ?? "unknown"
-              if !ServerRecord.write(pid: Int(previousPID), version: previousVersion) {
+              if !ServerRecord.write(pid: Int(previousPID), version: previousVersion, runtime: previous) {
                 RuntimeLog.record("server.confirm_deferred", ["serverPid": Int(previousPID), "step": "attempt"])
               }
               let restored = waitReady(pid: previousPID, timeout: timeout)
@@ -173,7 +174,7 @@ final class ServerLauncher {
   /// 其余的 —— 退出时没过闸就被 Sparkle 装上了、`build.sh --install`、手动换了 app、导入来的库 ——
   /// 在这里补一份。备份不成、或者记不下「这一版要起了」就不起：库原样留着，配上旧版 app 还能回去。
   /// 返回 nil = 可以起。
-  private static func backUpBeforeMigration(version: String) -> String? {
+  private static func backUpBeforeMigration(version: String, runtime: URL) -> String? {
     let hasDatabase: Bool
     do {
       hasDatabase = try DatabaseFile.existing(in: NaviConfig.dataURL) != nil
@@ -191,7 +192,7 @@ final class ServerLauncher {
         + "腾出空间 / 修好权限后点「重试」；要回到旧版，把旧版 app 装回来就行（README「回到旧版」）。"
     }
     do {
-      try ServerRecord.writeAttempt(version: version)
+      try ServerRecord.writeAttempt(version: version, runtime: runtime)
     } catch {
       return "记不下这一次要起的是哪一版（\(NaviConfig.dataURL.path)：\(error.localizedDescription)），所以没起服务、库没动过。修好权限 / 腾出空间后点「重试」。"
     }
@@ -238,12 +239,11 @@ final class ServerLauncher {
   /// 自己那份应答了。不管服务是谁起的、谁先看到它起来，确认都在这一处（窗口、登录项、另一个窗口的重试、起它的
   /// 那个启动器都经过这里）。这一眼可能是过时的（探到和走到这里之间，旧服务可能已经退了、新的一次已经起了），
   /// 所以带上发出去的时刻，由服务记录那一层判断它还算不算数（ServerRecord.confirmServing）。
-  private static func adopt(_ instance: NaviInstance, askedAt: Date) {
-    if ServerRecord.confirmServing(pid: instance.pid, codeDir: instance.isOurs ? instance.codeDir : nil, observedAt: askedAt) {
-      RuntimeRecovery.confirmed(instance)
+  private static func adopt(_ instance: NaviInstance, askedAt: Date, launchedHere: Bool = false) {
+    guard instance.isOurs else { return }
+    if ServerRecord.confirmServing(pid: instance.pid, codeDir: instance.codeDir, observedAt: askedAt, launchedHere: launchedHere) {
       RuntimeStore.reclaimAfterConfirmation(instance)
     }
-    ServedInstance.observe(instance, askedAt: askedAt)
   }
 
   private enum Spawned { case success(Int32), failure(String) }
@@ -307,7 +307,7 @@ final class ServerLauncher {
       let asked = Date()
       let probe = NaviHealth.probeSync()
       if case .navi(let instance) = probe, instance.isOurs, instance.pid == Int(pid) {
-        Self.adopt(instance, askedAt: asked)
+        Self.adopt(instance, askedAt: asked, launchedHere: true)
         return .ready
       }
       if case .navi(let instance) = probe, !instance.isOurs { return .occupied(Occupant.otherNavi(instance)) }

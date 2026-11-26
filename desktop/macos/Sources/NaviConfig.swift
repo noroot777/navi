@@ -217,10 +217,19 @@ enum DatabaseFile {
     return "\(info.st_dev)-\(info.st_ino)-\(info.st_birthtimespec.tv_sec).\(info.st_birthtimespec.tv_nsec)"
   }
 
-  /// 记下的库身份（`identity`）说的是不是眼前这份。没记（改这套记账之前写下的）按原样认。
+  /// 记下的库身份（`identity`）说的确定就是眼前这份。没记（改这套记账之前留下的）、记的或眼前的是 "unclear"，都算
+  /// 不知道 —— 不能拿它证明眼前这份库备过、或者哪份备份是它的、或者确认作废了它。
   static func isSame(_ recorded: String?, as current: String) -> Bool {
-    recorded == nil || recorded == current
+    isKnown(recorded) && recorded == current
   }
+
+  /// 记下的库身份确定不是眼前这份（哪一边不知道都不算）。确认在用的：端口上那份服务正开着数据根里这份库，它的应答
+  /// 就是「眼前这份」的证据，没记的账由它补上；记着的明明是另一份，才不认。
+  static func contradicts(_ recorded: String?, _ current: String) -> Bool {
+    isKnown(recorded) && isKnown(current) && recorded != current
+  }
+
+  private static func isKnown(_ identity: String?) -> Bool { identity != nil && identity != "unclear" }
 
   /// 这个数据目录用过没有：两代库名、改名账本，有一样就算 —— 认不准的情形交给服务起来时说清楚，不当成第一次用。
   static func isInitialized(_ dir: URL) -> Bool {
@@ -272,9 +281,6 @@ struct LockHolder: Equatable {
 
   /// 还是不是认过的那一个进程（没退、pid 没被复用）。
   var isAlive: Bool { Self.inspect(pid)?.startedAt == startedAt }
-
-  /// 内核记的这个进程的启动时刻；不在了是 nil。
-  static func startTime(of pid: Int32) -> Date? { inspect(pid)?.startedAt }
 
   /// 内核记的进程启动时刻和命令名；进程不在了（或只剩僵尸）是 nil。
   private static func inspect(_ pid: Int32) -> (startedAt: Date, command: String)? {

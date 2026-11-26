@@ -135,7 +135,7 @@ case "launch":
   }
 
 case "record":
-  ServerRecord.write(pid: Int(args[2])!)
+  ServerRecord.write(pid: Int(args[2])!, runtime: NaviConfig.targetRuntimeURL)
   // 测试按需把构建号改成别的，模拟「旧版 app 起的」。
   if args.count > 3 {
     let data = try! JSONEncoder().encode(ServerRecord(pid: Int(args[2])!, bundleVersion: args[3], confirmedAt: ServerRecord.read()?.confirmedAt))
@@ -191,10 +191,11 @@ case "backups-same-second":
 case "pins":
   emit("PINS \(DatabaseBackup.recoveryPoints().map(\.lastPathComponent).joined(separator: ","))")
   emit("PINS-HERE \(DatabaseBackup.recoveryPointsOfCurrentDatabase().map(\.lastPathComponent).joined(separator: ","))")
+  emit("HINT \(DatabaseBackup.newestBackupOfCurrentDatabase()?.lastPathComponent ?? "none")")
 
 case "attempt-marker":
   // 记下「要起了」，进程号还没补上（补进程号那一下没记上就是这样）。
-  try! ServerRecord.writeAttempt()
+  try! ServerRecord.writeAttempt(runtime: NaviConfig.targetRuntimeURL)
   emit("MARKED")
 
 case "confirm":

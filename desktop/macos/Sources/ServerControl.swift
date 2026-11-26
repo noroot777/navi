@@ -41,6 +41,8 @@ struct ServerRecord: Codable {
     let startedAt: Date
     /// 那时数据根里是哪一份库（见类型顶部）。
     var database: String? = nil
+    /// 起的是哪一份运行时（codeDir）：应答的那个跑的不是它，就不是这次起出来的。
+    var runtime: String? = nil
   }
 
   static let fileName = ".mac-server.json"
@@ -69,46 +71,52 @@ struct ServerRecord: Codable {
     return sameDatabase(database) ? bundleVersion : "unknown"
   }
 
-  /// 要起服务了：先记下是这一版、什么时候起的、对着哪一份库（还没有库也记）。写不进去抛错，调用方就别起。
-  static func writeAttempt(version: String = NaviConfig.bundleVersion) throws {
+  /// 要起服务了：先记下是这一版、用哪一份运行时、什么时候起的、对着哪一份库（还没有库也记）。写不进去抛错，
+  /// 调用方就别起。
+  static func writeAttempt(version: String = NaviConfig.bundleVersion, runtime: URL) throws {
     try locked {
       try save(with(attempt: Attempt(pid: 0, bundleVersion: version, startedAt: Date(),
-                                     database: DatabaseFile.identity(in: NaviConfig.dataURL))))
+                                     database: DatabaseFile.identity(in: NaviConfig.dataURL), runtime: runtime.path)))
     }
   }
 
   /// 起出来的进程号，补进这一次尝试（没有先记下尝试的 —— 回退时拉起旧版那一下 —— 从现在算起）。记不下返回 false：
-  /// 尝试里还是 0，之后谁看到它应答都凭它的启动时刻认它（confirmServing）。
+  /// 尝试里还是 0，只有起它、手里攥着这个进程号的那个启动器认得出它（confirmServing 的 `launchedHere`）；别人
+  /// 看到它应答也说不准它是不是这次起的，就当不知道。
   @discardableResult
-  static func write(pid: Int, version: String = NaviConfig.bundleVersion) -> Bool {
+  static func write(pid: Int, version: String = NaviConfig.bundleVersion, runtime: URL) -> Bool {
     do {
       try locked {
         let pending = read()?.attempt.flatMap { $0.pid == 0 && $0.bundleVersion == version ? $0 : nil }
         try save(with(attempt: Attempt(pid: pid, bundleVersion: version, startedAt: pending?.startedAt ?? Date(),
-                                       database: pending?.database ?? DatabaseFile.identity(in: NaviConfig.dataURL))))
+                                       database: pending?.database ?? DatabaseFile.identity(in: NaviConfig.dataURL),
+                                       runtime: runtime.path)))
       }
       return true
     } catch { return false }
   }
 
   /// 端口上自己那份（`pid`，跑的是 `codeDir`）应答了，探活是 `observedAt` 发出去的。按类型顶部那两条记账；
-  /// 记上了，比确认时刻早、同一份库的恢复点作废。别的进程、过时的一眼、对着另一份库的账都不算。
-  /// 尝试里的进程号还是 0（补进程号那一下没记上）时，在这次尝试开始之后才起的进程就是它：起服务都在启动锁里，
-  /// 同一时间只有这一次在起，再起一次就会盖掉这次尝试。
-  /// 返回这一眼算不算数（记上了，或者根本没有记录可对）：确认之外跟着它走的那几件事（恢复事务、回收）照它办。
+  /// 记上了，比确认时刻早、同一份库的恢复点作废，这次切换的恢复事务（RuntimeRecovery.confirmed）也在同一把锁里了结。
+  /// 别的进程、过时的一眼、记着另一份库的账、跑的不是那次尝试那份运行时的都不算。尝试里的进程号还是 0 时，只有
+  /// `launchedHere`（调用方就是起这个进程、拿着它进程号的启动器）认它。返回这一眼记上了没有（没有记录可对也算）。
   @discardableResult
-  static func confirmServing(pid: Int?, codeDir: String? = nil, observedAt: Date) -> Bool {
+  static func confirmServing(pid: Int?, codeDir: String? = nil, observedAt: Date, launchedHere: Bool = false) -> Bool {
     guard let pid, pid > 1 else { return false }
     return (try? locked { () -> Bool in
-      guard let record = read() else { return true }
+      guard let record = read() else {
+        RuntimeRecovery.confirmed(codeDir: codeDir)
+        return true
+      }
       let database = DatabaseFile.identity(in: NaviConfig.dataURL)
       let confirmed: ServerRecord
-      if let attempt = record.attempt, attempt.database == "none" || DatabaseFile.isSame(attempt.database, as: database),
-         attempt.pid == pid || (attempt.pid == 0 && (LockHolder.startTime(of: Int32(pid)) ?? .distantPast) > attempt.startedAt) {
-        // 那时没有库（"none"）：库就是它建的。
+      // 那时没有库（"none"）：库就是它建的。
+      if let attempt = record.attempt, attempt.database == "none" || !DatabaseFile.contradicts(attempt.database, database),
+         attempt.pid == pid || (attempt.pid == 0 && launchedHere),
+         attempt.runtime == nil || codeDir.map({ NaviHealth.samePath($0, attempt.runtime!) }) ?? true {
         confirmed = ServerRecord(pid: pid, bundleVersion: attempt.bundleVersion,
                                  confirmedAt: max(record.confirmedAt ?? .distantPast, attempt.startedAt), database: database)
-      } else if record.pid == pid, DatabaseFile.isSame(record.database, as: database),
+      } else if record.pid == pid, !DatabaseFile.contradicts(record.database, database),
                 observedAt > (record.attempt?.startedAt ?? .distantPast) {
         confirmed = ServerRecord(pid: pid, bundleVersion: record.bundleVersion,
                                  confirmedAt: max(record.confirmedAt ?? .distantPast, observedAt), attempt: record.attempt,
@@ -123,6 +131,7 @@ struct ServerRecord: Codable {
         return false
       }
       DatabaseBackup.dropReleasedPoints()
+      RuntimeRecovery.confirmed(codeDir: codeDir)
       return true
     }) ?? false
   }

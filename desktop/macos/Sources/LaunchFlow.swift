@@ -76,11 +76,10 @@ extension BrowserWindowController {
       // 刚装完新版就起不来，多半是新版的迁移出了问题：指一下更新前的库备份在哪（怎么回到旧版见 README）。
       // 有固定着的恢复点就指最近那个 —— 它是这一版迁移之前的库（之后没有服务起来过），再往后的
       // 状态都可能是失败的迁移改出来的。更早的几个也还在（中间那几版可能也没起来过），提一句。
-      // 只指眼前这份库的：换过库（导入了另一份）时，别的库的恢复点不是它的底。
+      // 只指确定是眼前这份库的：换过库（导入了另一份）时，别的库的备份不是它的底；认不出是哪份库的也不指。
       var detail = reason
       let points = DatabaseBackup.recoveryPointsOfCurrentDatabase()
-      let others = DatabaseBackup.recoveryPointsOfOtherDatabases()
-      if let backup = points.first ?? DatabaseBackup.existing().first(where: { !others.contains($0) }) {
+      if let backup = DatabaseBackup.newestBackupOfCurrentDatabase() {
         detail += "\n\n刚更新过的话：更新前的库备份在 \(backup.path)，配上那一版 app 能回到旧版。"
         if points.count > 1 {
           detail += "\n更早几次没确认起来过的更新前备份也还留着（同一目录，共 \(points.count) 份）。"

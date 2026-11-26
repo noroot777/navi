@@ -10,8 +10,9 @@
 // 「停掉它」只停那一个、它缓过来就不停、不理 SIGTERM 时再给强制结束；起出来的那份没服务过就退了（被锁挡下 /
 // 自己没起来 / 等满时限之后才退）→ 在服务的那一份一字不动、旧版照样认得出，这一次只记成一次没成的尝试（留的底
 // 照常固定，这一版在同一份库上再起不重备；那时没有库、或者之后换了一份库 → 照常备份）；旧服务在尝试之后应答 → 它的恢复点作废；尝试之前的一眼迟到了才交来确认 → 什么都
-// 不改；别的库的恢复点不算这份库备过、也不当它的恢复入口；进程号没补上的尝试凭启动时刻认；闸在等着换掉旧服务时
-// 端口上已经是这一版起的那份 → 不再接管它。
+// 不改；别的库的恢复点不算这份库备过、也不当它的恢复入口，没记是哪份库的（旧版留下的）哪份库都不算；作废了的
+// 别的库的备份也不当「最近一份备份」指给人；进程号没补上的尝试，不是这个启动器起的进程应答了不替它认；闸在等着
+// 换掉旧服务时端口上已经是这一版起的那份 → 不再接管它。
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
@@ -344,7 +345,60 @@ await withTestResources(async () => {
   rmSync(movedA);
   console.log("PASS: recovery points belong to the database they were taken of: another database's point neither covers nor stands in for this one");
 
-  // ── 补进程号那一下没记上：之后谁看到这次尝试开始之后才起的那个进程应答，都认得出是它；更早就在的不算 ──
+  // ── 旧版留下的恢复点（没记是哪份库、备份上也没标）：哪份库都不算 —— 换上另一份库照常备份，也不当它的恢复入口 ──
+  reset();
+  writeFileSync(newServerMode, "crash");
+  result = await drive(["launch", "3"]);
+  assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
+  const [legacyBackup] = backups();
+  assert.ok(legacyBackup, "fixture: a pre-migration backup was taken");
+  assert.equal(spawnSync("xattr", ["-p", "dev.navi.database", join(data, "backups", legacyBackup)]).status, 0,
+    "the backup carries which database it was taken of");
+  const pinsFile = join(data, "backups/recovery-points.json");
+  writeFileSync(pinsFile, JSON.stringify(JSON.parse(readFileSync(pinsFile, "utf8")).map(({ database, ...pin }) => pin)));
+  assert.equal(spawnSync("xattr", ["-d", "dev.navi.database", join(data, "backups", legacyBackup)]).status, 0);
+  const stagedC = join(temporary, "c.db");
+  const c = new DatabaseSync(stagedC);
+  c.exec("create table tasks (id text primary key); insert into tasks values ('c1')");
+  c.close();
+  renameSync(stagedC, join(data, "navi.db"));
+  result = await drive(["launch", "3"]);
+  assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
+  assert.equal(backups().length, 2, "a recovery point of unknown database does not count as this one backed up");
+  const backupOfC = backups().find((name) => name !== legacyBackup);
+  assert.deepEqual(await pinsHere(), [backupOfC], "nor is it offered for this database");
+  assert.match((await drive(["pins"])).out, new RegExp(`^HINT ${backupOfC}$`, "m"));
+  console.log("PASS: a recovery point left without its database is never taken for the database now in place");
+
+  // ── 恢复点被确认作废之后，换上另一份库、又备不了份：「最近一份备份」也只指这一份库自己的，别的库的不指 ──
+  reset();
+  writeFileSync(newServerMode, "crash");
+  result = await drive(["launch", "3"]);
+  assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
+  const [releasedBackup] = backups();
+  holder = await startHolder({ lock: false });
+  await drive(["record", String(holder.pid)]);
+  await drive(["confirm", String(holder.pid)]);
+  await stop(holder);
+  assert.deepEqual(await pins(), [], "fixture: the confirmation released the recovery point");
+  assert.match((await drive(["pins"])).out, new RegExp(`^HINT ${releasedBackup}$`, "m"), "its own database still finds it");
+  const stagedD = join(temporary, "d.db");
+  const d = new DatabaseSync(stagedD);
+  d.exec("create table tasks (id text primary key)");
+  d.close();
+  renameSync(stagedD, join(data, "navi.db"));
+  spawnSync("chmod", ["0500", join(data, "backups")]);
+  try {
+    result = await drive(["launch", "3"]);
+    assert.match(result.out, /LAUNCH failed .*备份/, result.out);
+    assert.deepEqual(spawnedPids().length, 1, "no server is started without its backup");
+    assert.match((await drive(["pins"])).out, /^HINT none$/m, "another database's backup is not pointed to");
+  } finally {
+    spawnSync("chmod", ["0700", join(data, "backups")]);
+  }
+  console.log("PASS: a released backup of another database is not offered as this database's way back");
+
+  // ── 补进程号那一下没记上：之后不管是谁应答（更早就在的、之后才起的），别人都认不出是不是这次起的，不替它确认 ──
   reset();
   setHealth("ok");
   holder = await startHolder({ lock: false });
@@ -354,16 +408,17 @@ await withTestResources(async () => {
   assert.match(result.out, /LAUNCH ready/, result.out);
   assert.equal(record().pid, holder.pid);
   assert.equal(record().bundleVersion, OLD, "a process already running before the attempt is not taken for it");
+  const previousHolder = holder.pid;
   await stop(holder);
   await drive(["attempt-marker"]);
   holder = await startHolder({ lock: false });
   result = await drive(["launch", "5"]);
   assert.match(result.out, /LAUNCH ready/, result.out);
-  assert.equal(record().pid, holder.pid, "the process started after the attempt is recognised without its pid on record");
-  assert.equal(record().bundleVersion, "dev");
-  assert.equal(record().attempt, undefined);
+  assert.equal(record().pid, previousHolder, "a process this launcher did not start is not taken for the attempt");
+  assert.deepEqual(attempt(), { pid: 0, bundleVersion: "dev" });
+  assert.equal(await staleness(holder.pid), "none", "and nobody claims to know which build started it");
   await stop(holder);
-  console.log("PASS: an attempt whose pid was never written is still reconciled by whoever sees its process answer");
+  console.log("PASS: an attempt whose pid was never written is not pinned on whichever process happens to answer later");
 
   // ── 闸在等着换掉旧服务，端口上已经是这一版起的那份：不再接管、不停它 ──
   reset();

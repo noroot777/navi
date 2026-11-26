@@ -90,7 +90,6 @@ enum NaviHealth {
   /// 本机地址上认过的自己那一份；连别处的 navi、或者不是自己那份时是 nil。
   static func ours(_ probe: NaviProbe) -> NaviInstance? {
     guard NaviConfig.isLocal, case .navi(let instance) = probe, instance.isOurs else { return nil }
-    ServedInstance.observe(instance)
     return instance
   }
 
@@ -99,8 +98,12 @@ enum NaviHealth {
   static func probe(_ url: URL = NaviConfig.healthURL, completion: @escaping (NaviProbe) -> Void) {
     var request = URLRequest(url: url, timeoutInterval: 1.5)
     request.cachePolicy = .reloadIgnoringLocalCacheData
+    // 每一眼认出自己那份，都按它发出去的时刻记进 ServedInstance：迟到的盖不掉新的（所有探活都走这里）。
+    let asked = Date()
     URLSession.shared.dataTask(with: request) { data, response, error in
-      completion(classify(response: response, data: data, error: error))
+      let probe = classify(response: response, data: data, error: error)
+      if NaviConfig.isLocal, case .navi(let instance) = probe, instance.isOurs { ServedInstance.observe(instance, askedAt: asked) }
+      completion(probe)
     }.resume()
   }
 
@@ -142,7 +145,7 @@ enum ServedInstance {
   private static var latestAskedAt = Date.distantPast
 
   /// `askedAt`：这一眼是什么时候发出去的。比已经记下的那一眼早（迟到的）就不盖它。
-  static func observe(_ instance: NaviInstance, askedAt: Date = Date()) {
+  static func observe(_ instance: NaviInstance, askedAt: Date) {
     lock.lock()
     if askedAt >= latestAskedAt {
       latest = instance
