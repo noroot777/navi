@@ -46,8 +46,9 @@ const FORMAT = "3";
 const UNBASELINED = "system-notify-unbaselined";
 /** 上一次全量对账开始的时刻：这之后改过的任务下一次全量对账都带上。 */
 const SWEPT = "system-notify-swept";
-/** 一笔写锁里读几个任务：读得越多别处的写等得越久。 */
 const BATCH = 20;
+/** 读现状的那一会儿库被写了，一个任务最多重读几次；再不行交给下一次对账。 */
+const ATTEMPTS = 3;
 const FULL_SWEEP_MS = 10 * 60_000;
 
 type Notice = Extract<ServerEvent, { type: "task.notify" }>;
@@ -160,12 +161,13 @@ export class SystemNotifier {
   }
 
   /**
-   * quiet = 只记账不推（记底）。一个任务记完账就把它那几条推出去，一个任务出错只记一句、不连累别的：先把一批都记了账
-   * 再一起推的话，后面一个出错，前面记过账的就再也推不出去了（下一次对账身份已经一样）。返回没对上的任务。
+   * quiet = 只记账不推（记底）。一个任务出错只记一句、不连累别的；记了账的那几条一条不落地推出去，推完再存补记进度：
+   * 存进度出错也不能挡住别的任务已经记了账的那几条（下一次对账身份已经一样，再也推不出去）。返回没对上的任务。
    *
-   * 读现状和改账在同一把写锁里（settle）：视图和身份是分好几次读的，不在锁里读，中间任务刚好落了完成，旧视图配新身份
-   * ——「这一版不说」和「这一版是 done#1」凑在一起，账一记，那次完成就再也不说了；反过来新视图配旧身份，账上看着
-   * 没变，这一次也不说了。
+   * 视图和身份是分好几次读的，中间任务刚好落了完成，旧视图配新身份 ——「这一版不说」和「这一版是 done#1」凑在一起，
+   * 账一记，那次完成就再也不说了；反过来新视图配旧身份，账上看着没变，这一次也不说了。所以读之前、改账那一刻各看
+   * 一眼库写到哪儿了（GENERATION），中间被写过就整份重读（attempt）。不把读放进写锁里：读视图那一路会顺手写库、
+   * 开事务（等前置完成的消息落锁存、核审查消息的归属），还会读仓库，锁里做这些要么等自己到超时，要么让别处的写干等。
    */
   async reconcile(taskIds: string[], { quiet = false }: { quiet?: boolean } = {}): Promise<string[]> {
     await reviewOutcomesSince();
@@ -173,58 +175,81 @@ export class SystemNotifier {
     const failed: string[] = [];
     for (let i = 0; i < ids.length; i += BATCH) {
       const batch = ids.slice(i, i + BATCH);
-      let settled: Map<string, Notice[] | undefined>;
-      try {
-        settled = await this.settle(batch, quiet);
-      } catch {
-        // 一批在一笔事务里，一个出错整批回滚：一个一个重来，出错的那个不连累别的
-        settled = new Map();
-        for (const taskId of batch) {
+      const settled = await this.attempt(batch, quiet).catch((error) => {
+        console.error("[navi] 系统通知对账出错:", error);
+        return null;
+      }) ?? new Map<string, Notice[] | undefined>();
+      // 整批没成（读的时候库被写了、有一个出错）：一个一个重来。一个任务读得快，撞上写的机会小；出错的那个不连累别的
+      for (const taskId of batch.filter((id) => !settled.has(id))) {
+        for (let tries = 0; tries < ATTEMPTS && !settled.has(taskId); tries++) {
           try {
-            settled.set(taskId, (await this.settle([taskId], quiet)).get(taskId));
+            const one = await this.attempt([taskId], quiet);
+            if (one) settled.set(taskId, one.get(taskId));
           } catch (error) {
-            failed.push(taskId);
             console.error(`[navi] 系统通知对账出错 task=${taskId}:`, error);
+            break;
           }
         }
+        if (settled.has(taskId)) continue;
+        failed.push(taskId);
+        // 一直撞上写：交给下一次对账
+        if (!quiet) this.mark(taskId);
       }
+      const caughtUp: string[] = [];
       for (const [taskId, notices] of settled) {
         // undefined = 这一下看不清现状（im/attention.ts viewsOf）：什么都没记，算没对上
         if (!notices) {
           failed.push(taskId);
           continue;
         }
-        for (const notice of notices) this.publish(notice);
-        if (!quiet && this.unbaselined.delete(taskId)) await writeMeta(UNBASELINED, JSON.stringify([...this.unbaselined]));
+        for (const notice of notices) {
+          try {
+            this.publish(notice);
+          } catch (error) {
+            console.error(`[navi] 系统通知推送出错 task=${taskId}:`, error);
+          }
+        }
+        if (!quiet && this.unbaselined.has(taskId)) caughtUp.push(taskId);
+      }
+      if (caughtUp.length) {
+        const left = [...this.unbaselined].filter((id) => !caughtUp.includes(id));
+        // 存不进去就还当它没补记：下一次再补一遍，账已经一样，只是白看一眼
+        await writeMeta(UNBASELINED, JSON.stringify(left)).then(
+          () => { this.unbaselined = new Set(left); },
+          (error) => console.error("[navi] 系统通知存补记进度出错:", error),
+        );
       }
     }
     return failed;
   }
 
   /**
-   * 在写锁里把一批任务读一遍、按读到的改账，返回各自该弹的那几条（提交之后再弹）；undefined = 这一下看不清现状。
-   * 全进程只有一条连接（db/node-sqlite-client.ts）：写锁开着时别处的写都等它收尾，锁里分几次读到的是同一刻的库。
-   * 锁里除了账只读不写：别处的写要等这一笔，锁里拿根 db 写会等到自己超时。
+   * 读一批任务的现状、改账，返回各自该弹的那几条（提交之后再弹）；undefined = 这一下看不清现状。null = 读的这一会儿库被
+   * 写过（读到的可能是两代拼起来的），账一个字没动。
+   * 「库写到哪儿了」在读之前取、在改账的写锁里核：取的那一下没有别的事务开着（事务要等连接空下来才开），核的那一下
+   * 写锁在手，两次一样就是中间一笔写都没有 —— 读到的正是取的那一刻的库。
    */
-  private settle(batch: string[], quiet: boolean): Promise<Map<string, Notice[] | undefined>> {
+  private async attempt(batch: string[], quiet: boolean): Promise<Map<string, Notice[] | undefined> | null> {
+    const before = await db.transaction((tx) => generationOf(tx));
+    const [views, facts] = await Promise.all([viewsOf(batch), factsOf(batch)]);
+    const plans = new Map<string, { view: TaskView; entries: Entry[] } | "gone" | undefined>();
+    for (const taskId of batch) {
+      const view = views.get(taskId);
+      const fact = facts.get(taskId);
+      plans.set(taskId, !views.has(taskId) ? undefined : !view || !fact ? "gone" : { view, entries: await entriesOf(view, fact) });
+    }
     return db.transaction(async (tx) => {
-      const [views, facts] = await Promise.all([viewsOf(batch), factsOf(batch)]);
+      if (await generationOf(tx) !== before) return null;
       const out = new Map<string, Notice[] | undefined>();
-      for (const taskId of batch) {
-        if (!views.has(taskId)) {
-          out.set(taskId, undefined);
-          continue;
-        }
-        const view = views.get(taskId);
-        const fact = facts.get(taskId);
-        if (!view || !fact) {
-          await tx.delete(imOutcomes).where(and(eq(imOutcomes.appId, SINK), eq(imOutcomes.taskId, taskId)));
-          out.set(taskId, []);
+      for (const [taskId, plan] of plans) {
+        if (plan === "gone") await tx.delete(imOutcomes).where(and(eq(imOutcomes.appId, SINK), eq(imOutcomes.taskId, taskId)));
+        if (!plan || plan === "gone") {
+          out.set(taskId, plan && []);
           continue;
         }
         const mode = quiet ? "quiet" : this.unbaselined.has(taskId) ? "catchup" : "live";
-        const entries = await entriesOf(view, fact);
-        out.set(taskId, mode === "live" && this.stillSettling(taskId, view, entries) ? [] : await this.advance(tx, view, entries, mode));
+        out.set(taskId, mode === "live" && this.stillSettling(taskId, plan.view, plan.entries) ? []
+          : await this.advance(tx, plan.view, plan.entries, mode));
       }
       return out;
     }, { behavior: "immediate" });
@@ -267,6 +292,16 @@ export class SystemNotifier {
     }
     return out;
   }
+}
+
+/**
+ * 库写到哪儿了：这条连接上一共改过多少行（全进程只有这一条连接，db/node-sqlite-client.ts）+ 别的连接提交过几次。
+ * 回滚的那几笔也算进去：读到过它没提交的中间状态，一样要重读。
+ */
+async function generationOf(tx: AccountTx): Promise<string> {
+  const row = await tx.get<{ generation: string }>(
+    sql`SELECT total_changes() || ':' || (SELECT data_version FROM pragma_data_version) AS generation`);
+  return row.generation;
 }
 
 function noticeOf(view: TaskView, kind: TaskNotifyKind, identity: string, body: string): Notice {

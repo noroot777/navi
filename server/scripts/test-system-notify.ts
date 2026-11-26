@@ -6,7 +6,8 @@
 //    也不提前推；已验收任务的续聊在重启时挂了，全量对账也找得到它；记底时有任务读不清（讨论记录打不开），别的任务照常
 //    推，它读得清了只补记不补推；记底时正在续聊、早就审过的任务，续聊停下来不把老审查结论当新的推；
 // ② 新任务：跑完等验收推一条，重复对账不再推；对账读现状的半路上任务刚好完成（视图读到在跑、身份读到已完成），
-//    那次完成照推，不先记进账吞掉；
+//    那次完成照推，不先记进账吞掉；读视图那一路顺手写库、开事务（等前置完成的消息、审查留下的消息）时，对账不等自己，
+//    别处的写也不干等；
 // ③ 停下来提问推一条，带上问题；跑挂了（中断）推一条；验收落章推一条，「等你验收」那件事没了不另推；
 // ④ 验证没过、验收前置命令没过各推一条；门禁通过不单推；同一版重新验证又没过再推，同一版的「等你验收」只说一次；
 // ⑤ 回合锁还占着（这一轮还在结算）先不推，锁放开自己再对一次；
@@ -23,7 +24,8 @@
 //    不是新的一版，共享执行者真完成了才是，开独立工作区的那些完成了不算；
 // ⑫ 多人模式：被移出项目的成员收不到那个项目里的通知（一条一条推，过滤器逐件核可见性）；有权限的成员，任务头一回
 //    经过过滤器（归属缓存是冷的，比如重启后收拾出来的中断）也照推；
-// ⑬ 重启：记过底不重记，记底之后的新事照推；账的记法变了按没记过底重记，老写法的账不当成新事；
+// ⑬ 重启：记过底不重记，记底之后的新事照推；账的记法变了按没记过底重记，老写法的账不当成新事；补记进度存不进去，
+//    同一批别的任务记了账的照推；
 // ⑭ 持续目标没交卷就停住、等人续跑：推一条，不重复；重新跑起来再停住又是一回；检查点暂停不推。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -42,7 +44,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let failure: unknown = null;
 try {
-  const { db, ensureSchema } = await import("../src/db/index.js");
+  const { db, dbClient, ensureSchema } = await import("../src/db/index.js");
   const { projects, tasks, sessions, sessionTurns } = await import("../src/db/schema.js");
   const { acceptGateRuns } = await import("../src/db/schema-accept-gate.js");
   const { freeReviewRuns, freeWorkflowStates } = await import("../src/db/schema-free-workflow.js");
@@ -162,7 +164,7 @@ try {
   assert.deepEqual(kinds(await reconcile("t1b")), [["t1b", "accept"]], "新任务头一眼就是跑完了：推");
 
   // 读现状的半路上完成：视图那一读拿到 running 之后，另一处落 done#1（不等这边，自己去写）；身份那一读等它写完再读
-  // （最多等一会儿：写要是排在这边的写锁后面，就等不到）
+  // （最多等一会儿）
   await db.insert(tasks).values(task({ id: "race", title: "读的时候完成了", status: "running" }) as never);
   const select = db.select.bind(db);
   let landed!: () => void;
@@ -198,10 +200,33 @@ try {
   } finally {
     (db as { select: unknown }).select = select;
   }
-  assert.deepEqual(raced, [], "读到的是同一刻的在跑");
   await completed;
-  assert.deepEqual(kinds(await reconcile("race")), [["race", "accept"]], "那次完成照推，没被先记进账");
+  assert.deepEqual(kinds(raced), [["race", "accept"]], "读的半路上完成了：发现库被写过，重读一遍照推，不先记进账");
   assert.deepEqual(await reconcile("race"), [], "不重复");
+
+  // 读视图那一路会顺手写库、开事务（等前置完成的消息落锁存、核审查消息的归属）：对账不能等自己，别处的写也不干等
+  const { scheduledMessages } = await import("../src/db/schema.js");
+  for (const id of ["receiver", "predecessor", "bystander"]) {
+    await db.insert(tasks).values(task({ id, title: id, status: "done", doneSeq: 1, endedAt: at() }) as never);
+  }
+  await reconcile("receiver", "predecessor", "bystander");
+  for (const message of [
+    { id: "m-after", mode: "after", afterTaskId: "predecessor", afterSeq: 0 },
+    { id: "m-review", mode: "queued", origin: "review-settlement:generation" },
+  ]) {
+    await db.insert(scheduledMessages).values({ ...message, taskId: "receiver", text: "待发送", status: "pending", createdAt: at(), sendAt: at() } as never);
+    const started = Date.now();
+    const checking = notifier.run(() => notifier.reconcile(["receiver"]));
+    await sleep(20);
+    const writeStarted = Date.now();
+    await set("bystander", { title: "别处改了一下" });
+    const wrote = Date.now() - writeStarted;
+    assert.deepEqual(await checking, [], `${message.id}：对上了`);
+    assert.ok(wrote < 1_000, `${message.id}：别处的写不干等（${wrote}ms）`);
+    assert.ok(Date.now() - started < 2_000, `${message.id}：对账不等自己`);
+    take();
+    await db.delete(scheduledMessages).where(eq(scheduledMessages.id, message.id));
+  }
 
   // ── ③ 提问、中断、验收落章 ─────────────────────────────────────────────
   await db.insert(tasks).values(task({ id: "t2", title: "要拍板", status: "running" }) as never);
@@ -563,6 +588,22 @@ try {
   assert.deepEqual(take(), [], "账的记法变了：重记一遍，不把老结论当新的");
   restarted.stop();
   upgraded.stop();
+
+  // 补记进度存不进去：别的任务已经记了账的那几条照推，进度下次再存
+  await db.insert(tasks).values(task({ id: "late-duet", title: "后来读得清的讨论", mode: "duet", status: "paused" }) as never);
+  await writeMeta("system-notify-unbaselined", JSON.stringify(["late-duet"]));
+  const progress = new SystemNotifier((notice) => seen.push(notice));
+  await progress.baseline();
+  await db.insert(tasks).values(task({ id: "t14", title: "同一批里完成的", status: "done", doneSeq: 1, endedAt: at() }) as never);
+  await dbClient.executeMultiple(`CREATE TEMP TRIGGER reject_progress BEFORE INSERT ON im_meta WHEN NEW.key = 'system-notify-unbaselined'
+    BEGIN SELECT RAISE(ABORT, 'injected'); END`);
+  await progress.run(() => progress.reconcile(["late-duet", "t14"]));
+  assert.deepEqual(kinds(take()), [["t14", "accept"]], "存进度出错：同一批别的任务照推");
+  await dbClient.executeMultiple("DROP TRIGGER reject_progress");
+  await progress.run(() => progress.reconcile(["late-duet", "t14"]));
+  assert.deepEqual(take(), [], "再对一次：不重复");
+  assert.deepEqual(JSON.parse((await readMeta("system-notify-unbaselined"))!), [], "进度这次存上了");
+  progress.stop();
 
   notifier.stop();
   console.log("test-system-notify: ok");
