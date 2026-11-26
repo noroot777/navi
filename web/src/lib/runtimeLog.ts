@@ -1,14 +1,16 @@
 // 页面这一侧的运行日志（格式与脱敏见 @navi/shared/runtime-log，分析见 server/src/runtime-log/analyze.ts）。
 //
 // 只报这页自己知道、服务端和壳都看不见的几件事：这一页是怎么载进来的（正常打开 / 整页重载 / 前进后退），
-// 页面主动整页重载的原因，没人接住的脚本报错，和事件流断开了多久。报错只带名字、脱敏后的引擎原文和
-// 栈上的代码位置，不带任何页面内容。
+// 页面主动整页重载的原因，没人接住的脚本报错，和事件流断开了多久。报错只带名字、报错类别的固定说法
+// 和栈上的代码位置，原文和页面内容一个字都不带（服务端收的时候再按同一份白名单核一遍）。
 //
 // 攒一小批再发；整页重载之前那一条要用 keepalive，否则页面一走请求就被掐掉了。
-import { scrubErrorMessage, scrubErrorName, scrubStack, type WebRuntimeEvent } from "@navi/shared/runtime-log";
+import { scrubErrorMessage, scrubErrorName, scrubStack, type WEB_RELOAD_REASONS, type WebRuntimeEvent } from "@navi/shared/runtime-log";
 import { apiPath } from "./apiClient.ts";
 
-type Pending = { ev: WebRuntimeEvent; [field: string]: unknown };
+type Event = { ev: WebRuntimeEvent; [field: string]: unknown };
+/** `t`：事件发生的时刻。发出时换算成「多久之前」（`ago`），服务端按它把时间拨回去 —— 页面攒一批再发，收到时刻会晚。 */
+type Pending = { event: Event; t: number };
 
 const FLUSH_MS = 3000;
 /** 一页最多报几条报错：一个坏组件每帧抛一次时，日志不能跟着刷屏。 */
@@ -44,7 +46,7 @@ function send(events: Pending[], keepalive: boolean): void {
   void fetch(apiPath("/runtime-log/events"), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ events: events.map((event) => ({ ...event, tab, shell })) }),
+    body: JSON.stringify({ events: events.map(({ event, t }) => ({ ...event, tab, shell, ago: Math.max(0, Date.now() - t) })) }),
     keepalive,
   }).catch(() => {
     /* 服务正好不在：这几条就丢了，日志本来就是尽力而为 */
@@ -57,8 +59,8 @@ function flush(keepalive = false): void {
   send(pending.splice(0), keepalive);
 }
 
-function queue(event: Pending): void {
-  pending.push(event);
+function queue(event: Event): void {
+  pending.push({ event, t: Date.now() });
   timer ??= setTimeout(() => flush(), FLUSH_MS);
 }
 
@@ -85,7 +87,7 @@ export function reportPageCrash(error: unknown): void {
 }
 
 /** 页面要主动整页重载了：先把原因记下（keepalive 发出去），调用方随后 reload。 */
-export function reportPageReload(reason: "identity" | "account" | "remote-access" | "error-screen" | "reclaim"): void {
+export function reportPageReload(reason: (typeof WEB_RELOAD_REASONS)[number]): void {
   queue({ ev: "page.reload", reason });
   flush(true);
 }

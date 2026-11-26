@@ -47,7 +47,8 @@ export function logServerStart(fields: {
   desktop: boolean;
   localOnly: boolean;
   preview: boolean;
-  previous: { evidence?: string; silentMs?: number | null; kind?: string; signal?: string } | null;
+  /** 启动时发现上一轮的锁还在（残留）：上一轮是谁、留下了什么证据。锁被正常删掉时是 null。 */
+  previous: { run: string | null; evidence?: string; silentMs?: number | null; kind?: string; signal?: string } | null;
 }): void {
   runtimeLog("server.start", {
     inst: fields.instance.slice(0, 8),

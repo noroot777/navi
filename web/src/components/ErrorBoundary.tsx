@@ -29,7 +29,7 @@ export function LoadFailure({ what, onClose }: { what: string; onClose?: () => v
   return (
     <div className="workspace-load-error" role="alert">
       {what}加载失败,刷新页面后重试
-      <button onClick={() => window.location.reload()}>刷新</button>
+      <button onClick={() => { reportPageReload("load-failure"); window.location.reload(); }}>刷新</button>
       {onClose && <button onClick={onClose}>关闭</button>}
     </div>
   );

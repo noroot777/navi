@@ -45,6 +45,13 @@ function since<T extends { at: string }>(items: T[], sinceMs: number | null): T[
   return items.filter((item) => Date.parse(item.at) >= sinceMs);
 }
 
+/**
+ * 退出账本往窗口前多读一天：窗口里第一条 `server.start` 的上一轮往往在窗口之外停的，读不到它就会
+ * 把一次重启当成全新启动（第 1 轮审查）。
+ */
+const EXIT_MARGIN_MS = 86_400_000;
+const exitsSince = (sinceMs: number | null) => (sinceMs === null ? null : sinceMs - EXIT_MARGIN_MS);
+
 export function readRuntimeLogDir(dir: string, sinceMs: number | null = null): RuntimeLogRecord[] {
   const records: RuntimeLogRecord[] = [];
   for (const name of LOG_FILES) {
@@ -65,7 +72,7 @@ export function loadDataDir(dataDir: string, sinceMs: number | null = null): Loa
   } catch {
     dbFile = join(dataDir, "navi.db");
   }
-  const exits = since(readExitRecords(10_000, dbFile).map(toSummary), sinceMs);
+  const exits = since(readExitRecords(10_000, dbFile).map(toSummary), exitsSince(sinceMs));
   return { records: readRuntimeLogDir(runtimeLogDirForDb(dbFile), sinceMs), exits };
 }
 
@@ -74,7 +81,7 @@ export function loadOwnRuntimeLog(sinceMs: number | null = null): LoadedRuntimeL
   const dbFile = resolveNaviDbFile();
   return {
     records: readRuntimeLogDir(runtimeLogDirForDb(dbFile), sinceMs),
-    exits: since(readExitRecords(10_000, dbFile).map(toSummary), sinceMs),
+    exits: since(readExitRecords(10_000, dbFile).map(toSummary), exitsSince(sinceMs)),
   };
 }
 
@@ -104,7 +111,7 @@ export function loadRuntimeLogPath(path: string, sinceMs: number | null = null):
   if (bundle?.format !== RUNTIME_LOG_BUNDLE_FORMAT) throw new Error(`${path} 不是 Navi 运行日志导出包`);
   return {
     records: since(bundle.records, sinceMs).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)),
-    exits: since(bundle.exits as ExitSummary[], sinceMs),
+    exits: since(bundle.exits as ExitSummary[], exitsSince(sinceMs)),
     host: bundle.host,
   };
 }

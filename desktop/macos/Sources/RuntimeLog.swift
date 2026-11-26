@@ -51,17 +51,16 @@ enum RuntimeLog {
         try? manager.removeItem(at: previous)
         try? manager.moveItem(at: fileURL, to: previous)
       }
-      if !manager.fileExists(atPath: fileURL.path) {
-        manager.createFile(atPath: fileURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
-      }
-      let handle = try FileHandle(forWritingTo: fileURL)
-      defer { try? handle.close() }
-      try handle.seekToEnd()
+      // O_APPEND：定位到末尾和写入由内核一步做完。另开的一份 app 同时在写时，先 seek 再 write
+      // 会让两边落在同一个偏移上、互相盖掉一截。
+      let fd = open(fileURL.path, O_WRONLY | O_APPEND | O_CREAT, 0o600)
+      guard fd >= 0 else { return }
+      defer { close(fd) }
       // 前后各带换行：上一条写到半行就断了时，这一条照样自成一行。
       var framed = Data("\n".utf8)
       framed.append(data)
       framed.append(Data("\n".utf8))
-      try handle.write(contentsOf: framed)
+      _ = framed.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
     } catch {
       // 日志写不进去不影响窗口本身。
     }

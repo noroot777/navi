@@ -1,30 +1,37 @@
 // 把服务端、页面、mac 壳三份运行日志对齐成一条时间线，找出每一次「窗口闪一下」是谁出了事。
 //
-// 「闪一下」在日志里的样子（锚点）：mac 壳撤掉页面（`page.takedown`）、壳自己重载页面（`page.reload`，
-// 不算用户按的）、网页进程被系统结束（`webcontent.terminated`）、页面自己整页重载（web `page.reload`）、
-// 服务重新起来（`server.start`）。相隔不到 15 秒的锚点算同一次。
+// 「闪一下」在日志里的样子（锚点），**任何一种观察单独出现都算一次**，不靠另一来源补证据才成立
+// （第 1 轮审查：页面崩了、浏览器刷新了，旧版因为没有壳的事件就一次都不列）：
+//   · 壳：撤掉页面（`page.takedown`）、自己重载页面（`page.reload`，用户点菜单的不算）、网页进程被系统结束；
+//   · 页面：崩到错误屏（`page.crash`）、主动整页重载（`page.reload`）、被整页刷新进来（`page.boot` nav=reload）；
+//   · 服务：一次**重启**（`server.start` 且认得出上一轮，见 analyze-restart.ts；全新启动不算）。
+// 相隔不到 15 秒的锚点算同一次。
 //
-// 每一次在前后一段时间里找证据，按下面的顺序认定原因（前面的更具体）：
-//   1. 电脑刚睡醒       `system.sleep`
-//   2. 服务重启过       `server.start` / 壳报实例号变了 → 再看退出账本：正常收到信号、自己退出、还是什么都没留下
-//   3. 服务卡住了       `loop.stall` 跟撤页时刻重叠 → 带上调用栈、CPU、GC、当时在处理的请求
-//   4. 网页进程被结束   `webcontent.terminated`
-//   5. 页面脚本出错     web `page.crash` / `page.error`
-//   6. 端口上换了人 / 连接被拒 / 查不到服务端证据
+// 原因先看这一次里**直接观察到的**东西，再拿别的来源去解释撤页：
+//   1. 服务重启（这一次里有 server.start / 壳报实例号变了）→ 上一轮怎么没的按身份认
+//   2. 网页进程被结束、页面崩了 —— 壳 / 页面自己看见的，不让旁边时间上碰巧的事盖掉
+//   3. 撤页：电脑刚睡醒 → 服务卡住（卡顿区间跟撤页重叠，带调用栈、CPU、GC、当时的请求）→ 撤页之后服务重启了
+//      → 端口上换了人 / 连接被拒 / 查不到
+//   4. 只有页面整页重载：谁发起的
+// 只靠时间对上的关联在证据里明说「按时间推测」，不当成已证实的因果。
 import type { CauseKind, Incident, RuntimeLogRecord, RuntimeLogReport, StackTally } from "@navi/shared/runtime-log";
+import { restartVerdicts, type RestartVerdict } from "./analyze-restart.js";
 import type { ExitSummary } from "./load.js";
 
 const MERGE_MS = 15_000;
 const t = (record: { at: string }) => Date.parse(record.at);
 const secs = (ms: number) => `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} 秒`;
 
-function isAnchor(record: RuntimeLogRecord): boolean {
+function isAnchor(record: RuntimeLogRecord, restarts: Map<RuntimeLogRecord, RestartVerdict>): boolean {
   if (record.src === "mac" || record.src === "win") {
     if (record.ev === "page.takedown" || record.ev === "webcontent.terminated") return true;
     if (record.ev === "page.reload") return record.reason !== "user";
   }
-  if (record.src === "web" && record.ev === "page.reload") return true;
-  return record.src === "server" && record.ev === "server.start";
+  if (record.src === "web") {
+    if (record.ev === "page.reload" || record.ev === "page.crash") return true;
+    if (record.ev === "page.boot") return record.nav === "reload";
+  }
+  return record.src === "server" && record.ev === "server.start" && restarts.has(record);
 }
 
 function within(records: RuntimeLogRecord[], from: number, to: number, pred: (r: RuntimeLogRecord) => boolean) {
@@ -68,104 +75,128 @@ function describeStall(stall: RuntimeLogRecord, stacks: RuntimeLogRecord[]): str
   return lines;
 }
 
-function describeExit(exit: ExitSummary | undefined, residual: ExitSummary | undefined): string {
-  if (exit?.kind === "signal") return `上一份服务收到 ${exit.signal} 退出（运行了 ${secs(Number(exit.uptimeMs ?? 0))}）——有人让它停的：升级、npm run restart、装更新或关机`;
-  if (exit?.kind === "exit") return `上一份服务自己退出了（退出码 ${exit.code ?? "?"}）`;
-  if (residual) {
-    const silent = residual.silentMs ? `，最后一次心跳之后静默 ${secs(Number(residual.silentMs))}` : "";
-    return residual.evidence === "exit_intent"
-      ? `上一份服务进入过退出流程但没收完尾${silent}`
-      : `上一份服务没留下任何退出记录就没了${silent}——被强杀（kill -9）、系统内存不够被结束，或原生崩溃`;
-  }
-  return "退出账本里没找到上一份服务怎么停的";
+type Context = {
+  all: RuntimeLogRecord[];
+  restarts: Map<RuntimeLogRecord, RestartVerdict>;
+};
+
+function restartEvidence(start: RuntimeLogRecord, verdict: RestartVerdict, all: RuntimeLogRecord[], from: number): string[] {
+  const lines = [verdict.how];
+  const errors = within(all, from - 120_000, t(start), (r) => r.ev === "server.error" && r.src === "server");
+  if (errors.length) lines.push(`重启前服务报过异常：${errors.map((e) => `${e.name}${e.code ? `(${e.code})` : ""}`).join("、")}`);
+  if (start.startupMs) lines.push(`新的那份从进程启动到能应答用了 ${secs(Number(start.startupMs))}`);
+  return lines;
 }
 
-/** 这一次启动之前最近的那条退出记录（10 分钟内），和这一次启动时记下的残留锁。 */
-function exitBefore(exits: ExitSummary[], startMs: number): ExitSummary | undefined {
-  for (let i = exits.length - 1; i >= 0; i -= 1) {
-    const exit = exits[i]!;
-    if (exit.kind !== "residual" && t(exit) <= startMs && startMs - t(exit) < 10 * 60_000) return exit;
-  }
-  return undefined;
+/** 被单例锁挡回的那几份里，哪些是这个窗口起的（壳记下的 spawn 进程号 = 被挡回的进程号）。 */
+function refusedEvidence(all: RuntimeLogRecord[], from: number, to: number): string[] {
+  const refused = within(all, from, to, (r) => r.ev === "server.refused");
+  if (!refused.length) return [];
+  const spawned = new Set(within(all, from - 60_000, to, (r) => r.ev === "server.spawn").map((r) => r.serverPid));
+  const ours = refused.filter((r) => spawned.has(r.pid));
+  const lines: string[] = [];
+  if (ours.length) lines.push(`窗口以为服务没了又起了一份（进程 ${ours.map((r) => r.pid).join("、")}），被单例锁挡回——原来那份其实还活着`);
+  if (refused.length > ours.length) lines.push(`同一时段另有 ${refused.length - ours.length} 次服务启动被单例锁挡回（不是这个窗口起的）`);
+  return lines;
 }
 
-function residualAt(exits: ExitSummary[], startMs: number): ExitSummary | undefined {
-  return exits.find((exit) => exit.kind === "residual" && Math.abs(t(exit) - startMs) < 120_000);
-}
-
-function classify(cluster: RuntimeLogRecord[], all: RuntimeLogRecord[], exits: ExitSummary[], firstStart: RuntimeLogRecord | undefined): Omit<Incident, "timeline"> {
+function classify(cluster: RuntimeLogRecord[], { all, restarts }: Context): Omit<Incident, "timeline"> {
   const start = t(cluster[0]!);
   const end = t(cluster[cluster.length - 1]!);
   const at = cluster[0]!.at;
-  const has = (ev: string, src?: string) => cluster.some((r) => r.ev === ev && (!src || r.src === src));
-  const takedown = cluster.find((r) => r.ev === "page.takedown");
+  const has = (ev: string) => cluster.some((r) => r.ev === ev);
   const evidence: string[] = [];
+  const takedown = cluster.find((r) => r.ev === "page.takedown");
   if (takedown) {
     // 壳记的是那一次探活的结果（RuntimeLog.fields(of:)）：down / unreachable / not_navi / not_ours。
-    const reason = String(takedown.probe ?? "");
+    const probe = String(takedown.probe ?? "");
     const streak = takedown.streak ? `连续 ${takedown.streak} 次` : "";
-    evidence.push(`窗口撤下页面：${{ unreachable: `${streak}探活没等到答复`, down: "探活连接被拒", not_navi: `探活收到非 Navi 的答复（${takedown.status ?? "?"}）`, not_ours: "端口上已经不是自己那份服务" }[reason] ?? reason}`);
+    evidence.push(`窗口撤下页面：${{ unreachable: `${streak}探活没等到答复`, down: "探活连接被拒", not_navi: `探活收到非 Navi 的答复（${takedown.status ?? "?"}）`, not_ours: "端口上已经不是自己那份服务" }[probe] ?? probe}`);
   }
-  const refused = within(all, start - 5_000, end + 60_000, (r) => r.ev === "server.refused");
-  if (refused.length) evidence.push(`窗口以为服务没了又起了一份，被单例锁挡回（${refused.length} 次）——原来那份其实还活着`);
+  evidence.push(...refusedEvidence(all, start - 5_000, end + 60_000));
 
-  const sleep = within(all, start - 60_000, end + 5_000, (r) => r.ev === "system.sleep");
-  if (sleep.length) {
-    return { at, cause: "sleep", summary: `电脑刚从睡眠中醒来（睡了 ${secs(Number(sleep[0]!.ms ?? 0))}），醒来那一下探活没连上`, evidence };
-  }
-
-  // 「新起的那一份」：这一次里自己就有的那条 server.start，没有就取撤页之后最先起来的那条。
-  const starts = within(all, start - 30_000, end + 90_000, (r) => r.ev === "server.start" && r !== firstStart);
+  // 1. 这一次里直接看到了重启。
+  const ownStart = cluster.find((r) => r.ev === "server.start" && restarts.has(r));
   const instanceChanged = cluster.find((r) => r.ev === "page.reload" && r.reason === "instance_changed");
-  if (starts.length || instanceChanged) {
-    const started = cluster.find((r) => r.ev === "server.start") ?? starts.find((r) => t(r) >= start - 5_000) ?? starts[starts.length - 1];
-    const startedAt = started ? t(started) : end;
-    const exit = exitBefore(exits, startedAt);
-    const residual = started ? residualAt(exits, startedAt) : undefined;
-    const errors = within(all, start - 120_000, end, (r) => r.ev === "server.error" && r.src === "server");
-    const how = describeExit(exit, residual);
-    evidence.push(how);
-    if (errors.length) evidence.push(`重启前服务报过异常：${errors.map((e) => `${e.name}${e.code ? `(${e.code})` : ""}`).join("、")}`);
-    if (started?.startupMs) evidence.push(`新的那份从进程启动到能应答用了 ${secs(Number(started.startupMs))}`);
+  const startForChange = instanceChanged
+    && within(all, start - 30_000, end + 5_000, (r) => r.ev === "server.start" && restarts.has(r)).at(-1);
+  const restart = ownStart ?? startForChange;
+  if (restart) {
+    evidence.push(...restartEvidence(restart, restarts.get(restart)!, all, start));
+    return { at, cause: "restart", summary: "服务重启了", evidence };
+  }
+  if (instanceChanged) {
+    evidence.push("窗口发现服务的实例号变了（服务重启过），但这段时间没有新服务的启动记录");
     return { at, cause: "restart", summary: "服务重启了", evidence };
   }
 
-  const stalls = all.filter((r) => r.ev === "loop.stall" && r.src === "server");
-  const stacks = all.filter((r) => r.ev === "loop.stall.stack");
-  const overlapping = stalls.filter((stall) => {
-    const [from, to] = stallInterval(stall);
-    return from <= end + 1_000 && to >= start - 8_000;
-  }).sort((a, b) => Number(b.ms) - Number(a.ms));
-  if (overlapping.length) {
-    evidence.push(...describeStall(overlapping[0]!, stacks));
-    return { at, cause: "stall", summary: `服务卡住 ${secs(Number(overlapping[0]!.ms))} 没应答，窗口当成服务没了`, evidence };
-  }
-
+  // 2. 壳 / 页面自己看见的故障。
   if (has("webcontent.terminated")) {
     return { at, cause: "webcontent", summary: "窗口的网页进程被系统结束了（多半是内存压力或 WebKit 崩溃），整页重载", evidence };
   }
-
   const pageErrors = within(all, start - 10_000, end, (r) => r.src === "web" && (r.ev === "page.crash" || r.ev === "page.error"));
+  const describeErrors = () => {
+    for (const error of pageErrors.slice(0, 2)) {
+      evidence.push(`页面报错 ${error.name ?? "?"}${error.msg ? `：${error.msg}` : ""}${Array.isArray(error.frames) && error.frames.length ? `（${(error.frames as string[])[0]}）` : ""}`);
+    }
+  };
+  if (has("page.crash")) {
+    describeErrors();
+    return { at, cause: "page_error", summary: "页面脚本出错，整页换成了错误屏", evidence };
+  }
+
+  // 3. 撤页：拿服务那一侧的记录解释它。
+  if (takedown) {
+    const sleep = within(all, start - 30_000, end + 5_000, (r) => r.ev === "system.sleep");
+    if (sleep.length) {
+      evidence.push(`（按时间推测）服务在撤页前 ${secs(start - t(sleep[0]!))} 记到电脑睡了 ${secs(Number(sleep[0]!.ms ?? 0))}`);
+      return { at, cause: "sleep", summary: "电脑刚从睡眠中醒来，醒来那一下探活没连上", evidence };
+    }
+    const stalls = all.filter((r) => r.ev === "loop.stall" && r.src === "server");
+    const stacks = all.filter((r) => r.ev === "loop.stall.stack");
+    const overlapping = stalls.filter((stall) => {
+      const [from, to] = stallInterval(stall);
+      return from <= end + 1_000 && to >= start - 8_000;
+    }).sort((a, b) => Number(b.ms) - Number(a.ms));
+    if (overlapping.length) {
+      evidence.push(...describeStall(overlapping[0]!, stacks));
+      return { at, cause: "stall", summary: `服务卡住 ${secs(Number(overlapping[0]!.ms))} 没应答，窗口当成服务没了`, evidence };
+    }
+    const later = within(all, start, end + 90_000, (r) => r.ev === "server.start" && restarts.has(r))[0];
+    if (later) {
+      evidence.push(`（按时间推测）撤页之后 ${secs(t(later) - start)} 新的服务起来了`, ...restartEvidence(later, restarts.get(later)!, all, start));
+      return { at, cause: "restart", summary: "服务没了，随后重启", evidence };
+    }
+    if (takedown.probe === "not_ours" || takedown.probe === "not_navi") {
+      return { at, cause: "not_ours", summary: "端口上应答的不是自己那份服务（被别的 Navi 或别的程序占了）", evidence };
+    }
+    if (takedown.probe === "down") {
+      return { at, cause: "refused_connection", summary: "服务端口拒绝连接，但服务端没有重启记录", evidence };
+    }
+    const serverNearby = within(all, start - 15 * 60_000, end + 15 * 60_000, (r) => r.src === "server");
+    evidence.push(serverNearby.length
+      ? "服务端这段时间没有卡顿（≥1 秒）、重启、睡眠记录——多半是机器整体被压着（CPU/内存/磁盘满载）或者网络栈的问题"
+      : "这段时间没有服务端日志（服务是旧版本、没起来，或者日志被删了）");
+    return { at, cause: "unknown", summary: "没查到服务端那一侧的原因", evidence };
+  }
+
+  // 4. 只有页面整页重载。
+  if (pageErrors.length) {
+    describeErrors();
+    return { at, cause: "page_error", summary: "页面报错之后整页重载", evidence };
+  }
   const webReload = cluster.find((r) => r.src === "web" && r.ev === "page.reload");
-  if (pageErrors.length || webReload?.reason === "error-screen") {
-    for (const error of pageErrors.slice(0, 2)) evidence.push(`页面报错 ${error.name ?? "?"}${error.msg ? `：${error.msg}` : ""}${Array.isArray(error.frames) && error.frames.length ? `（${(error.frames as string[])[0]}）` : ""}`);
-    return { at, cause: "page_error", summary: "页面脚本出错", evidence };
-  }
-  if (webReload) {
-    const why: Record<string, string> = { identity: "登录身份在别的标签页里变了", account: "账号设置要求重载", "remote-access": "远程访问设置要求重载", reclaim: "接管回合后重载" };
-    return { at, cause: "unknown", summary: `页面自己整页重载：${why[String(webReload.reason)] ?? String(webReload.reason)}`, evidence };
-  }
-  if (takedown?.probe === "not_ours" || takedown?.probe === "not_navi") {
-    return { at, cause: "not_ours", summary: "端口上应答的不是自己那份服务（被别的 Navi 或别的程序占了）", evidence };
-  }
-  if (takedown?.probe === "down") {
-    return { at, cause: "refused_connection", summary: "服务端口拒绝连接，但服务端没有重启记录", evidence };
-  }
-  const serverNearby = within(all, start - 15 * 60_000, end + 15 * 60_000, (r) => r.src === "server");
-  evidence.push(serverNearby.length
-    ? "服务端这段时间没有卡顿（≥1 秒）、重启、睡眠记录——多半是机器整体被压着（CPU/内存/磁盘满载）或者网络栈的问题"
-    : "这段时间没有服务端日志（服务是旧版本、没起来，或者日志被删了）");
-  return { at, cause: "unknown", summary: "没查到服务端那一侧的原因", evidence };
+  const why: Record<string, string> = {
+    identity: "登录身份在别的标签页里变了", account: "账号设置里退出登录", "remote-access": "远程访问设置里退出登录",
+    "error-screen": "在错误屏上点了重新载入", "load-failure": "在加载失败提示上点了刷新", reclaim: "放开回合占位后重新加载",
+  };
+  if (webReload) return { at, cause: "reload", summary: `页面整页重载：${why[String(webReload.reason)] ?? "原因没报上来"}`, evidence };
+  const userReload = within(all, start - 5_000, end + 1_000, (r) => (r.src === "mac" || r.src === "win") && r.ev === "page.reload" && r.reason === "user");
+  return {
+    at, cause: "reload",
+    summary: userReload.length ? "在窗口菜单里点了重新载入" : "页面被整页刷新（浏览器刷新 / ⌘R，或浏览器自己重载）",
+    evidence,
+  };
 }
 
 function median(values: number[]): number {
@@ -179,9 +210,8 @@ export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummar
   const counts: Record<string, number> = {};
   for (const record of sorted) counts[record.src] = (counts[record.src] ?? 0) + 1;
 
-  // 服务端的第一条 server.start 不是「重启」：那是日志开始记以来第一次起。
-  const firstStart = sorted.find((r) => r.ev === "server.start");
-  const anchors = sorted.filter((r) => isAnchor(r) && r !== firstStart);
+  const restartMap = restartVerdicts(sorted, exits);
+  const anchors = sorted.filter((r) => isAnchor(r, restartMap));
   const clusters: RuntimeLogRecord[][] = [];
   for (const anchor of anchors) {
     const last = clusters[clusters.length - 1];
@@ -189,7 +219,7 @@ export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummar
     else clusters.push([anchor]);
   }
   const incidents: Incident[] = clusters.map((cluster) => {
-    const verdict = classify(cluster, sorted, exits, firstStart);
+    const verdict = classify(cluster, { all: sorted, restarts: restartMap });
     const from = t(cluster[0]!) - 20_000;
     const to = t(cluster[cluster.length - 1]!) + 10_000;
     const timeline = within(sorted, from, to, (r) => r.ev !== "server.vitals").slice(0, 40);
@@ -211,8 +241,7 @@ export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummar
     hot.set(frame, tally);
   }
 
-  const restarts = sorted.filter((r) => r.ev === "server.start" && r !== firstStart)
-    .map((start) => ({ at: start.at, how: describeExit(exitBefore(exits, t(start)), residualAt(exits, t(start))) }));
+  const restarts = [...restartMap].map(([start, verdict]) => ({ at: start.at, how: verdict.how }));
 
   const errorTally = new Map<string, { src: string; name: string; count: number; last: string }>();
   for (const error of sorted.filter((r) => r.ev === "server.error" || r.ev === "page.error" || r.ev === "page.crash")) {

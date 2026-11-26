@@ -91,12 +91,13 @@ function append(record: RuntimeLogRecord): void {
  * 记一条。`fields` 只放数字、枚举、已经脱敏的短串 —— 调用点负责，这里不再猜。
  * `src` 缺省是服务端自己；页面报上来的由路由传 `web`。
  */
-export function runtimeLog(ev: string, fields: Record<string, unknown> = {}, src: RuntimeLogSource = "server"): void {
+export function runtimeLog(ev: string, fields: Record<string, unknown> = {}, src: RuntimeLogSource = "server", agoMs = 0): void {
   const now = Date.now();
   const dropped = admit(`${src}:${ev}`, now);
   if (dropped === null) return;
   if (dropped > 0) append({ at: new Date(now).toISOString(), src, pid: process.pid, ev: "log.dropped", of: ev, count: dropped });
-  append({ at: new Date(now).toISOString(), src, pid: process.pid, ev, ...fields });
+  // 页面攒一批再发，`agoMs` 是事件发生在收到之前多久：记发生的时刻，跨来源对时间线才对得上。
+  append({ at: new Date(now - agoMs).toISOString(), src, pid: process.pid, ev, ...fields });
 }
 
 /** 测试与导出用：换一个目录（同一进程里只该在写第一条之前调）。 */

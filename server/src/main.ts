@@ -25,7 +25,7 @@ import { runtimeAgentChannel } from "./runtime-agent-channels.js";
 import { markRuntimeAdoption } from "./runtime-recovery.js";
 import { mountReviewVideos } from "./review-videos.js";
 import { INSTANCE_ID, instanceBinding } from "./instance-binding.js";
-import { liveLockToken, previousResidualLockPublic } from "./singleton.js";
+import { liveLockToken, previousResidualLockPublic, previousResidualRunId } from "./singleton.js";
 import { runIdOfToken } from "./exit-ledger.js";
 import { runtimeLogHttp } from "./runtime-log/http.js";
 import { startRuntimeWatch } from "./runtime-log/watch.js";
@@ -628,7 +628,7 @@ activeServer = serve({ fetch: app.fetch, port, ...(LOCAL_ONLY ? { hostname: LOCA
   logServerStart({
     instance: INSTANCE_ID, runId: token ? runIdOfToken(token) : null, port: info.port,
     desktop: DESKTOP_APP, localOnly: LOCAL_ONLY, preview: IS_PREVIEW_INSTANCE,
-    previous: residual && { evidence: residual.evidence, silentMs: residual.silentMs,
+    previous: residual && { run: previousResidualRunId(), evidence: residual.evidence, silentMs: residual.silentMs,
       kind: residual.observedIntent?.kind, signal: residual.observedIntent?.signal },
   });
   startRuntimeWatch();
