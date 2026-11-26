@@ -37,7 +37,10 @@ struct RestartImpact: Decodable {
   let shutdown: Shutdown?
 
   /// 同一个任务两类都占时只算一次（interrupted 优先：它说的后果更重）。
-  var disrupted: [ImpactItem] {
+  var disrupted: [ImpactItem] { disrupted(includingShutdown: true) }
+
+  /// `includingShutdown` 为假：随服务关掉的资源不算（装更新另有自己的资源闸；冻结快照里却总带着它们）。
+  func disrupted(includingShutdown: Bool) -> [ImpactItem] {
     var seen = Set<String>()
     var out: [ImpactItem] = []
     for item in interrupted where seen.insert(item.id).inserted {
@@ -46,7 +49,7 @@ struct RestartImpact: Decodable {
     for item in mcpDisrupted where seen.insert(item.id).inserted {
       out.append((item.id, item.title, "手里握着 Navi MCP，服务重启那会儿交卷可能失败"))
     }
-    for resource in shutdown?.resources ?? [] {
+    for resource in includingShutdown ? shutdown?.resources ?? [] : [] {
       out.append(("\(resource.kind):\(resource.id)", resource.label ?? resource.kind, "会随服务一起关掉"))
     }
     return out
@@ -114,24 +117,29 @@ enum RestartImpactProbe {
     assessDetailedSync(preservingRuntime: preservingRuntime).verdict
   }
 
+  /// 认不认「重启前冻结」：只有拿到一份看得懂的 restart-impact 答复才分得出前两档。没答上来、答不像 navi
+  /// 是第三档 —— 那不是「老服务不认」，不能拿它当退回老路的理由。
+  enum FreezeSupport { case supported, unsupported, undetermined }
+
   /// 同上，再带上冻结那一步要的两样：认的是哪一份（实例号）、它认不认「重启前冻结」。
   struct Assessment {
     let verdict: ImpactVerdict
     let instance: String?
-    let freezable: Bool
+    let freezeSupport: FreezeSupport
+    var freezable: Bool { freezeSupport == .supported }
   }
 
   /// `includingShutdown`：连随服务一起关掉的资源也算进来（「允许其他设备访问」那条；装更新另有自己的资源闸）。
   static func assessDetailedSync(preservingRuntime: Bool = false, includingShutdown: Bool = false) -> Assessment {
-    var freezable = false
+    var support = FreezeSupport.undetermined
     var instanceID: String?
     let verdict = assessVerdict(preservingRuntime: preservingRuntime, includingShutdown: includingShutdown,
-      instanceID: &instanceID, freezable: &freezable)
-    return Assessment(verdict: verdict, instance: instanceID, freezable: freezable)
+      instanceID: &instanceID, freezable: &support)
+    return Assessment(verdict: verdict, instance: instanceID, freezeSupport: support)
   }
 
   private static func assessVerdict(preservingRuntime: Bool, includingShutdown: Bool, instanceID: inout String?,
-                                    freezable: inout Bool) -> ImpactVerdict {
+                                    freezable: inout FreezeSupport) -> ImpactVerdict {
     guard NaviConfig.isLocal else { return .clear(.remote) }
     switch NaviHealth.probeSync() {
     case .down:
@@ -155,12 +163,12 @@ enum RestartImpactProbe {
   /// 带着认过的那一份的实例号问：问到之前端口换了人，新来的那份不答（server/src/instance-binding.ts），
   /// 闸拿不到别人的名单。
   private static func askImpact(of target: ServiceTarget, instance: String?, preservingRuntime: Bool, recovery: Bool = false) -> ImpactVerdict {
-    var freezable = false
-    return askImpact(of: target, instance: instance, preservingRuntime: preservingRuntime, recovery: recovery, freezable: &freezable)
+    var support = FreezeSupport.undetermined
+    return askImpact(of: target, instance: instance, preservingRuntime: preservingRuntime, recovery: recovery, freezable: &support)
   }
 
   private static func askImpact(of target: ServiceTarget, instance: String?, preservingRuntime: Bool, recovery: Bool = false,
-                                includingShutdown: Bool = false, freezable: inout Bool) -> ImpactVerdict {
+                                includingShutdown: Bool = false, freezable: inout FreezeSupport) -> ImpactVerdict {
     var url = URLComponents(url: NaviConfig.baseURL.appendingPathComponent("api/restart-impact"), resolvingAgainstBaseURL: false)!
     if includingShutdown { url.queryItems = [URLQueryItem(name: "shutdown", value: "1")] }
     var nextSchema: String?
@@ -177,7 +185,7 @@ enum RestartImpactProbe {
     if let instance { request.setValue(instance, forHTTPHeaderField: "x-ash-instance") }
     let done = DispatchSemaphore(value: 0)
     var verdict = ImpactVerdict.unknown("没有答复")
-    var understoodFreeze = false
+    var understoodFreeze = FreezeSupport.undetermined
     URLSession.shared.dataTask(with: request) { data, response, error in
       defer { done.signal() }
       if let error { verdict = .unknown(error.localizedDescription); return }
@@ -187,7 +195,7 @@ enum RestartImpactProbe {
         verdict = .unknown("答复看不懂（服务端版本太旧？）")
         return
       }
-      understoodFreeze = impact.restartFreeze == RestartFreeze.protocolVersion
+      understoodFreeze = impact.restartFreeze == RestartFreeze.protocolVersion ? .supported : .unsupported
       if let nextSchema, impact.runtimeHandover?.target?.protocol != 1 || impact.runtimeHandover?.target?.schema != nextSchema {
         verdict = .unknown("旧服务未核对新版兼容性，未切换服务")
         return
@@ -285,18 +293,26 @@ enum RestartFreeze {
   enum Outcome {
     /// 冻住了；verdict 是冻结之下的那份，停下之前不会再变多。
     case frozen(Lease, ImpactVerdict)
-    /// 服务不认这道关口（老版本），或者端口上不是自己那份：verdict 是即时再评估的。
-    case unfrozen(ImpactVerdict, freezable: Bool)
+    /// 确认了不用冻：服务明确答了不认这道关口（老版本），或者端口上不是自己那份。verdict 是即时再评估的。
+    case unfrozen(ImpactVerdict)
+    /// 分不出认不认（服务一时没答上来、答的不像 navi）、或者冻结那一下认不出是刚才那份：不是「老服务」，
+    /// 不能退回不冻的老路 —— 调用方当成「确认不了」，重新问或者不停。
+    case undetermined(String)
     /// 认这道关口却冻不了（另一处正在准备重启、没有权限、没答上来）：不停。
     case refused(String)
   }
 
-  /// 只在后台队列上调。
-  static func acquire() -> Outcome {
-    let now = RestartImpactProbe.assessDetailedSync(includingShutdown: true)
-    guard case .ours(let pid) = now.verdict.target, now.freezable, let instance = now.instance else {
-      return .unfrozen(now.verdict, freezable: now.freezable)
+  /// 只在后台队列上调。`includingShutdown` 要跟用户同意过的那份口径一致（见 RestartImpact.disrupted）。
+  static func acquire(includingShutdown: Bool = true) -> Outcome {
+    let now = RestartImpactProbe.assessDetailedSync(includingShutdown: includingShutdown)
+    if case .unknown(let why) = now.verdict { return .undetermined(why) }
+    guard case .ours(let pid) = now.verdict.target else { return .unfrozen(now.verdict) }
+    switch now.freezeSupport {
+    case .unsupported: return .unfrozen(now.verdict)
+    case .undetermined: return .undetermined("认不出这份服务认不认重启前冻结")
+    case .supported: break
     }
+    guard let instance = now.instance else { return .undetermined("服务没报实例号") }
     let reply = send(instance: instance, body: [:])
     guard let json = reply.json, json["protocol"] as? Int == protocolVersion else {
       return .refused(reply.status == 0 ? "没有答复" : "服务端回 \(reply.status)")
@@ -310,34 +326,50 @@ enum RestartFreeze {
           let body = json["impact"], let data = try? JSONSerialization.data(withJSONObject: body),
           let impact = try? JSONDecoder().decode(RestartImpact.self, from: data) else {
       release(lease)
-      return .unfrozen(.unknown("冻结时端口上换了一份服务，或者快照看不懂"), freezable: true)
+      return .undetermined("冻结时端口上换了一份服务，或者快照看不懂")
     }
-    return .frozen(lease, verdict(of: impact, pid: pid))
+    return .frozen(lease, verdict(of: impact, pid: pid, includingShutdown: includingShutdown))
   }
 
-  private static func verdict(of impact: RestartImpact, pid: Int) -> ImpactVerdict {
-    let items = impact.disrupted
+  private static func verdict(of impact: RestartImpact, pid: Int, includingShutdown: Bool) -> ImpactVerdict {
+    let items = impact.disrupted(includingShutdown: includingShutdown)
     return items.isEmpty ? .clear(.ours(pid: pid)) : .disrupts(.ours(pid: pid), items)
   }
 
-  /// 下刀前续一次期：冻结还在、此刻的名单也没比 `agreed`（用户点头的那份）多出谁，就是 nil；否则交回原因。
-  /// 名单会多是因为已经在跑的 agent 中途拉起 navi MCP 这件事服务端冻不住（见 server/src/restart-freeze.ts）。
-  static func renew(_ lease: Lease, agreed: ImpactVerdict) -> String? {
+  enum Check {
+    case valid
+    /// 此刻的名单比用户同意过的多出了谁：带着此刻那份（拿去重新问）和一句原因。
+    case widened(ImpactVerdict, String)
+    /// 冻结失效了、续期没答上来、此刻的名单没给出来。
+    case invalid(String)
+  }
+
+  /// 下刀前续一次期，顺带拿此刻的名单跟 `agreed`（用户点头的那份）比。名单会多是因为已经在跑的 agent 中途拉起
+  /// navi MCP 这件事服务端冻不住（见 server/src/restart-freeze.ts）。
+  static func check(_ lease: Lease, agreed: ImpactVerdict, includingShutdown: Bool = true) -> Check {
     let reply = send(instance: lease.instance, body: ["renew": lease.token])
     guard reply.status == 200, reply.json?["valid"] as? Bool == true else {
-      return reply.status == 200 ? "冻结已经失效（到期了，或者被放掉了）" : "续期没有答复（服务端回 \(reply.status)）"
+      return .invalid(reply.status == 200 ? "冻结已经失效（到期了，或者被放掉了）" : "续期没有答复（服务端回 \(reply.status)）")
     }
-    guard case .ours(let pid) = agreed.target else { return nil }
+    guard case .ours(let pid) = agreed.target else { return .valid }
     guard let body = reply.json?["impact"], let data = try? JSONSerialization.data(withJSONObject: body),
           let impact = try? JSONDecoder().decode(RestartImpact.self, from: data) else {
-      return "续期答复里没有此刻的影响名单，核对不了"
+      return .invalid("续期答复里没有此刻的影响名单，核对不了")
     }
-    let now = verdict(of: impact, pid: pid)
-    guard agreed.widened(to: now), case .disrupts(_, let items) = now else { return nil }
+    let now = verdict(of: impact, pid: pid, includingShutdown: includingShutdown)
+    guard agreed.widened(to: now), case .disrupts(_, let items) = now else { return .valid }
     var known = Set<String>()
     if case .disrupts(_, let had) = agreed { for item in had { known.insert(item.id ?? item.title) } }
     let extra = items.filter { !known.contains($0.id ?? $0.title) }.map(\.title)
-    return "确认之后又多了会被打断的：\(extra.prefix(5).joined(separator: "、"))\(extra.count > 5 ? " 等 \(extra.count) 项" : "")"
+    return .widened(now, "确认之后又多了会被打断的：\(extra.prefix(5).joined(separator: "、"))\(extra.count > 5 ? " 等 \(extra.count) 项" : "")")
+  }
+
+  /// 同 `check`，只要一句原因：nil = 可以停。
+  static func renew(_ lease: Lease, agreed: ImpactVerdict) -> String? {
+    switch check(lease, agreed: agreed) {
+    case .valid: return nil
+    case .widened(_, let why), .invalid(let why): return why
+    }
   }
 
   static func release(_ lease: Lease) {
