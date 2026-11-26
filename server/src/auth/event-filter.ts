@@ -91,6 +91,8 @@ export function makeEventFilter(actor: Actor): {
       if (ev.type === "project.updated") return !!visible?.has(ev.projectId);
       // 「开着的任务都重取一下动作」：不带任何任务的信息，谁都可以收。
       if (ev.type === "task.actions.stale.all") return true;
+      // 「服务正在准备重启」：说的是整份服务，不带任何任务。
+      if (ev.type === "service.freeze") return true;
       const taskId = taskIdOf(ev);
       // 认不出归属的事件一律**不推**。宁可漏一条无害的广播,也好过默认放行 ——
       // 将来新增一种事件时,忘了在这里登记的后果是「少显示了点东西」而不是越权。

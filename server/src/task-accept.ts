@@ -30,7 +30,7 @@ import { resolveWorktreeBranchName } from "./git.js";
 import type { WorkflowAdvanceOptions } from "./workflow-advance.js";
 import { acceptingBusyText, beginAccepting, endAccepting } from "./acceptance-lock.js";
 import { holdTeamForAcceptance } from "./team-acceptance-hold.js";
-import { RuntimeHandoverBlockedError } from "./runtime-handover-state.js";
+import { ServiceFrozenError } from "./runtime-handover-state.js";
 import { withReviewAuthority, type ReviewAuthority } from "./review-ownership.js";
 import { unexecutedVerification } from "./task-accept-verification.js";
 import { acceptancePreflight } from "./task-accept-preflight.js";
@@ -649,7 +649,7 @@ export async function acceptTask(
       result = await finishAcceptedTail(result, by, advanceOpts, originalFinalizer);
     }
   } catch (error) {
-    if (error instanceof RuntimeHandoverBlockedError) {
+    if (error instanceof ServiceFrozenError) {
       return { accepted: false, httpStatus: 409, taskId, reason: "runtime_handover", error: error.message };
     }
     await discardPendingAcceptanceGate(taskId, error);

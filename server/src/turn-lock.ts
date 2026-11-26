@@ -10,7 +10,7 @@
 // 依赖是单向的:这个文件不 import runs 的运行时(只借一个类型),所以 `claimReconcileTurn`
 // 那条要问「有没有句柄在册」的,住在 runs.ts 里。
 import type { StopSettle } from "./runs.js";
-import { afterRuntimeHandover, RuntimeHandoverBlockedError, runtimeHandoverActive } from "./runtime-handover-state.js";
+import { afterServiceFreeze, ServiceFrozenError, serviceFrozen, serviceFrozenText } from "./runtime-handover-state.js";
 import type { WindDown } from "./turn-wind-down.js";
 
 // ── 单飞锁与「这一轮跑完之后」────────────────────────────────────────────────
@@ -203,10 +203,10 @@ export function takeStartFreezeDetail(taskId: string): StartFreeze | null {
  * 归属检查（report_stage）读它，而不是查 sessions 表猜（session 行的 endedAt 语义
  * 既不代表进程活着、也不代表回合归属，审查实测两个方向都错过）。
  */
-export type TurnClaimResult = { kind: "claimed"; owner: TurnIdentity } | { kind: "handover" | "busy" };
+export type TurnClaimResult = { kind: "claimed"; owner: TurnIdentity } | { kind: "frozen" | "busy" };
 
 export function tryClaimOwnTurn(taskId: string, role = "single", review: TurnReview | null = null): TurnClaimResult {
-  if (runtimeHandoverActive()) return { kind: "handover" };
+  if (serviceFrozen()) return { kind: "frozen" };
   if (turns.has(taskId)) return { kind: "busy" };
   const identity: TurnIdentity = { role, review, token: null, agent: null, claimedAt: Date.now(), seq: nextTurnSeq++ };
   turns.set(taskId, identity);
@@ -221,8 +221,8 @@ export function claimOwnTurn(taskId: string, role = "single", review: TurnReview
 export async function claimOwnTurnWhenReady(taskId: string, role = "single", review: TurnReview | null = null): Promise<TurnIdentity | null> {
   for (;;) {
     const result = tryClaimOwnTurn(taskId, role, review);
-    if (result.kind !== "handover") return result.kind === "claimed" ? result.owner : null;
-    await new Promise<void>((resolve) => afterRuntimeHandover(resolve));
+    if (result.kind !== "frozen") return result.kind === "claimed" ? result.owner : null;
+    await new Promise<void>((resolve) => afterServiceFreeze(resolve));
   }
 }
 
@@ -405,13 +405,13 @@ export function claimAcceptanceHold(taskIds: string[]): { held: ReadonlySet<stri
 }
 
 function claimIdleTurns(taskIds: string[], role: string): Array<{ taskId: string; owner: TurnIdentity }> {
-  if (runtimeHandoverActive()) throw new RuntimeHandoverBlockedError();
+  if (serviceFrozen()) throw new ServiceFrozenError();
   const claimed: Array<{ taskId: string; owner: TurnIdentity }> = [];
   for (const taskId of new Set(taskIds)) {
     const result = tryClaimOwnTurn(taskId, role);
-    if (result.kind === "handover") {
+    if (result.kind === "frozen") {
       for (const held of claimed) endOwnTurn(held.taskId, held.owner, false);
-      throw new RuntimeHandoverBlockedError();
+      throw new ServiceFrozenError();
     }
     if (result.kind === "claimed") claimed.push({ taskId, owner: result.owner });
   }
@@ -425,7 +425,7 @@ export function heldForAcceptance(taskId: string): boolean {
 
 /** 「回合占着」对人怎么说:团队验收占着的说清是在验收,别让人以为有一轮在跑、去点人工放开。 */
 export function turnBusyText(taskId: string, then: string): string {
-  if (runtimeHandoverActive()) return `正在切换新版服务，完成后再${then}`;
+  if (serviceFrozen()) return `${serviceFrozenText()}，完成后再${then}`;
   return heldForAcceptance(taskId) ? `所属团队正在验收（含发布尾段），结束后再${then}` : `任务回合正在进行，结束后再${then}`;
 }
 
@@ -611,9 +611,9 @@ export function waitForTurnIdle(taskId: string, timeoutMs: number): Promise<bool
  * 排着的交接一并吃掉。空着那一侧已经当场执行完了,取消是个空操作(调了也不抛)。
  */
 export function whenTurnIdle(taskId: string, fn: () => void): () => void {
-  if (runtimeHandoverActive()) {
+  if (serviceFrozen()) {
     let cancelIdle: (() => void) | undefined;
-    const cancelHandover = afterRuntimeHandover(() => { cancelIdle = whenTurnIdle(taskId, fn); });
+    const cancelHandover = afterServiceFreeze(() => { cancelIdle = whenTurnIdle(taskId, fn); });
     return () => { cancelHandover(); cancelIdle?.(); };
   }
   if (!turns.has(taskId)) {
@@ -622,7 +622,7 @@ export function whenTurnIdle(taskId: string, fn: () => void): () => void {
   }
   let cancelTransferred = () => {};
   const queued = () => {
-    if (runtimeHandoverActive()) cancelTransferred = whenTurnIdle(taskId, fn);
+    if (serviceFrozen()) cancelTransferred = whenTurnIdle(taskId, fn);
     else fn();
   };
   const waiting = afterTurn.get(taskId);

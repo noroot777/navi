@@ -7,8 +7,8 @@ import type { ShutdownResource } from "./shutdown-resources.js";
 export async function terminalShutdownResources(
   sessions: Iterable<TerminalSession>, creations: Iterable<TerminalCreation>,
 ): Promise<ShutdownResource[]> {
-  const resources: ShutdownResource[] = [...creations].map((creation, index) => ({
-    kind: "terminal-start", id: `${creation.projectId}:${index}`, label: "正在创建终端", projectId: creation.projectId,
+  const resources: ShutdownResource[] = [...creations].map((creation) => ({
+    kind: "terminal-start", id: creation.id, label: "正在创建终端", projectId: creation.projectId,
   }));
   for (const session of sessions) {
     if (handedOver(session)) continue;

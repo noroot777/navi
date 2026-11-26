@@ -3,6 +3,7 @@
 // 「打断与投递必须是同一个动作」,它们的理由都在下面那段注释里,跟事件消费循环放一起只会
 // 被淹掉(而且 session-consumer.ts 已经顶到 700 行上限)。
 import { heldForAcceptance } from "../runs.js";
+import { waitServiceThaw } from "../runtime-handover-state.js";
 import { bindTurnSource, nextTurnStart } from "../session-turns.js";
 import { holdTurn } from "./lead-turns.js";
 import type { Lead } from "./session-types.js";
@@ -36,6 +37,9 @@ export type LeadDelivery = { sent: boolean; interrupted: boolean; at: string | n
 export async function sendToLead(lead: Lead, text: string, opts: { steer?: boolean; monitorWake?: boolean } = {}): Promise<LeadDelivery> {
   const delivery = (lead.sending ?? Promise.resolve()).then(async (): Promise<LeadDelivery> => {
     try {
+      // 服务冻着（准备重启，见 restart-freeze.ts）：送进去就是一个新回合，不在刚给出去的影响快照里。
+      // 等它解冻再送 —— 链本来就串行，后面的消息跟着等，顺序不乱；等完到写 stdin 之间没有 await。
+      await waitServiceThaw();
       // 团队正在验收(team-acceptance-hold.ts):送进去就是一个新回合,改的正是验收要合的那份工作目录。
       // 挡在这儿而不是入口:这是写 stdin 之前最后一个同步点,入口查完到这里隔着排队和 await。没收下照常按
       // 「没送出去」交回去(用户的话回托盘、执行者汇报进待送队列),验收结束补送。
