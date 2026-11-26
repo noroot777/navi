@@ -16,7 +16,7 @@ import { AppCrash, ErrorBoundary } from "./components/ErrorBoundary.tsx";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <ErrorBoundary fallback={(error) => <AppCrash error={error} />}>
+    <ErrorBoundary root fallback={(error) => <AppCrash error={error} />}>
       <App />
     </ErrorBoundary>
   </StrictMode>,

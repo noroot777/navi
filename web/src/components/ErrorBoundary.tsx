@@ -1,10 +1,11 @@
 import { Component, useEffect, type ReactNode } from "react";
 import { AppStateScreen } from "./AppStateScreen.tsx";
-import { reportPageCrash, reportPageReload } from "../lib/runtimeLog.ts";
+import { reportBoundaryError, reportPageCrash, reportPageReload } from "../lib/runtimeLog.ts";
 
 // React 只有类组件能当错误边界。渲染里抛出的错误一路没人接,React 会卸载整棵树,页面只剩
 // body 底色、连一句报错都没有 —— 懒加载分块拉取失败就是这样把整个工作台弄没的。
-type Props = { fallback: (error: Error) => ReactNode; children: ReactNode };
+// `root`：根上那一个（接住了就是整页换成错误屏）；其余是页面里某一块的兜底，整页还在。
+type Props = { fallback: (error: Error) => ReactNode; children: ReactNode; root?: boolean };
 type State = { error: Error | null };
 
 export class ErrorBoundary extends Component<Props, State> {
@@ -15,7 +16,8 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: unknown) {
-    reportPageCrash(error);
+    if (this.props.root) reportPageCrash(error);
+    else reportBoundaryError(error);
   }
 
   render() {

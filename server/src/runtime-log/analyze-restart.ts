@@ -1,22 +1,25 @@
 // 每一次服务启动，认出它的上一轮服务是怎么没的。
 //
-// **按身份对，不按时间凑**（第 1 轮审查：先正常重启一次、几分钟后服务突然消失，旧版按「十分钟内最近
-// 一条退出」去凑，把后一次的异常消失说成了有人主动停的）。能证明身份的线索有两条：
-//   · 这次启动自己发现了上一轮的残留锁（`server.start.previous`，锁里带着上一轮的 runId）——
-//     上一轮没收完尾，账本里有没有它的退出意向决定是「被强杀/崩溃」还是「进了退出流程没走完」；
-//   · 同一份日志里的前一条 `server.start` 带着上一轮的 runId，拿它去退出账本里找那一轮自己写的记录。
-// 两条都没有（日志是这次窗口截断的、或者服务是加日志之前起的），才退回「这次启动之前最近的一条退出」，
-// 而且明说是**按时间推测**的。一条退出也找不到就当全新启动，不算重启。
+// 分两步，各管各的：
+//   1. **上一轮是谁**（身份）：这次启动在锁里认出的上一轮（`server.start.previous.run`），或者同一份日志里的
+//      前一条 `server.start` 的 runId。两条都没有，才退回「这次启动之前最近的一条退出记录」，明说是推测。
+//   2. **它是怎么没的**（证据）：只有记录能说到的那一步才说。按证据强弱：
+//      · 残留——这次启动看见上一轮的锁还在（`previous`），或者退出账本给那一轮记了残留：它没收完尾就没了。
+//        同时还有退出意向（收到了信号、开始退出）就是「进了退出流程没走完」，残留压过意向，不说成正常停；
+//      · 那一轮自己写下的退出记录：收到哪个信号 / 退出码多少；
+//      · 什么都没有：**就说不知道**。身份只能证明「是哪一轮」，证明不了它删过锁、走过退出流程——账本被清理、
+//        锁被截坏、记录超出读取范围，都会是这个样子（第 2 轮审查实测：SIGKILL 之后截坏锁，旧版说成了正常删锁）。
+// 一条上一轮的线索都没有就不算重启，但也不说成「全新启动」：可能只是更早的日志已经不在了。
 import type { RuntimeLogRecord } from "@navi/shared/runtime-log";
 import type { ExitSummary } from "./load.js";
 
 export type RestartVerdict = {
-  /** 上一轮停下的原因（一句话）。 */
+  /** 上一轮停下的原因（一句话），按证据说到哪一步。 */
   how: string;
-  /** 是按身份对上的（true），还是按时间推测的（false）。 */
-  linked: boolean;
-  /** 异常消失（没收完尾）。 */
-  abnormal: boolean;
+  /** 上一轮是怎么认出来的：锁里 / 日志里的身份、按时间推测、没有任何线索。 */
+  basis: "identity" | "time" | "none";
+  /** 记录能证明的结局；`unknown` = 没有记录能说明。 */
+  ending: "signal" | "exit" | "unfinished" | "vanished" | "unknown";
 };
 
 const t = (record: { at: string }) => Date.parse(record.at);
@@ -24,55 +27,81 @@ const secs = (ms: number) => `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} 秒`;
 const GUESS_WINDOW_MS = 86_400_000;
 
 type Previous = { run?: string | null; evidence?: string; silentMs?: number | null; kind?: string; signal?: string };
+type Ending = Omit<RestartVerdict, "basis">;
 
-function describeResidual(previous: Previous): string {
-  const silent = previous.silentMs ? `，最后一次心跳之后静默 ${secs(Number(previous.silentMs))}` : "";
-  if (previous.evidence === "exit_intent") {
-    const intent = previous.kind === "signal" ? `收到 ${previous.signal ?? "信号"}` : "开始退出";
-    return `上一份服务${intent}、进了退出流程，但没收完尾（锁还留着）${silent}——收尾途中被强杀，或者数据目录写不进去`;
+function unfinished(intent: { kind?: string; signal?: string } | null, silentMs: unknown): Ending {
+  const silent = silentMs ? `，最后一次心跳之后静默 ${secs(Number(silentMs))}` : "";
+  if (intent) {
+    const what = intent.kind === "signal" ? `收到 ${intent.signal ?? "信号"}` : "开始退出";
+    return { how: `上一份服务${what}、进了退出流程，但没收完尾（锁还留着）${silent}——收尾途中被强杀，或者数据目录写不进去`, ending: "unfinished" };
   }
-  return `上一份服务没留下任何退出记录就没了${silent}——被强杀（kill -9）、系统内存不够被结束，或原生崩溃`;
+  return { how: `上一份服务没留下任何退出记录就没了${silent}——被强杀（kill -9）、系统内存不够被结束，或原生崩溃`, ending: "vanished" };
 }
 
-function describeExit(exit: ExitSummary): string {
+function finished(exit: ExitSummary): Ending {
   if (exit.kind === "signal") {
-    return `上一份服务收到 ${exit.signal} 退出（运行了 ${secs(Number(exit.uptimeMs ?? 0))}）——有人让它停的：升级、npm run restart、装更新或关机`;
+    return { how: `上一份服务收到 ${exit.signal} 退出（运行了 ${secs(Number(exit.uptimeMs ?? 0))}）——有人让它停的：升级、npm run restart、装更新或关机`, ending: "signal" };
   }
-  return `上一份服务自己退出了（退出码 ${exit.code ?? "?"}）`;
+  return { how: `上一份服务自己退出了（退出码 ${exit.code ?? "?"}）`, ending: "exit" };
 }
 
-/** 每条 `server.start` 对应的结论；全新启动（找不到任何上一轮）不在表里。 */
+/** 一条账本记录说明的结局。残留记录自己带着「当时看没看到退出意向」。 */
+function fromLedger(exit: ExitSummary, intent: ExitSummary | undefined): Ending {
+  if (exit.kind !== "residual") return finished(exit);
+  const observed = intent ?? (exit.evidence === "exit_intent" ? (exit.observedIntent as { kind?: string; signal?: string } | undefined) ?? {} : null);
+  return unfinished(observed ?? null, exit.silentMs);
+}
+
+const UNKNOWN: Ending = {
+  how: "上一份服务怎么停的没有留下记录：退出账本里没有它，锁也没留下认得出的残留（账本或锁文件被清理、截坏，"
+    + "或者那条记录超出了读取范围）——分不出是正常停的还是被强杀",
+  ending: "unknown",
+};
+
+/** 每条 `server.start` 对应的结论（一条不落，`basis: "none"` 的不算重启）。 */
 export function restartVerdicts(records: RuntimeLogRecord[], exits: ExitSummary[]): Map<RuntimeLogRecord, RestartVerdict> {
   const out = new Map<RuntimeLogRecord, RestartVerdict>();
   const starts = records.filter((record) => record.ev === "server.start" && record.src === "server");
-  const finished = exits.filter((exit) => exit.kind !== "residual");
   starts.forEach((start, index) => {
     const previous = start.previous && typeof start.previous === "object" ? (start.previous as Previous) : null;
+    const prior = starts[index - 1];
+    const prevRun = previous?.run ?? (typeof prior?.run === "string" ? (prior.run as string) : null);
+
+    // 这次启动自己看见了残留的锁：上一轮没收完尾，这是最直接的证据（锁里认不出是谁时身份也照样算——那就是上一个持锁的）。
     if (previous) {
-      out.set(start, { how: describeResidual(previous), linked: Boolean(previous.run), abnormal: true });
+      const intent = prevRun ? exits.find((exit) => exit.kind !== "residual" && exit.runId === prevRun) : undefined;
+      const sawIntent = previous.evidence === "exit_intent" ? { kind: previous.kind, signal: previous.signal } : intent ?? null;
+      out.set(start, { ...unfinished(sawIntent, previous.silentMs), basis: "identity" });
       return;
     }
-    const prior = starts[index - 1];
-    const prevRun = typeof prior?.run === "string" ? (prior.run as string) : null;
-    if (prior && prevRun) {
-      const exit = finished.find((candidate) => candidate.runId === prevRun);
-      // 账本里给那一轮记了残留（锁里的 runId，老记录没有 runId 时认进程号）：它是没收完尾就没了的。
-      const residual = exits.find((candidate) => candidate.kind === "residual"
-        && (candidate.runId ? candidate.runId === prevRun : candidate.pid === prior.pid && t(candidate) >= t(prior)));
-      out.set(start, exit
-        ? { how: describeExit(exit), linked: true, abnormal: false }
-        : residual
-          ? { how: describeResidual({ evidence: residual.evidence, silentMs: residual.silentMs }), linked: true, abnormal: true }
-          : { how: "上一份服务删掉了自己的锁（走过退出流程），但退出账本里没有它的记录", linked: true, abnormal: false });
+    if (prevRun) {
+      const mine = exits.filter((exit) => exit.runId
+        ? exit.runId === prevRun
+        // 老的残留记录没有 runId：认进程号，且得记在那一轮启动之后。
+        : exit.kind === "residual" && prior !== undefined && exit.pid === prior.pid && t(exit) >= t(prior));
+      const residual = mine.find((exit) => exit.kind === "residual");
+      const intent = mine.find((exit) => exit.kind !== "residual");
+      const ending = residual ? fromLedger(residual, intent) : intent ? finished(intent) : UNKNOWN;
+      out.set(start, { ...ending, basis: "identity" });
       return;
     }
     // 上一轮不在这份日志里：退回按时间找最近的一条，并且明说是推测。
     const at = t(start);
     let guess: ExitSummary | undefined;
-    for (const exit of finished) {
-      if (t(exit) <= at && at - t(exit) < GUESS_WINDOW_MS && exit.runId !== start.run) guess = exit;
+    for (const exit of exits) {
+      if (t(exit) <= at && at - t(exit) < GUESS_WINDOW_MS && exit.runId !== start.run && (!guess || t(exit) >= t(guess))) guess = exit;
     }
-    if (guess) out.set(start, { how: `（按时间推测）${describeExit(guess)}`, linked: false, abnormal: false });
+    if (guess) {
+      const intent = guess.kind === "residual" && guess.runId ? exits.find((exit) => exit.kind !== "residual" && exit.runId === guess!.runId) : undefined;
+      const ending = fromLedger(guess, intent);
+      out.set(start, { ...ending, how: `（按时间推测）${ending.how}`, basis: "time" });
+      return;
+    }
+    out.set(start, {
+      how: "查不到上一份服务的任何记录（日志从这里开始：更早的记录已经不在了，或者这是第一次启动）",
+      basis: "none",
+      ending: "unknown",
+    });
   });
   return out;
 }

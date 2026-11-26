@@ -17,6 +17,8 @@ const FLUSH_MS = 3000;
 const MAX_ERRORS = 10;
 const TAB_KEY = "navi.runtimeLog.tab";
 const BOOT_KEY = "navi.runtimeLog.lastBoot";
+/** 这个标签页上一次载入的标识：新载入的这一页报 `prev`，分析端拿它把「上一页怎么没的」和「这一页」对成同一次。 */
+const LOAD_KEY = "navi.runtimeLog.load";
 
 const pending: Pending[] = [];
 let timer: ReturnType<typeof setTimeout> | null = null;
@@ -27,11 +29,13 @@ const shell = /\b(?:Navi|Ash)Mac\//.test(navigator.userAgent) ? "mac" : /\bNaviW
 // 页面的代码位置按 origin 算相对路径（`assets/index-abc.js:1`）。
 const codeRoots = [location.origin];
 
+const randomId = () => Math.random().toString(36).slice(2, 10).padEnd(8, "0");
+
 function tabId(): string {
   try {
     const existing = sessionStorage.getItem(TAB_KEY);
     if (existing) return existing;
-    const created = Math.random().toString(36).slice(2, 10);
+    const created = randomId();
     sessionStorage.setItem(TAB_KEY, created);
     return created;
   } catch {
@@ -40,13 +44,15 @@ function tabId(): string {
 }
 
 const tab = tabId();
+/** 这一次载入：每次载入新起一个，这一页上报的每一条都带着它。 */
+const load = randomId();
 
 function send(events: Pending[], keepalive: boolean): void {
   if (!events.length) return;
   void fetch(apiPath("/runtime-log/events"), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ events: events.map(({ event, t }) => ({ ...event, tab, shell, ago: Math.max(0, Date.now() - t) })) }),
+    body: JSON.stringify({ events: events.map(({ event, t }) => ({ ...event, tab, load, shell, ago: Math.max(0, Date.now() - t) })) }),
     keepalive,
   }).catch(() => {
     /* 服务正好不在：这几条就丢了，日志本来就是尽力而为 */
@@ -70,7 +76,7 @@ function errorFields(error: unknown): Record<string, unknown> {
   return { name, msg: scrubErrorMessage(name, error.message), frames: scrubStack(error.stack, codeRoots) };
 }
 
-function reportError(ev: "page.error" | "page.crash", kind: "error" | "rejection", error: unknown): void {
+function reportError(ev: "page.error" | "page.crash", kind: "error" | "rejection" | "boundary", error: unknown): void {
   if (errorsSent >= MAX_ERRORS) return;
   const fields = errorFields(error);
   const key = `${ev}:${String(fields.name)}:${String((fields.frames as string[] | undefined)?.[0] ?? "")}`;
@@ -84,6 +90,11 @@ function reportError(ev: "page.error" | "page.crash", kind: "error" | "rejection
 export function reportPageCrash(error: unknown): void {
   reportError("page.crash", "error", error);
   flush();
+}
+
+/** 页面里某一块（终端、Git 工作台）的错误边界接住了：那一块换成「加载失败」，整页还在，不算整页崩溃。 */
+export function reportBoundaryError(error: unknown): void {
+  reportError("page.error", "boundary", error);
 }
 
 /** 页面要主动整页重载了：先把原因记下（keepalive 发出去），调用方随后 reload。 */
@@ -114,14 +125,17 @@ export function reportEventsConnection(connected: boolean): void {
 function boot(): void {
   const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
   let sincePrevMs: number | undefined;
+  let prev: string | undefined;
   try {
     const previous = Number(sessionStorage.getItem(BOOT_KEY));
     if (previous > 0) sincePrevMs = Date.now() - previous;
+    prev = sessionStorage.getItem(LOAD_KEY) ?? undefined;
     sessionStorage.setItem(BOOT_KEY, String(Date.now()));
+    sessionStorage.setItem(LOAD_KEY, load);
   } catch {
-    /* 拿不到存储就不报间隔 */
+    /* 拿不到存储就不报间隔和上一次载入 */
   }
-  queue({ ev: "page.boot", nav: navigation?.type, hidden: document.visibilityState === "hidden", sincePrevMs });
+  queue({ ev: "page.boot", nav: navigation?.type, hidden: document.visibilityState === "hidden", sincePrevMs, prev });
   window.addEventListener("error", (event) => reportError("page.error", "error", event.error));
   window.addEventListener("unhandledrejection", (event) => reportError("page.error", "rejection", event.reason));
   window.addEventListener("pagehide", () => {

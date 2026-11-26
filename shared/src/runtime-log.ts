@@ -6,10 +6,15 @@
 // 文件名、项目路径、URL 查询串，也没有任意的报错原文。做法是白名单：每个事件能带哪几个字段、
 // 每个字段是什么形状，都在下面写死；进不了白名单的东西一律丢掉，而不是「见到敏感的再补过滤」。
 //
-// 「白名单」指的是**取值本身**来自固定集合，不是「长得像安全的」：报错原文只输出下面那张固定模板表里的
-// 一句、错误名和错误码只认名单、路由只认服务端注册过的路由模板、页面报上来的栈帧位置要在磁盘上真有那个
-// 代码文件。第 1 轮审查实测过按形状认的版本会漏：原生 `JSON.parse` 报错把数据的字段名带在引号里，
-// 嵌套引号一错位就漏出来；`/tasks/abc123/page/token123/customer` 这样的动态段也长得像路由常量。
+// 「白名单」指的是**取值本身**来自固定集合或能核对出处，不是「长得像安全的」：
+//   · 报错原文只输出下面那张固定模板表里的一句；错误名、错误码、系统调用名、HTTP 方法只认名单；
+//   · 路由只认服务端注册过的路由模板；
+//   · 栈帧的位置要是磁盘上真有的 navi 代码文件，函数名要在它指向的那份代码文件里真的出现过
+//     （`verifyFrames`）——代码文件里没有的名字只能是运行时拼出来的，可能来自数据；
+//   · 页面生成的标识（标签页、这一次载入）服务端收下时换成摘要，页面塞什么都只剩一串散列。
+// 前两轮审查实测过按形状认的版本会漏：原生 `JSON.parse` 报错把数据的字段名带在引号里；
+// `/tasks/abc123/page/token123/customer` 这样的动态段长得像路由常量；`CustomerAcquisitionBudget` 长得
+// 像函数名、旁边的文件也真的存在；`ERR_CUSTOMER_ACQUISITION` 长得像 Node 的错误码。
 
 export type RuntimeLogSource = "server" | "web" | "mac" | "win";
 
@@ -46,7 +51,8 @@ export const WEB_RELOAD_REASONS = ["identity", "account", "remote-access", "erro
 
 const NAV_TYPES = ["navigate", "reload", "back_forward", "prerender"] as const;
 const SHELLS = ["mac", "win", "browser"] as const;
-const ERROR_KINDS = ["error", "rejection"] as const;
+/** `boundary`：页面里某一块的错误边界接住了（那一块换成了「加载失败」，整页还在）。 */
+const ERROR_KINDS = ["error", "rejection", "boundary"] as const;
 
 /**
  * 报错原文**一个字都不进日志**，只看它是不是下面哪一类引擎报错，是就记那一类的固定说法。引擎报错的原文
@@ -96,28 +102,108 @@ export function scrubErrorName(name: unknown): string | undefined {
   return ERROR_NAMES.has(name) ? name : "OtherError";
 }
 
-/** 错误码只认系统 / Node / SQLite 那几种常量（`ENOENT`、`ERR_STREAM_DESTROYED`、`SQLITE_BUSY`）和整数。 */
+// 错误码名单：POSIX/libuv 的 errno、Node 自己的 ERR_*（服务端会遇到的那些）、undici、SQLite 的主结果码。
+const ERRNO_CODES = new Set(("E2BIG EACCES EADDRINUSE EADDRNOTAVAIL EAFNOSUPPORT EAGAIN EAI_AGAIN EAI_FAIL EAI_NODATA EAI_NONAME "
+  + "EAI_SERVICE EALREADY EBADF EBUSY ECANCELED ECHARSET ECHILD ECONNABORTED ECONNREFUSED ECONNRESET EDEADLK EDESTADDRREQ "
+  + "EDOM EDQUOT EEXIST EFAULT EFBIG EHOSTDOWN EHOSTUNREACH EILSEQ EINPROGRESS EINTR EINVAL EIO EISCONN EISDIR ELOOP EMFILE "
+  + "EMLINK EMSGSIZE ENAMETOOLONG ENETDOWN ENETRESET ENETUNREACH ENFILE ENOBUFS ENODEV ENOENT ENOEXEC ENOMEM ENOSPC ENOSYS "
+  + "ENOTCONN ENOTDIR ENOTEMPTY ENOTSOCK ENOTSUP ENOTTY ENXIO EOF EOPNOTSUPP EOVERFLOW EPERM EPIPE EPROTO EPROTONOSUPPORT "
+  + "EPROTOTYPE ERANGE EROFS ESHUTDOWN ESPIPE ESRCH ESTALE ETIMEDOUT ETXTBSY EXDEV ABORT_ERR "
+  + "ERR_ASSERTION ERR_BUFFER_TOO_LARGE ERR_CHILD_PROCESS_IPC_REQUIRED ERR_CHILD_PROCESS_STDIO_MAXBUFFER ERR_FS_FILE_TOO_LARGE "
+  + "ERR_HTTP_HEADERS_SENT ERR_HTTP_INVALID_STATUS_CODE ERR_HTTP_REQUEST_TIMEOUT ERR_HTTP2_INVALID_SESSION ERR_HTTP2_STREAM_ERROR "
+  + "ERR_IMPORT_ATTRIBUTE_MISSING ERR_INSPECTOR_ALREADY_CONNECTED ERR_INSPECTOR_NOT_AVAILABLE ERR_INVALID_ARG_TYPE "
+  + "ERR_INVALID_ARG_VALUE ERR_INVALID_RETURN_VALUE ERR_INVALID_STATE ERR_INVALID_THIS ERR_INVALID_URL ERR_IPC_CHANNEL_CLOSED "
+  + "ERR_IPC_DISCONNECTED ERR_METHOD_NOT_IMPLEMENTED ERR_MODULE_NOT_FOUND ERR_MULTIPLE_CALLBACK ERR_OUT_OF_RANGE "
+  + "ERR_PACKAGE_PATH_NOT_EXPORTED ERR_REQUIRE_ESM ERR_SERVER_ALREADY_LISTEN ERR_SERVER_NOT_RUNNING ERR_SOCKET_CLOSED "
+  + "ERR_SOCKET_CONNECTION_TIMEOUT ERR_SQLITE_ERROR ERR_STREAM_ALREADY_FINISHED ERR_STREAM_CANNOT_PIPE ERR_STREAM_DESTROYED "
+  + "ERR_STREAM_PREMATURE_CLOSE ERR_STREAM_PUSH_AFTER_EOF ERR_STREAM_WRITE_AFTER_END ERR_STRING_TOO_LONG ERR_SYSTEM_ERROR "
+  + "ERR_TLS_CERT_ALTNAME_INVALID ERR_SSL_WRONG_VERSION_NUMBER ERR_UNHANDLED_ERROR ERR_UNHANDLED_REJECTION "
+  + "ERR_UNKNOWN_FILE_EXTENSION ERR_USE_AFTER_CLOSE ERR_WORKER_OUT_OF_MEMORY "
+  + "UND_ERR_ABORTED UND_ERR_BODY_TIMEOUT UND_ERR_CLOSED UND_ERR_CONNECT_TIMEOUT UND_ERR_HEADERS_TIMEOUT UND_ERR_SOCKET").split(" "));
+const SQLITE_CODES = ("ERROR INTERNAL PERM ABORT BUSY LOCKED NOMEM READONLY INTERRUPT IOERR CORRUPT NOTFOUND FULL CANTOPEN "
+  + "PROTOCOL EMPTY SCHEMA TOOBIG CONSTRAINT MISMATCH MISUSE NOLFS AUTH FORMAT RANGE NOTADB NOTICE WARNING").split(" ");
+
+/**
+ * 错误码：名单里的原样留；SQLite 的扩展码（`SQLITE_BUSY_SNAPSHOT`）记它的主结果码；整数照留；
+ * 别的字符串一律记成 `OTHER`——知道「有个码」，不知道是什么。
+ */
 export function scrubErrorCode(code: unknown): string | undefined {
   if (typeof code === "number" && Number.isInteger(code)) return String(code);
-  return typeof code === "string" && /^(?:E[A-Z0-9]{2,20}|ERR_[A-Z0-9_]{2,60}|SQLITE_[A-Z_]{2,40})$/.test(code) ? code : undefined;
+  if (typeof code !== "string" || !code) return undefined;
+  if (ERRNO_CODES.has(code)) return code;
+  const sqlite = SQLITE_CODES.find((primary) => code === `SQLITE_${primary}` || code.startsWith(`SQLITE_${primary}_`));
+  return sqlite ? `SQLITE_${sqlite}` : "OTHER";
+}
+
+const SYSCALLS = new Set(("open close read write stat lstat fstat access unlink rename mkdir mkdtemp rmdir rm scandir readdir "
+  + "opendir readlink realpath symlink link chmod chown utime futime fsync fdatasync ftruncate copyfile cp watch spawn "
+  + "spawnSync kill connect listen bind accept shutdown getaddrinfo getnameinfo uv_cwd uv_os_homedir uv_os_get_passwd").split(" "));
+
+/** 系统调用名只认名单。 */
+export function scrubSyscall(syscall: unknown): string | undefined {
+  return typeof syscall === "string" && SYSCALLS.has(syscall) ? syscall : undefined;
+}
+
+const HTTP_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
+
+/** HTTP 方法是请求方写的，名单外的记成 `OTHER`。 */
+export function scrubMethod(method: unknown): string {
+  return typeof method === "string" && HTTP_METHODS.has(method) ? method : "OTHER";
 }
 
 /**
- * 调用栈的一帧压成「函数名 位置」，位置只留代码里的相对位置：
+ * 调用栈的一帧压成「函数名 位置」的**候选**，位置只留代码里的相对位置：
  *   · navi 自己的代码 → 相对代码根的路径:行号（`server/dist/reattach.js:120`、`assets/index-abc.js:1`）
- *   · Node 内置 → `node:child_process`
+ *   · Node 内置 → `node:child_process`（内部模块一律 `node:internal`）
  *   · 依赖 → `node_modules/<包名>`
  *   · 其它（用户项目里的文件、eval、匿名）→ `<other>`
- * 函数名只认标识符形状，别的抹成 `<anon>`。
+ * 候选只过了形状，**写进日志之前必须过 `verifyFrames`**：函数名是不是那份代码里的、文件是不是真的在。
  */
 export function scrubFrame(functionName: string | undefined, url: string | undefined, line: number | undefined, codeRoots: readonly string[]): string {
   const fn = functionName && /^[\w$.<> \[\]-]{1,80}$/.test(functionName) ? functionName : "<anon>";
   return `${fn} ${scrubLocation(url, line, codeRoots)}`;
 }
 
+/**
+ * 核对栈帧出处：`file` 是帧上的位置去掉行号（`server/dist/x.js`、`assets/a.js`、`node:fs`、`node_modules/hono`），
+ * `name` 为 null 时只问「这个代码位置在不在」，否则问「这个名字是不是那份代码里写着的」。
+ * 服务端按磁盘上的代码回答（server/src/runtime-log/code-symbols.ts）。
+ */
+export type CodeSymbols = (file: string, name: string | null) => boolean;
+
+/**
+ * 栈帧候选过出处核对：位置不在 → `<anon> <other>`；名字（`a.b.c` 的每一段）有一段不在那份代码里 → 换成 `<anon>`。
+ * 这道核对管的是**名字的来源**：`{ [title]: () => {} }`、`Object.defineProperty(fn, "name", …)` 能把数据变成
+ * 函数名，但变不进代码文件里。
+ */
+export function verifyFrames(frames: unknown, symbols: CodeSymbols, limit = 8): string[] {
+  if (!Array.isArray(frames)) return [];
+  const kept: string[] = [];
+  for (const frame of frames.slice(0, limit)) {
+    if (typeof frame !== "string" || frame.length > 300) continue;
+    const split = frame.lastIndexOf(" ");
+    if (split <= 0) continue;
+    const location = frame.slice(split + 1);
+    if (location === "<native>" || location === "<other>") {
+      kept.push(`<anon> ${location}`);
+      continue;
+    }
+    const file = /^(.+?)(?::\d+)?$/.exec(location)![1]!;
+    if (!symbols(file, null)) {
+      kept.push("<anon> <other>");
+      continue;
+    }
+    const raw = frame.slice(0, split).replace(/^(?:async|new) /, "").replace(/ \[as [^\]]*\]$/, "");
+    const named = raw !== "<anon>" && raw.split(".").every((segment) =>
+      segment === "<anonymous>" || (/^[A-Za-z_$][\w$]{0,60}$/.test(segment) && symbols(file, segment)));
+    kept.push(`${named ? raw : "<anon>"} ${location}`);
+  }
+  return kept;
+}
+
 function scrubLocation(url: string | undefined, line: number | undefined, codeRoots: readonly string[]): string {
   if (!url) return "<native>";
-  if (url.startsWith("node:")) return url.split(/[?#]/)[0]!.slice(0, 60);
+  if (url.startsWith("node:")) return url.startsWith("node:internal/") ? "node:internal" : url.split(/[?#]/)[0]!.slice(0, 60);
   // 页面那一侧的代码根是 origin（`http://localhost:4317`），同源的脚本按 origin 之后那段算。
   for (const root of codeRoots) {
     if (/^https?:\/\//.test(root) && url.startsWith(`${root}/`)) {
@@ -185,32 +271,17 @@ function count(value: unknown, max = 86_400_000): number | undefined {
 }
 
 /**
- * 页面报上来的栈帧：位置要么是 `isCodeFile` 认得的代码文件（服务端拿磁盘上的 web 产物核对），要么换成
- * `<native>`/`<other>` 且函数名抹成 `<anon>`——不是原样留下。
- */
-function frames(value: unknown, isCodeFile: (rel: string) => boolean): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const kept: string[] = [];
-  for (const frame of value.slice(0, 8)) {
-    if (typeof frame !== "string") continue;
-    const match = /^([A-Za-z_$<][\w$.<>]{0,60}) (\S{1,200})$/.exec(frame);
-    if (!match) continue;
-    const [, fn, location] = match;
-    const file = /^([\w./-]+\.(?:js|mjs|ts|tsx)):\d+$/.exec(location!)?.[1];
-    // 函数名跟着位置走：位置核对成 navi 的代码文件，名字才是代码里的标识符；否则一并抹掉。
-    if (file && isCodeFile(file)) kept.push(`${fn} ${location}`);
-    else kept.push(`<anon> ${location === "<native>" ? "<native>" : "<other>"}`);
-  }
-  return kept;
-}
-
-/**
  * 页面报上来的一条，按事件名只留白名单字段。认不出的事件返回 null。
  * 这是**服务端**的那道闸：页面那一侧也会先压一遍，但不能指望它。
  */
 export function sanitizeWebEvent(
   input: unknown,
-  isCodeFile: (rel: string) => boolean = () => false,
+  { symbols, digest }: {
+    /** 页面代码的出处核对（只认 web 产物里的文件和名字）。 */
+    symbols: CodeSymbols;
+    /** 页面生成的标识换成摘要：页面塞什么都只剩散列，同一个标识换出来的还是同一串（拿来对身份）。 */
+    digest: (id: string) => string;
+  },
 ): Omit<RuntimeLogRecord, "at" | "src" | "pid"> | null {
   if (!input || typeof input !== "object") return null;
   const event = input as Record<string, unknown>;
@@ -218,7 +289,10 @@ export function sanitizeWebEvent(
   if (!ev) return null;
   const out: Record<string, unknown> = { ev };
   const set = (key: string, value: unknown) => { if (value !== undefined) out[key] = value; };
-  set("tab", typeof event.tab === "string" && /^[A-Za-z0-9]{4,16}$/.test(event.tab) ? event.tab : undefined);
+  const id = (value: unknown) => (typeof value === "string" && /^[A-Za-z0-9]{4,16}$/.test(value) ? digest(value) : undefined);
+  // tab：这个标签页；load：这一次载入（每次载入新起一个）。同一次载入的事件归同一次故障，不同载入不合并。
+  set("tab", id(event.tab));
+  set("load", id(event.load));
   set("shell", pick(event.shell, SHELLS));
   // 事件发生在发出之前多久（页面攒一批再发）：服务端拿它把时间拨回发生那一刻。
   set("ago", count(event.ago, 10 * 60_000));
@@ -227,6 +301,8 @@ export function sanitizeWebEvent(
       set("nav", pick(event.nav, NAV_TYPES));
       set("hidden", typeof event.hidden === "boolean" ? event.hidden : undefined);
       set("sincePrevMs", count(event.sincePrevMs));
+      // 同一个标签页上一次载入的 load：把「那一次重载 / 崩溃」和「接着载进来的这一次」对成同一次。
+      set("prev", id(event.prev));
       break;
     case "page.error":
     case "page.crash": {
@@ -234,7 +310,7 @@ export function sanitizeWebEvent(
       set("kind", pick(event.kind, ERROR_KINDS));
       set("name", name);
       set("msg", typeof event.msg === "string" && ERROR_TEMPLATE_TEXTS.has(event.msg) ? event.msg : undefined);
-      set("frames", frames(event.frames, isCodeFile));
+      set("frames", verifyFrames(event.frames, symbols));
       break;
     }
     case "page.reload":

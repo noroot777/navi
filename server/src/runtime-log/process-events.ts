@@ -3,22 +3,23 @@
 import { statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { totalmem, uptime as osUptime } from "node:os";
-import { scrubErrorCode, scrubErrorMessage, scrubErrorName, scrubStack } from "@navi/shared/runtime-log";
+import { scrubErrorCode, scrubErrorMessage, scrubErrorName, scrubStack, scrubSyscall, verifyFrames } from "@navi/shared/runtime-log";
 import { CODE_DIR } from "../paths.js";
+import { serverCodeSymbols } from "./code-symbols.js";
 import { runtimeLog } from "./journal.js";
 
-/** 报错只留名字、错误码、（引擎报错的）脱敏原文和栈上的代码位置。 */
+/** 报错只留名单里的名字 / 错误码 / 系统调用、报错类别的固定说法和核对过出处的栈帧。 */
 export function describeError(error: unknown): Record<string, unknown> {
   if (!(error instanceof Error)) return { name: typeof error };
   const name = scrubErrorName(error.name);
   const code = scrubErrorCode((error as NodeJS.ErrnoException).code);
-  const syscall = (error as NodeJS.ErrnoException).syscall;
+  const syscall = scrubSyscall((error as NodeJS.ErrnoException).syscall);
   return {
     name,
     ...(code ? { code } : {}),
-    ...(typeof syscall === "string" && /^[a-z_]{1,20}$/.test(syscall) ? { syscall } : {}),
+    ...(syscall ? { syscall } : {}),
     msg: scrubErrorMessage(name, error.message),
-    frames: scrubStack(error.stack, [CODE_DIR]),
+    frames: verifyFrames(scrubStack(error.stack, [CODE_DIR]), serverCodeSymbols),
   };
 }
 
@@ -26,9 +27,14 @@ export function logProcessError(kind: "uncaught" | "rejection", error: unknown):
   runtimeLog("server.error", { kind, ...describeError(error) });
 }
 
-/** 起不来：`stage` 是代码里写死的那句（"server initialization failed" 之类），不含数据。 */
+/** 起不来在哪一步：main.ts 里 exitAfterStartupFailure 的那几句。别的（端口冲突那句带端口号）记 `other`。 */
+const STARTUP_STAGES = new Set([
+  "unhandled rejection during startup", "uncaught exception during startup", "server initialization failed",
+  "agent channel gateway failed", "scheduler failed to start", "server listen failed",
+]);
+
 export function logStartupFailure(stage: string, error: unknown): void {
-  runtimeLog("server.startup_failed", { stage: stage.split("\n")[0]!.slice(0, 80), ...(error ? describeError(error) : {}) });
+  runtimeLog("server.startup_failed", { stage: STARTUP_STAGES.has(stage) ? stage : "other", ...(error ? describeError(error) : {}) });
 }
 
 /** 这份代码是哪一次构建的：入口文件的修改时间。分辨「重启前后是不是换了代码」用。 */

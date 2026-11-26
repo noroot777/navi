@@ -47,9 +47,9 @@ enum RuntimeLog {
       writes += 1
       if writes % 100 == 1, let size = (try? manager.attributesOfItem(atPath: fileURL.path))?[.size] as? UInt64, size > rotateBytes {
         // 只改名不重写，同 server 那一侧：别的 app 进程（另开的一份）可能正往同一个文件追加。
-        let previous = fileURL.appendingPathExtension("1")
-        try? manager.removeItem(at: previous)
-        try? manager.moveItem(at: fileURL, to: previous)
+        // rename(2) 一步把当前这份换成上一代（覆盖旧的上一代）；两份同时轮转时后到的那份找不到源文件、
+        // 直接失败，不会像「先删 .1 再挪」那样把对方刚轮转出来的上一代删掉。
+        _ = rename(fileURL.path, fileURL.appendingPathExtension("1").path)
       }
       // O_APPEND：定位到末尾和写入由内核一步做完。另开的一份 app 同时在写时，先 seek 再 write
       // 会让两边落在同一个偏移上、互相盖掉一截。

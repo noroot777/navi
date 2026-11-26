@@ -11,8 +11,9 @@
 //
 // 记的只是函数名和代码里的相对位置（@navi/shared/runtime-log 的 scrubFrame），不是任何数据。
 import { Session } from "node:inspector";
-import { scrubFrame } from "@navi/shared/runtime-log";
+import { scrubFrame, verifyFrames } from "@navi/shared/runtime-log";
 import { CODE_DIR } from "../paths.js";
+import { serverCodeSymbols } from "./code-symbols.js";
 import { runtimeLog } from "./journal.js";
 
 /** 卡顿超过这么久才武装采样器。 */
@@ -119,12 +120,14 @@ function summarize(profile: Profile, stopPerf: number, stall: StallWindow): void
   const fromUs = stall.startPerf * 1000 - offsetUs;
   const toUs = stall.endPerf * 1000 - offsetUs;
   const counts = new Map<string, { frames: string[]; count: number }>();
+  // 同一个节点在几百个样本里反复出现：每个节点只核对一次出处。
+  const verified = new Map<number, string>();
   let total = 0;
   let t = profile.startTime;
   for (let i = 0; i < samples.length; i += 1) {
     t += deltas[i] ?? 0;
     if (t < fromUs || t > toUs) continue;
-    const frames = stackOf(samples[i]!, nodes, parent);
+    const frames = stackOf(samples[i]!, nodes, parent, verified);
     const key = frames.join("\n");
     const entry = counts.get(key) ?? { frames, count: 0 };
     entry.count += 1;
@@ -140,7 +143,7 @@ function summarize(profile: Profile, stopPerf: number, stall: StallWindow): void
 }
 
 /** 叶子在前，最多 10 帧。 */
-function stackOf(id: number, nodes: Map<number, ProfileNode>, parent: Map<number, number>): string[] {
+function stackOf(id: number, nodes: Map<number, ProfileNode>, parent: Map<number, number>, verified: Map<number, string>): string[] {
   const frames: string[] = [];
   let current: number | undefined = id;
   while (current !== undefined && frames.length < 10) {
@@ -150,7 +153,12 @@ function stackOf(id: number, nodes: Map<number, ProfileNode>, parent: Map<number
     if (functionName === "(root)") break;
     const special = SPECIAL[functionName];
     if (special) return [special];
-    frames.push(scrubFrame(functionName || "<anon>", url || undefined, url ? lineNumber + 1 : undefined, [CODE_DIR]));
+    let frame = verified.get(current);
+    if (frame === undefined) {
+      frame = verifyFrames([scrubFrame(functionName || "<anon>", url || undefined, url ? lineNumber + 1 : undefined, [CODE_DIR])], serverCodeSymbols)[0]!;
+      verified.set(current, frame);
+    }
+    frames.push(frame);
     current = parent.get(current);
   }
   return frames;

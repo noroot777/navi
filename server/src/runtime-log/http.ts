@@ -4,7 +4,7 @@
 // 路径：模板来自代码里的注册表，任务号、文件名、查询串进不来。请求还没走到具体路由时（卡在前面的鉴权
 // 中间件里），拿到的是那一层中间件的模板（`/api/*`、`*`），同样是代码里的常量。
 import type { Context, MiddlewareHandler } from "hono";
-import { routePattern } from "@navi/shared/runtime-log";
+import { routePattern, scrubMethod } from "@navi/shared/runtime-log";
 import { runtimeLog } from "./journal.js";
 
 /** 超过这么久的请求记一条 `http.slow`（流式响应不算：它们本来就开着）。 */
@@ -27,7 +27,7 @@ function routeOf(context: Context): string {
 export function runtimeLogHttp(): MiddlewareHandler {
   return async (c, next) => {
     const id = ++seq;
-    const entry: Inflight = { context: c, method: c.req.method, start: performance.now() };
+    const entry: Inflight = { context: c, method: scrubMethod(c.req.method), start: performance.now() };
     inflight.set(id, entry);
     served += 1;
     try {

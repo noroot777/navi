@@ -1,38 +1,25 @@
 // 把服务端、页面、mac 壳三份运行日志对齐成一条时间线，找出每一次「窗口闪一下」是谁出了事。
 //
-// 「闪一下」在日志里的样子（锚点），**任何一种观察单独出现都算一次**，不靠另一来源补证据才成立
-// （第 1 轮审查：页面崩了、浏览器刷新了，旧版因为没有壳的事件就一次都不列）：
-//   · 壳：撤掉页面（`page.takedown`）、自己重载页面（`page.reload`，用户点菜单的不算）、网页进程被系统结束；
+// 「闪一下」在日志里的样子，**任何一种观察单独出现都算一次**，不靠另一来源补证据才成立：
+//   · 壳：撤掉页面（`page.takedown`）、重载页面（`page.reload`）、网页进程被系统结束；
 //   · 页面：崩到错误屏（`page.crash`）、主动整页重载（`page.reload`）、被整页刷新进来（`page.boot` nav=reload）；
-//   · 服务：一次**重启**（`server.start` 且认得出上一轮，见 analyze-restart.ts；全新启动不算）。
-// 相隔不到 15 秒的锚点算同一次。
+//   · 服务：一次**重启**（`server.start` 且认得出上一轮，见 analyze-restart.ts）。
+// 哪几条是同一次按身份认（analyze-occurrences.ts），不按时间挨得近不近。
 //
 // 原因先看这一次里**直接观察到的**东西，再拿别的来源去解释撤页：
-//   1. 服务重启（这一次里有 server.start / 壳报实例号变了）→ 上一轮怎么没的按身份认
+//   1. 服务重启（壳报的新实例进程号对上了 server.start，或者只有服务自己的重启）→ 上一轮怎么没的按证据说
 //   2. 网页进程被结束、页面崩了 —— 壳 / 页面自己看见的，不让旁边时间上碰巧的事盖掉
-//   3. 撤页：电脑刚睡醒 → 服务卡住（卡顿区间跟撤页重叠，带调用栈、CPU、GC、当时的请求）→ 撤页之后服务重启了
+//   3. 撤页：电脑刚睡醒 → 服务卡住（卡顿区间跟撤页重叠，带调用栈、CPU、GC、当时的请求）→ 附近服务重启了
 //      → 端口上换了人 / 连接被拒 / 查不到
-//   4. 只有页面整页重载：谁发起的
+//   4. 页面整页重载：谁发起的；同一次载入里报过的错
 // 只靠时间对上的关联在证据里明说「按时间推测」，不当成已证实的因果。
 import type { CauseKind, Incident, RuntimeLogRecord, RuntimeLogReport, StackTally } from "@navi/shared/runtime-log";
 import { restartVerdicts, type RestartVerdict } from "./analyze-restart.js";
+import { groupOccurrences, isShell, loadKey, type Occurrence } from "./analyze-occurrences.js";
 import type { ExitSummary } from "./load.js";
 
-const MERGE_MS = 15_000;
 const t = (record: { at: string }) => Date.parse(record.at);
 const secs = (ms: number) => `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} 秒`;
-
-function isAnchor(record: RuntimeLogRecord, restarts: Map<RuntimeLogRecord, RestartVerdict>): boolean {
-  if (record.src === "mac" || record.src === "win") {
-    if (record.ev === "page.takedown" || record.ev === "webcontent.terminated") return true;
-    if (record.ev === "page.reload") return record.reason !== "user";
-  }
-  if (record.src === "web") {
-    if (record.ev === "page.reload" || record.ev === "page.crash") return true;
-    if (record.ev === "page.boot") return record.nav === "reload";
-  }
-  return record.src === "server" && record.ev === "server.start" && restarts.has(record);
-}
 
 function within(records: RuntimeLogRecord[], from: number, to: number, pred: (r: RuntimeLogRecord) => boolean) {
   return records.filter((r) => { const at = t(r); return at >= from && at <= to && pred(r); });
@@ -100,33 +87,57 @@ function refusedEvidence(all: RuntimeLogRecord[], from: number, to: number): str
   return lines;
 }
 
-function classify(cluster: RuntimeLogRecord[], { all, restarts }: Context): Omit<Incident, "timeline"> {
-  const start = t(cluster[0]!);
-  const end = t(cluster[cluster.length - 1]!);
-  const at = cluster[0]!.at;
-  const has = (ev: string) => cluster.some((r) => r.ev === ev);
+function describeTakedown(takedown: RuntimeLogRecord): string {
+  // 壳记的是那一次探活的结果（RuntimeLog.fields(of:)）：down / unreachable / not_navi / not_ours。
+  const probe = String(takedown.probe ?? "");
+  const streak = takedown.streak ? `连续 ${takedown.streak} 次` : "";
+  const what: Record<string, string> = {
+    unreachable: `${streak}探活没等到答复`, down: "探活连接被拒",
+    not_navi: `探活收到非 Navi 的答复（${takedown.status ?? "?"}）`, not_ours: "端口上已经不是自己那份服务",
+  };
+  return `窗口撤下页面：${what[probe] ?? probe}`;
+}
+
+const RELOAD_REASONS: Record<string, string> = {
+  identity: "登录身份在别的标签页里变了", account: "账号设置里退出登录", "remote-access": "远程访问设置里退出登录",
+  "error-screen": "在错误屏上点了重新载入", "load-failure": "在加载失败提示上点了刷新", reclaim: "放开回合占位后重新加载",
+};
+
+function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Incident, "timeline"> {
+  const { seen } = occurrence;
+  const start = t(seen[0]!);
+  const end = t(seen.at(-1)!);
+  const at = seen[0]!.at;
+  const has = (ev: string, src?: (r: RuntimeLogRecord) => boolean) => seen.some((r) => r.ev === ev && (!src || src(r)));
   const evidence: string[] = [];
-  const takedown = cluster.find((r) => r.ev === "page.takedown");
-  if (takedown) {
-    // 壳记的是那一次探活的结果（RuntimeLog.fields(of:)）：down / unreachable / not_navi / not_ours。
-    const probe = String(takedown.probe ?? "");
-    const streak = takedown.streak ? `连续 ${takedown.streak} 次` : "";
-    evidence.push(`窗口撤下页面：${{ unreachable: `${streak}探活没等到答复`, down: "探活连接被拒", not_navi: `探活收到非 Navi 的答复（${takedown.status ?? "?"}）`, not_ours: "端口上已经不是自己那份服务" }[probe] ?? probe}`);
-  }
-  evidence.push(...refusedEvidence(all, start - 5_000, end + 60_000));
+  const takedown = seen.find((r) => isShell(r) && r.ev === "page.takedown");
+  if (takedown) evidence.push(describeTakedown(takedown));
+  if (seen.some(isShell)) evidence.push(...refusedEvidence(all, start - 5_000, end + 60_000));
+
+  // 同一次载入里报过的错（按载入身份认，不按时间）；没有载入标识的老记录只认这一次自己那几条。
+  const pageErrors = all.filter((r) => r.src === "web" && (r.ev === "page.crash" || r.ev === "page.error")
+    && (loadKey(r) ? occurrence.loads.has(loadKey(r)!) : seen.includes(r)));
+  const describeErrors = () => {
+    for (const error of pageErrors.slice(0, 2)) {
+      const where = error.kind === "boundary" ? "页面里一块的兜底接住了报错" : "页面报错";
+      evidence.push(`${where} ${error.name ?? "?"}${error.msg ? `：${error.msg}` : ""}${Array.isArray(error.frames) && error.frames.length ? `（${(error.frames as string[])[0]}）` : ""}`);
+    }
+  };
+  const restartLines = (byTime: boolean) => {
+    for (const { start: restart } of occurrence.restarts.filter((r) => r.byTime === byTime)) {
+      if (byTime) evidence.push(`（按时间推测）${restart.at < at ? "之前" : "之后"} ${secs(Math.abs(t(restart) - start))} 有一次服务重启`);
+      evidence.push(...restartEvidence(restart, restarts.get(restart)!, all, start));
+    }
+  };
 
   // 1. 这一次里直接看到了重启。
-  const ownStart = cluster.find((r) => r.ev === "server.start" && restarts.has(r));
-  const instanceChanged = cluster.find((r) => r.ev === "page.reload" && r.reason === "instance_changed");
-  const startForChange = instanceChanged
-    && within(all, start - 30_000, end + 5_000, (r) => r.ev === "server.start" && restarts.has(r)).at(-1);
-  const restart = ownStart ?? startForChange;
-  if (restart) {
-    evidence.push(...restartEvidence(restart, restarts.get(restart)!, all, start));
-    return { at, cause: "restart", summary: "服务重启了", evidence };
+  const direct = occurrence.restarts.filter((r) => !r.byTime);
+  if (direct.length) {
+    restartLines(false);
+    return { at, cause: "restart", summary: direct.length > 1 ? `服务连着重启了 ${direct.length} 次` : "服务重启了", evidence };
   }
-  if (instanceChanged) {
-    evidence.push("窗口发现服务的实例号变了（服务重启过），但这段时间没有新服务的启动记录");
+  if (has("page.reload", (r) => isShell(r) && r.reason === "instance_changed")) {
+    evidence.push("窗口发现服务的实例号变了（服务重启过），但没有那份新服务的启动记录");
     return { at, cause: "restart", summary: "服务重启了", evidence };
   }
 
@@ -134,12 +145,6 @@ function classify(cluster: RuntimeLogRecord[], { all, restarts }: Context): Omit
   if (has("webcontent.terminated")) {
     return { at, cause: "webcontent", summary: "窗口的网页进程被系统结束了（多半是内存压力或 WebKit 崩溃），整页重载", evidence };
   }
-  const pageErrors = within(all, start - 10_000, end, (r) => r.src === "web" && (r.ev === "page.crash" || r.ev === "page.error"));
-  const describeErrors = () => {
-    for (const error of pageErrors.slice(0, 2)) {
-      evidence.push(`页面报错 ${error.name ?? "?"}${error.msg ? `：${error.msg}` : ""}${Array.isArray(error.frames) && error.frames.length ? `（${(error.frames as string[])[0]}）` : ""}`);
-    }
-  };
   if (has("page.crash")) {
     describeErrors();
     return { at, cause: "page_error", summary: "页面脚本出错，整页换成了错误屏", evidence };
@@ -156,15 +161,14 @@ function classify(cluster: RuntimeLogRecord[], { all, restarts }: Context): Omit
     const stacks = all.filter((r) => r.ev === "loop.stall.stack");
     const overlapping = stalls.filter((stall) => {
       const [from, to] = stallInterval(stall);
-      return from <= end + 1_000 && to >= start - 8_000;
+      return from <= t(takedown) + 1_000 && to >= t(takedown) - 8_000;
     }).sort((a, b) => Number(b.ms) - Number(a.ms));
     if (overlapping.length) {
       evidence.push(...describeStall(overlapping[0]!, stacks));
       return { at, cause: "stall", summary: `服务卡住 ${secs(Number(overlapping[0]!.ms))} 没应答，窗口当成服务没了`, evidence };
     }
-    const later = within(all, start, end + 90_000, (r) => r.ev === "server.start" && restarts.has(r))[0];
-    if (later) {
-      evidence.push(`（按时间推测）撤页之后 ${secs(t(later) - start)} 新的服务起来了`, ...restartEvidence(later, restarts.get(later)!, all, start));
+    if (occurrence.restarts.length) {
+      restartLines(true);
       return { at, cause: "restart", summary: "服务没了，随后重启", evidence };
     }
     if (takedown.probe === "not_ours" || takedown.probe === "not_navi") {
@@ -180,23 +184,24 @@ function classify(cluster: RuntimeLogRecord[], { all, restarts }: Context): Omit
     return { at, cause: "unknown", summary: "没查到服务端那一侧的原因", evidence };
   }
 
-  // 4. 只有页面整页重载。
+  // 4. 页面整页重载。
+  const webReload = seen.find((r) => r.src === "web" && r.ev === "page.reload");
+  if (webReload) {
+    describeErrors();
+    return { at, cause: "reload", summary: `页面整页重载：${RELOAD_REASONS[String(webReload.reason)] ?? "原因没报上来"}`, evidence };
+  }
+  if (has("page.reload", (r) => isShell(r) && r.reason === "user")) {
+    return { at, cause: "reload", summary: "在窗口菜单里点了重新载入", evidence };
+  }
   if (pageErrors.length) {
     describeErrors();
-    return { at, cause: "page_error", summary: "页面报错之后整页重载", evidence };
+    return { at, cause: "page_error", summary: "页面报错之后被整页刷新", evidence };
   }
-  const webReload = cluster.find((r) => r.src === "web" && r.ev === "page.reload");
-  const why: Record<string, string> = {
-    identity: "登录身份在别的标签页里变了", account: "账号设置里退出登录", "remote-access": "远程访问设置里退出登录",
-    "error-screen": "在错误屏上点了重新载入", "load-failure": "在加载失败提示上点了刷新", reclaim: "放开回合占位后重新加载",
-  };
-  if (webReload) return { at, cause: "reload", summary: `页面整页重载：${why[String(webReload.reason)] ?? "原因没报上来"}`, evidence };
-  const userReload = within(all, start - 5_000, end + 1_000, (r) => (r.src === "mac" || r.src === "win") && r.ev === "page.reload" && r.reason === "user");
-  return {
-    at, cause: "reload",
-    summary: userReload.length ? "在窗口菜单里点了重新载入" : "页面被整页刷新（浏览器刷新 / ⌘R，或浏览器自己重载）",
-    evidence,
-  };
+  if (occurrence.restarts.length) {
+    restartLines(true);
+    return { at, cause: "restart", summary: "页面被整页刷新，附近服务重启过", evidence };
+  }
+  return { at, cause: "reload", summary: "页面被整页刷新（浏览器刷新 / ⌘R，或浏览器自己重载）", evidence };
 }
 
 function median(values: number[]): number {
@@ -211,18 +216,13 @@ export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummar
   for (const record of sorted) counts[record.src] = (counts[record.src] ?? 0) + 1;
 
   const restartMap = restartVerdicts(sorted, exits);
-  const anchors = sorted.filter((r) => isAnchor(r, restartMap));
-  const clusters: RuntimeLogRecord[][] = [];
-  for (const anchor of anchors) {
-    const last = clusters[clusters.length - 1];
-    if (last && t(anchor) - t(last[last.length - 1]!) <= MERGE_MS) last.push(anchor);
-    else clusters.push([anchor]);
-  }
-  const incidents: Incident[] = clusters.map((cluster) => {
-    const verdict = classify(cluster, { all: sorted, restarts: restartMap });
-    const from = t(cluster[0]!) - 20_000;
-    const to = t(cluster[cluster.length - 1]!) + 10_000;
-    const timeline = within(sorted, from, to, (r) => r.ev !== "server.vitals").slice(0, 40);
+  const incidents: Incident[] = groupOccurrences(sorted, restartMap).map((occurrence) => {
+    const verdict = classify(occurrence, { all: sorted, restarts: restartMap });
+    const from = t(occurrence.seen[0]!) - 20_000;
+    const to = t(occurrence.seen.at(-1)!) + 10_000;
+    // 别的标签页的页面事件不进这一次的时间线。
+    const tabs = new Set(occurrence.seen.filter((r) => r.src === "web").map((r) => r.tab));
+    const timeline = within(sorted, from, to, (r) => r.ev !== "server.vitals" && (r.src !== "web" || !r.tab || tabs.size === 0 || tabs.has(r.tab))).slice(0, 40);
     return { ...verdict, timeline };
   });
   const causes: Partial<Record<CauseKind, number>> = {};
@@ -241,7 +241,7 @@ export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummar
     hot.set(frame, tally);
   }
 
-  const restarts = [...restartMap].map(([start, verdict]) => ({ at: start.at, how: verdict.how }));
+  const restarts = [...restartMap].filter(([, verdict]) => verdict.basis !== "none").map(([start, verdict]) => ({ at: start.at, how: verdict.how }));
 
   const errorTally = new Map<string, { src: string; name: string; count: number; last: string }>();
   for (const error of sorted.filter((r) => r.ev === "server.error" || r.ev === "page.error" || r.ev === "page.crash")) {
