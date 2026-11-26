@@ -70,9 +70,12 @@ function SubtaskTable({ task, allTasks, onOpenTask, onTaskUpdated, notify, branc
     if (seen.has(parentId)) return null;
     const next = new Set(seen).add(parentId);
     const level = dispatchLevel(children, parentId, task.id);
-    const open = (hint && dispatchLevel(children, parentId, hint).selectedInAccepted) || (folds.get(`accepted:${parentId}`) ?? level.acceptedOpen);
+    // 「N 条已验收」只用来把收完尾的跟还没收尾的分开；一层全验收了就没什么可分的，直接列出来
+    //（这一层显不显示归父行的折叠键管），不再多一个不是任务的节点。
+    const grouped = level.accepted.length > 0 && level.rest.length > 0;
+    const open = !grouped || (hint && dispatchLevel(children, parentId, hint).selectedInAccepted) || (folds.get(`accepted:${parentId}`) ?? level.acceptedOpen);
     return <ul className="dispatched-list">
-      {level.accepted.length > 0 && <li><button type="button" className="dispatched-accepted" aria-expanded={open} onClick={() => toggle(`accepted:${parentId}`, open)}><CaretRight size={10} aria-hidden="true" />{level.accepted.length} 条已验收</button></li>}
+      {grouped && <li><button type="button" className="dispatched-accepted" aria-expanded={open} onClick={() => toggle(`accepted:${parentId}`, open)}><CaretRight size={10} aria-hidden="true" />{level.accepted.length} 条已验收</button></li>}
       {open && level.accepted.map((item) => row(item, next))}
       {level.rest.map((item) => row(item, next))}
     </ul>;
