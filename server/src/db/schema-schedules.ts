@@ -120,7 +120,9 @@ export const scheduledMessages = sqliteTable("scheduled_messages", {
   // 等那一轮收口才算数；没有确认送到就退回 pending（monitor-turn-handoff.ts 文件头）。
   turnTakenBy: text("turn_taken_by"),
   // 那一次交付的交付号 + 时刻 + MCP 发回确认的时刻（monitor-turn-ack.ts）：没有 ackedAt 就不算送到。
-  turnHandoff: text("turn_handoff", { mode: "json" }).$type<{ hand: string; at: string; ackedAt?: string }>(),
+  // request = 哪一次调用领走的（MCP 的请求号）：那次调用的答复没写出去就被停掉，带同一个请求号重试时
+  // 凭它交回同一份（monitor-turn-handoff.ts `handedForRequest`）。
+  turnHandoff: text("turn_handoff", { mode: "json" }).$type<{ hand: string; at: string; ackedAt?: string; request?: string }>(),
   // 回合里交过、那一轮没正常收口而退回来的时刻。非空的 pending 行熬得过终态连坐，等下一次起跑送达。
   turnReturnedAt: text("turn_returned_at"),
   // 哨兵输出那一批在这一刻之前不投递，等紧跟着的「结束」并进来（monitor-events.ts `pushToTask`）。

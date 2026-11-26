@@ -18,6 +18,7 @@ import { now } from "./util.js";
 import { withReviewAuthority, type ReviewAuthority } from "./review-ownership.js";
 import { recordReviewWait } from "./review-wait.js";
 import { waitingOnDispatch } from "./dispatch-suggestion.js";
+import { markRequestEffect, type RequestEffect } from "./request-receipts.js";
 
 export interface AskInput {
   waitOrigin?: "ordinary";
@@ -28,6 +29,11 @@ export interface AskInput {
   items?: QuestionItem[] | null;
   // agent 自己提问时绑定当前一次性回合；工作流/团队主动提问不传。
   currentTurn?: { token: string | null; directionToken?: string | null };
+  /**
+   * 哪一次调用、答什么（request-receipts.ts）：答复跟提问在同一个事务里落库。执行到一半被停掉、带同一个
+   * 请求号重试时回放它，不再挂第二遍（重挂会把用户可能已经在答的那一问重新摆一次、再记一段等待）。
+   */
+  effect?: RequestEffect;
 }
 
 /**
@@ -74,6 +80,7 @@ export async function setTaskQuestion(input: AskInput): Promise<boolean> {
     if (updated.length) {
       const task = (await transaction.select().from(tasks).where(eq(tasks.id, taskId)))[0]!;
       await recordReviewWait(transaction, task, "question", input.waitOrigin ? { kind: input.waitOrigin } : undefined);
+      if (input.effect) await markRequestEffect(transaction, input.effect.request, input.effect.answer);
     }
     return updated;
   });

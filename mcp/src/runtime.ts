@@ -7,7 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { readEnv } from "@navi/shared/env-names";
 import { NAVI_HEADERS } from "@navi/shared/http-headers";
-import { AMBIGUOUS_NET_CODES, answeredMcpError, isTurnReportPath, UNDELIVERED_NET_CODES } from "@navi/shared/mcp-delivery";
+import { AMBIGUOUS_NET_CODES, answeredMcpError, UNDELIVERED_NET_CODES } from "@navi/shared/mcp-delivery";
 import { resolveTurnIdentity } from "./turn-identity.js";
 
 export const BASE = (readEnv(process.env, "NAVI_URL") ?? "http://localhost:4317").replace(/\/+$/, "");
@@ -73,12 +73,40 @@ export function ambiguousCode(e: unknown): string | null {
   return codeIn(e, AMBIGUOUS_NET_CODES);
 }
 
-// 这份服务按请求号记账吗:任何一次答复带着回执头就算见过。见过之后「送到了一半」的调用一律带原请求号
-// 重试 —— 执行过的服务端回放记下的答复,执行到一半被停掉的如实处置(server/src/request-receipts.ts)。
-// 停机前后是同一份库,所以前一份服务记下的账新服务认得。
-let receiptsAcknowledged = false;
+// 这份服务记的是哪一本账(server/src/request-receipts.ts):带请求号的答复都带着账本号,随库走。
+// 「送到了一半」的写请求只在重发之前**再核对一次**对面还是这本账才重发 —— 执行过的那边回放记下的答复,
+// 执行到一半被停掉的按端点处置;换成了不记账的老版本服务、或者换了一份库,重发就可能做两遍,如实说不确定。
+// 只记「见过」不够(第 1 轮审查 N2):见过之后服务可能被换掉,重试打到的已经不是那一份。
+let ledger: string | null = null;
+let ledgerAsked = false;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const baseHeaders = (requestId: string): Record<string, string> =>
+  ({ [NAVI_HEADERS.client]: "mcp", [NAVI_HEADERS.requestId]: requestId });
+
+/** 问一次对面记的是哪本账:`null` = 不记账,`undefined` = 这会儿没人答(在重启)。 */
+async function askLedger(): Promise<string | null | undefined> {
+  try {
+    const res = await fetch(`${BASE}/api/health`, { headers: baseHeaders(randomUUID()) });
+    await res.body?.cancel();
+    if (res.status === 503 && res.headers.get("x-navi-undelivered") === "runtime-handoff-v1") return undefined;
+    return res.headers.get(NAVI_HEADERS.requestReceipt);
+  } catch (e) {
+    return retryableCode(e) || ambiguousCode(e) ? undefined : null;
+  }
+}
+
+/** 重发之前:对面还是不是那本账。没人答就等到 deadline。 */
+async function sameLedger(deadline: number): Promise<boolean> {
+  for (let delay = 400; ;) {
+    const seen = await askLedger();
+    if (seen !== undefined) return seen !== null && seen === ledger;
+    if (Date.now() >= deadline) return false;
+    await sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
+    delay = Math.min(delay * 2, 5_000);
+  }
+}
 
 // One place to talk to the API. Network failures get a human hint; HTTP errors
 // surface the server's JSON error body verbatim so the agent can react.
@@ -88,21 +116,34 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // `complete_task` 走 HTTP —— 正好撞上重启那几秒就会硬失败,于是「进程活下来了、
 // 成果却丢了」。重试把这个窗口抹平。
 //
-// 每次调用带一个请求号,重试原样带上。「送到了一半」(服务在处理中被停掉)只在三种情况下重试:读请求、
-// 交卷端点(重做一遍结果不变)、已经见过这份服务的记账回执头 —— 否则老版本服务上 dispatch 这类非幂等调用
-// 会被做两遍。不重试时如实说「不确定执行了没有」,不说成连不上。
+// 每次调用带一个请求号,重试原样带上。「送到了一半」(服务在处理中被停掉)的读请求照常重试;写请求只在
+// 知道这份服务的账本号、而且每次重发之前核对过对面还是那本账时才重发(见 `ledger`)。头一次写之前先问一次
+// 账本号,不然进程起来后的第一笔写就没有凭据。不重发时如实说「不确定执行了没有」,不说成连不上。
 async function request(method: string, path: string, body: unknown, directionToken: string): Promise<string> {
   const deadline = Date.now() + RECONNECT_WINDOW_MS;
   const requestId = randomUUID();
+  const write = method !== "GET";
+  if (write && !ledgerAsked) {
+    const seen = await askLedger();
+    if (seen !== undefined) { ledgerAsked = true; ledger = seen; }
+  }
   let delay = 400;
   let lastCode = "";
   // 有一次断在半路就记下：之后哪怕一直连不上，也不能说成「没执行」。
   let halfway = "";
   let res: Response;
   let text: string;
+  const unknown = (why: string, e?: unknown) => new Error(
+    `Navi server (${BASE}) 在处理这次请求时断开了连接（${halfway}）${why}，不确定它执行了没有：`
+    + "先核对现状（如 get_task）再决定要不要重做。" + (e ? `原始错误：${e instanceof Error ? e.message : String(e)}` : ""),
+  );
   for (;;) {
+    // 断在半路之后的每一次重发(中间撞上的是连不上也一样:连上的可能已经是另一份服务)都先核对账本。
+    if (halfway && write && !(await sameLedger(deadline))) {
+      throw unknown(ledger ? "，重试打到的服务不是记着这次调用的那一份（没起来、换了版本或换了库），没有替你重发" : "");
+    }
     try {
-      const headers: Record<string, string> = { [NAVI_HEADERS.client]: "mcp", [NAVI_HEADERS.requestId]: requestId };
+      const headers = baseHeaders(requestId);
       if (body !== undefined) headers["content-type"] = "application/json";
       if (SOURCE_TASK_ID) headers[NAVI_HEADERS.sourceTaskId] = SOURCE_TASK_ID;
       if (TURN_TOKEN) headers[NAVI_HEADERS.turnToken] = TURN_TOKEN;
@@ -116,22 +157,18 @@ async function request(method: string, path: string, body: unknown, directionTok
         await res.body?.cancel();
         throw new Error("服务正在切换或停止，请求未执行", { cause: { code: "NAVI_RUNTIME_UNDELIVERED" } });
       }
-      if (res.headers.get(NAVI_HEADERS.requestReceipt)) receiptsAcknowledged = true;
+      const seen = res.headers.get(NAVI_HEADERS.requestReceipt);
+      if (seen) { ledger = seen; ledgerAsked = true; }
       // 读响应体也在重试圈里:服务在写响应那一下被停掉,断在这里跟断在发请求时是同一种「送到了一半」。
       text = await res.text();
       break;
     } catch (e) {
-      const code = retryableCode(e)
-        ?? (method === "GET" || receiptsAcknowledged || isTurnReportPath(path) ? ambiguousCode(e) : null);
-      halfway = ambiguousCode(e) ?? halfway;
+      const half = ambiguousCode(e);
+      if (half) halfway = half;
+      const code = retryableCode(e) ?? (half && (!write || ledger) ? half : null);
       if (!code || Date.now() >= deadline) {
         const waited = lastCode ? `（已重试 ${Math.round(RECONNECT_WINDOW_MS / 1000)}s，${lastCode}）` : "";
-        if (halfway) {
-          throw new Error(
-            `Navi server (${BASE}) 在处理这次请求时断开了连接（${halfway}）${waited}，不确定它执行了没有：`
-            + `先核对现状（如 get_task）再决定要不要重做。原始错误：${e instanceof Error ? e.message : String(e)}`,
-          );
-        }
+        if (halfway) throw unknown(waited, e);
         throw new Error(
           `连不上 Navi server (${BASE})${waited}，确认它在运行（npm start）。原始错误：${e instanceof Error ? e.message : String(e)}`,
         );

@@ -68,6 +68,7 @@ import { db } from "./db/index.js";
 import { scheduledMessages, tasks } from "./db/schema.js";
 import { publishTaskUpdated } from "./task-store.js";
 import { now } from "./util.js";
+import { markRequestEffect, type RequestEffect } from "./request-receipts.js";
 
 /** 把整行推给客户端。广播失败只记日志：实时通知挂了不该反过来把已经落库的写入判成失败。 */
 export async function announceResumePrompt(taskId: string): Promise<void> {
@@ -254,8 +255,10 @@ export async function occupyResumePrompt(
   value: string,
   auto: boolean,
   where: (SQL | undefined)[] = [],
+  // 哪一次调用、答什么(request-receipts.ts):占用一次代次就 +1,不能靠按请求号重进端点、再占一次来恢复。
+  effect?: RequestEffect,
 ): Promise<boolean> {
-  return writeInto(taskId, occupyPatch(value, auto), where);
+  return writeInto(taskId, occupyPatch(value, auto), where, effect);
 }
 
 /** 一次新占用要写的那几列。两个 writer 共用，所以「代次 +1」漏不掉。 */
@@ -271,6 +274,7 @@ async function writeInto(
   // 不用 `Partial<$inferInsert>`:代次那一笔是 `generation + 1` 这样的 SQL 表达式,不是字面量。
   patch: Parameters<ReturnType<typeof db.update<typeof tasks>>["set"]>[0],
   where: (SQL | undefined)[] = [],
+  effect?: RequestEffect,
 ): Promise<boolean> {
   const restored = await db.transaction(async (transaction) => {
     const restored = await transaction.update(tasks)
@@ -283,6 +287,7 @@ async function writeInto(
       const { recordReviewWait } = await import("./review-wait.js");
       const task = (await transaction.select().from(tasks).where(eq(tasks.id, taskId)))[0]!;
       await recordReviewWait(transaction, task, "checkpoint");
+      if (effect) await markRequestEffect(transaction, effect.request, effect.answer);
     }
     return restored;
   }, { behavior: "immediate" });
