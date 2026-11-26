@@ -26,6 +26,10 @@ import Darwin
 /// 恢复点认「这一次备过没有」靠的就是它（DatabaseBackup.covers）。尝试之后在服务的那一份又被确认过（旧服务
 /// 缓过来了、接着写库），就是在服务的那一版：下一次起之前要照常再备一份。
 ///
+/// 这几笔账都是对**某一份库**记的：尝试和确认各自记下当时数据根里是哪一份库（DatabaseFile.identity）。眼前的库
+/// 换过了（第一次全新开始没起来、之后导入了一份；回退到迁移前换回了恢复点），记的那一版就说明不了它，算「不知道」，
+/// 起之前照常备份。改这套记账之前的老记录没记库，按原样认。
+///
 /// 换了新版 app（Sparkle 装完重开、`build.sh --install`）再连上时，在服务的那一份构建号不是自己 = 服务还在跑
 /// 旧版代码。见 UpdateGate 的 `.staleServer`。pid 对不上就是「不知道」，不当成旧版。
 struct ServerRecord: Codable {
@@ -34,6 +38,8 @@ struct ServerRecord: Codable {
     let bundleVersion: String
     /// 这一次起服务记下的时刻（备份之后、起进程之前）。这之前留的恢复点都是给它的。
     let startedAt: Date
+    /// 那时数据根里是哪一份库（见类型顶部）。
+    var database: String? = nil
   }
 
   static let fileName = ".mac-server.json"
@@ -49,41 +55,58 @@ struct ServerRecord: Codable {
   var confirmedAt: Date? = nil
   /// 最近一次起服务（见类型顶部）。
   var attempt: Attempt? = nil
+  /// 确认那一刻数据根里是哪一份库（见类型顶部）。
+  var database: String? = nil
 
   /// 库最后交给了哪一版 app（见类型顶部）。
   var lastHandedTo: String {
-    guard let attempt, attempt.startedAt > (confirmedAt ?? .distantPast) else { return bundleVersion }
-    return attempt.bundleVersion
+    let current = DatabaseFile.identity(in: NaviConfig.dataURL)
+    let sameDatabase = { (recorded: String?) in recorded == nil || recorded == current }
+    if let attempt, attempt.startedAt > (confirmedAt ?? .distantPast), sameDatabase(attempt.database) {
+      return attempt.bundleVersion
+    }
+    return sameDatabase(database) ? bundleVersion : "unknown"
   }
 
-  /// 要起服务了：先记下是这一版、什么时候起的。写不进去抛错，调用方就别起。
+  /// 要起服务了：先记下是这一版、什么时候起的、对着哪一份库（还没有库也记）。写不进去抛错，调用方就别起。
   static func writeAttempt(version: String = NaviConfig.bundleVersion) throws {
     try locked {
-      try save(with(attempt: Attempt(pid: 0, bundleVersion: version, startedAt: Date())))
+      try save(with(attempt: Attempt(pid: 0, bundleVersion: version, startedAt: Date(),
+                                     database: DatabaseFile.identity(in: NaviConfig.dataURL))))
     }
   }
 
-  /// 起出来的进程号，补进这一次尝试（没有先记下尝试的 —— 回退时拉起旧版那一下 —— 从现在算起）。
-  static func write(pid: Int, version: String = NaviConfig.bundleVersion) {
-    try? locked {
-      let pending = read()?.attempt.flatMap { $0.pid == 0 && $0.bundleVersion == version ? $0.startedAt : nil }
-      try save(with(attempt: Attempt(pid: pid, bundleVersion: version, startedAt: pending ?? Date())))
-    }
+  /// 起出来的进程号，补进这一次尝试（没有先记下尝试的 —— 回退时拉起旧版那一下 —— 从现在算起）。记不下返回 false：
+  /// 起它的启动器自己等到它应答时还认得出它（confirmServing 的 `launched`），别人认不出。
+  @discardableResult
+  static func write(pid: Int, version: String = NaviConfig.bundleVersion) -> Bool {
+    do {
+      try locked {
+        let pending = read()?.attempt.flatMap { $0.pid == 0 && $0.bundleVersion == version ? $0 : nil }
+        try save(with(attempt: Attempt(pid: pid, bundleVersion: version, startedAt: pending?.startedAt ?? Date(),
+                                       database: pending?.database ?? DatabaseFile.identity(in: NaviConfig.dataURL))))
+      }
+      return true
+    } catch { return false }
   }
 
   /// 端口上自己那份（`pid`，跑的是 `codeDir`）应答了，探活是 `observedAt` 发出去的。按类型顶部那两条记账；
-  /// 记上了，比确认时刻早的恢复点作废。别的进程、过时的一眼不算。
-  static func confirmServing(pid: Int?, codeDir: String? = nil, observedAt: Date) {
+  /// 记上了，比确认时刻早的恢复点作废。别的进程、过时的一眼不算。`launched`：调用方就是起这个进程的启动器、
+  /// 起的是这一版 —— 补进程号那一下没记上（尝试里还是 0）时，凭它认这次尝试。
+  static func confirmServing(pid: Int?, codeDir: String? = nil, observedAt: Date, launched version: String? = nil) {
     guard let pid, pid > 1 else { return }
     try? locked {
       guard let record = read() else { return }
+      let database = DatabaseFile.identity(in: NaviConfig.dataURL)
       let confirmed: ServerRecord
-      if let attempt = record.attempt, attempt.pid == pid {
+      if let attempt = record.attempt,
+         attempt.pid == pid || (attempt.pid == 0 && version != nil && attempt.bundleVersion == version) {
         confirmed = ServerRecord(pid: pid, bundleVersion: attempt.bundleVersion,
-                                 confirmedAt: max(record.confirmedAt ?? .distantPast, attempt.startedAt))
+                                 confirmedAt: max(record.confirmedAt ?? .distantPast, attempt.startedAt), database: database)
       } else if record.pid == pid, observedAt > (record.attempt?.startedAt ?? .distantPast) {
         confirmed = ServerRecord(pid: pid, bundleVersion: record.bundleVersion,
-                                 confirmedAt: max(record.confirmedAt ?? .distantPast, observedAt), attempt: record.attempt)
+                                 confirmedAt: max(record.confirmedAt ?? .distantPast, observedAt), attempt: record.attempt,
+                                 database: database)
       } else { return }
       guard RuntimeStore.follow(codeDir) else {
         RuntimeLog.record("server.confirm_deferred", ["serverPid": pid, "step": "runtime"])
@@ -129,7 +152,7 @@ struct ServerRecord: Codable {
   private static func with(attempt: Attempt) -> ServerRecord {
     let record = read()
     return ServerRecord(pid: record?.pid ?? 0, bundleVersion: record?.bundleVersion ?? "unknown",
-                        confirmedAt: record?.confirmedAt, attempt: attempt)
+                        confirmedAt: record?.confirmedAt, attempt: attempt, database: record?.database)
   }
 
   private static func save(_ record: ServerRecord) throws {

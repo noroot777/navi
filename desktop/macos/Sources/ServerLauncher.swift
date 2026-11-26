@@ -128,9 +128,11 @@ final class ServerLauncher {
       // 进程一起来就记下 pid（记在这一次尝试里，不碰在服务的那一份）：这个启动器等不到它应答（被退掉、超时、
       // 端口被人抢了）也不要紧，之后谁看到它应答都能认出是它、替它确认（见 settle）；它一直没应答，就只是一次
       // 没成的尝试，端口上原来那份照样认得出是哪一版起的。
-      ServerRecord.write(pid: Int(pid), version: version)
+      if !ServerRecord.write(pid: Int(pid), version: version) {
+        RuntimeLog.record("server.confirm_deferred", ["serverPid": Int(pid), "step": "attempt"])
+      }
       RuntimeLog.record("server.spawn", ["serverPid": Int(pid), "version": version])
-      let outcome = waitReady(pid: pid, timeout: timeout)
+      let outcome = waitReady(pid: pid, version: version, timeout: timeout)
       if case .failed(let startupFailure) = outcome, kill(pid, 0) != 0, errno == ESRCH {
         // 它退了，这份库这会儿却握在另一个活着的服务手里（在上面那次查过之后才出现的）：不在它底下拿恢复点
         // 覆盖库，接着等它。它是被那份的锁挡下的、还是自己出了事之后那份才起来，这里分不出来，不猜 —— 恢复点
@@ -144,8 +146,11 @@ final class ServerLauncher {
             switch spawnDetached(runtime: previous) {
             case .failure(let reason): return .failed("已恢复迁移前数据库，但旧服务启动失败：\(reason)")
             case .success(let previousPID):
-              if let record = ServerRecord.read() { ServerRecord.write(pid: Int(previousPID), version: record.bundleVersion) }
-              let restored = waitReady(pid: previousPID, timeout: timeout)
+              let previousVersion = ServerRecord.read()?.bundleVersion ?? "unknown"
+              if !ServerRecord.write(pid: Int(previousPID), version: previousVersion) {
+                RuntimeLog.record("server.confirm_deferred", ["serverPid": Int(previousPID), "step": "attempt"])
+              }
+              let restored = waitReady(pid: previousPID, version: previousVersion, timeout: timeout)
               if case .ready = restored {
                 let version = ServerRecord.read()?.bundleVersion ?? "unknown"
                 print("新版启动失败，已恢复旧服务和迁移前数据库。\n\(startupFailure)")
@@ -169,14 +174,16 @@ final class ServerLauncher {
   /// 在这里补一份。备份不成、或者记不下「这一版要起了」就不起：库原样留着，配上旧版 app 还能回去。
   /// 返回 nil = 可以起。
   private static func backUpBeforeMigration(version: String) -> String? {
+    let hasDatabase: Bool
     do {
-      guard try DatabaseFile.existing(in: NaviConfig.dataURL) != nil else { return nil }
+      hasDatabase = try DatabaseFile.existing(in: NaviConfig.dataURL) != nil
     } catch {
       return "数据根里的库认不准（\(error.localizedDescription)），没备份、也没起服务。照提示处理好再点「重试」（docs/rename-db.md）。"
     }
+    // 还没有库（第一次全新开始）就没东西可备；尝试照样记，记下的是「那时没有库」（ServerRecord.lastHandedTo）。
     let lastServedBy = ServerRecord.read()?.lastHandedTo ?? "unknown"
     do {
-      if lastServedBy != version && !DatabaseBackup.covers(lastServedBy: lastServedBy) {
+      if hasDatabase && lastServedBy != version && !DatabaseBackup.covers(lastServedBy: lastServedBy) {
         try DatabaseBackup.beforeUpdate(fromVersion: lastServedBy)
       }
     } catch {
@@ -231,9 +238,10 @@ final class ServerLauncher {
   /// 自己那份应答了。不管服务是谁起的、谁先看到它起来，确认都在这一处（窗口、登录项、另一个窗口的重试、起它的
   /// 那个启动器都经过这里）。这一眼可能是过时的（探到和走到这里之间，旧服务可能已经退了、新的一次已经起了），
   /// 所以带上发出去的时刻，由服务记录那一层判断它还算不算数（ServerRecord.confirmServing）。
-  private static func adopt(_ instance: NaviInstance, askedAt: Date) {
+  private static func adopt(_ instance: NaviInstance, askedAt: Date, launched version: String? = nil) {
     RuntimeRecovery.confirmed(instance)
-    ServerRecord.confirmServing(pid: instance.pid, codeDir: instance.isOurs ? instance.codeDir : nil, observedAt: askedAt)
+    ServerRecord.confirmServing(pid: instance.pid, codeDir: instance.isOurs ? instance.codeDir : nil, observedAt: askedAt,
+                                launched: version)
     RuntimeStore.reclaimAfterConfirmation(instance)
     ServedInstance.observe(instance)
   }
@@ -292,14 +300,14 @@ final class ServerLauncher {
     return .success(pid)
   }
 
-  /// 等刚起的那个进程应答。它先退了、或者端口被别人抢先占上，都不必等满时限。
-  private func waitReady(pid: Int32, timeout: TimeInterval) -> Outcome {
+  /// 等刚起的那个进程（这一版 `version` 起的）应答。它先退了、或者端口被别人抢先占上，都不必等满时限。
+  private func waitReady(pid: Int32, version: String, timeout: TimeInterval) -> Outcome {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
       let asked = Date()
       let probe = NaviHealth.probeSync()
       if case .navi(let instance) = probe, instance.isOurs, instance.pid == Int(pid) {
-        Self.adopt(instance, askedAt: asked)
+        Self.adopt(instance, askedAt: asked, launched: version)
         return .ready
       }
       if case .navi(let instance) = probe, !instance.isOurs { return .occupied(Occupant.otherNavi(instance)) }

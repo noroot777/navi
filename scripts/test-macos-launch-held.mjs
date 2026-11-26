@@ -9,13 +9,13 @@
 // 覆盖：锁的持有者活着、一时不应答 → 不起、等它缓过来、记录不变；端口关着也一样；等满时限 → 如实说是谁，
 // 「停掉它」只停那一个、它缓过来就不停、不理 SIGTERM 时再给强制结束；起出来的那份没服务过就退了（被锁挡下 /
 // 自己没起来 / 等满时限之后才退）→ 在服务的那一份一字不动、旧版照样认得出，这一次只记成一次没成的尝试（留的底
-// 照常固定，这一版再起不重备）；旧服务在尝试之后应答 → 它的恢复点作废；尝试之前的一眼迟到了才交来确认 → 什么都
+// 照常固定，这一版在同一份库上再起不重备；那时没有库、或者之后换了一份库 → 照常备份）；旧服务在尝试之后应答 → 它的恢复点作废；尝试之前的一眼迟到了才交来确认 → 什么都
 // 不改；闸在等着换掉旧服务时端口上已经是这一版起的那份 → 不再接管它。
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { once } from "node:events";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -294,6 +294,27 @@ await withTestResources(async () => {
   assert.match(result.out, /LAUNCH failed/, result.out);
   assert.equal(backups().length, 1, "the same build trying again needs no second backup");
   console.log("PASS: a server that exits on its own leaves only an attempt, not a serving identity");
+
+  // ── 第一次全新开始没起来（还没有库），之后换上了一份库（导入发布是改名换上去的）：那次尝试说明不了这份库，照常备份 ──
+  reset();
+  const saved = join(temporary, "saved.db");
+  renameSync(join(data, "navi.db"), saved);
+  writeFileSync(newServerMode, "crash");
+  result = await drive(["launch", "3"]);
+  assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
+  assert.equal(record().attempt.database, "none", "the attempt was made with no database");
+  assert.deepEqual(backups(), []);
+  const staged = join(temporary, "staged.db");
+  copyFileSync(saved, staged);
+  renameSync(staged, join(data, "navi.db"));
+  rmSync(saved);
+  result = await drive(["launch", "3"]);
+  assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
+  assert.equal(backups().length, 1, "the published database gets its own pre-migration backup");
+  assert.deepEqual(await pins(), backups());
+  result = await drive(["launch", "3"]);
+  assert.equal(backups().length, 1, "and the same build retrying on that same database does not back it up again");
+  console.log("PASS: an attempt made on no database or another database does not stand in for the database now in place");
 
   // ── 闸在等着换掉旧服务，端口上已经是这一版起的那份：不再接管、不停它 ──
   reset();

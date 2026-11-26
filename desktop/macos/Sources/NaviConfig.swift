@@ -206,6 +206,17 @@ enum DatabaseFile {
     return choice.url
   }
 
+  /// 数据根里眼前是哪一份库：那个文件的设备号 + inode + 创建时刻。换上另一份库（导入发布、回退到迁移前都是
+  /// 改名换上去的）就变，同一个文件改名（ash.db → navi.db）、写入不变。没有库是 "none"，认不准是 "unclear"。
+  static func identity(in dir: URL) -> String {
+    let found: URL?
+    do { found = try existing(in: dir) } catch { return "unclear" }
+    guard let url = found else { return "none" }
+    var info = stat()
+    guard stat(url.path, &info) == 0 else { return "unclear" }
+    return "\(info.st_dev)-\(info.st_ino)-\(info.st_birthtimespec.tv_sec).\(info.st_birthtimespec.tv_nsec)"
+  }
+
   /// 这个数据目录用过没有：两代库名、改名账本，有一样就算 —— 认不准的情形交给服务起来时说清楚，不当成第一次用。
   static func isInitialized(_ dir: URL) -> Bool {
     [name, LegacyIdentity.databaseFile, renameJournal].contains { FileManager.default.fileExists(atPath: dir.appendingPathComponent($0).path) }
@@ -365,7 +376,14 @@ enum RuntimeStore {
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
     try process.run()
-    process.waitUntilExit()
+    // 确认时它在服务记录那把锁里跑（ServerRecord.confirmServing）：卡住了不能把锁一直攥着。
+    let deadline = Date().addingTimeInterval(30)
+    while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+    if process.isRunning {
+      process.terminate()
+      process.waitUntilExit()
+      throw SQLiteFile.Failure("切换运行时 30 秒没完成")
+    }
     guard process.terminationStatus == 0 else { throw SQLiteFile.Failure("恢复运行时校验失败") }
   }
 
