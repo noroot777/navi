@@ -28,7 +28,7 @@ export function logProcessError(kind: "uncaught" | "rejection", error: unknown):
 }
 
 /** 起不来在哪一步：main.ts 里 exitAfterStartupFailure 的那几句。别的（端口冲突那句带端口号）记 `other`。 */
-const STARTUP_STAGES = new Set([
+export const STARTUP_STAGES = new Set([
   "unhandled rejection during startup", "uncaught exception during startup", "server initialization failed",
   "agent channel gateway failed", "scheduler failed to start", "server listen failed",
 ]);

@@ -32,9 +32,16 @@ export type RuntimeLogRecord = {
 /** 导出包的格式号：分析端按它认文件。 */
 export const RUNTIME_LOG_BUNDLE_FORMAT = "navi-runtime-log";
 
+/**
+ * 每一行带的格式号（`v`）。写入端的规则收紧过一次就加一：读的一侧（server/src/runtime-log/project.ts）
+ * 对读回来时核对不了的字段（路由模板），只信带着当前号的那些行。
+ */
+export const RUNTIME_LOG_SCHEMA = 2;
+
 export type RuntimeLogBundle = {
   format: typeof RUNTIME_LOG_BUNDLE_FORMAT;
-  version: 1;
+  /** 2：records 和 exits 是导出时按当前规则重新投影过的；1：更早的版本导出的，原样写盘的内容。 */
+  version: 1 | 2;
   exportedAt: string;
   host: { platform: string; arch: string; node: string; osRelease: string; cpus: number; memoryMB: number };
   records: RuntimeLogRecord[];
@@ -50,10 +57,18 @@ export type WebRuntimeEvent = (typeof WEB_RUNTIME_EVENTS)[number];
 /** 页面整页重载是谁发起的（`page.reload.reason`）。 */
 export const WEB_RELOAD_REASONS = ["identity", "account", "remote-access", "error-screen", "load-failure", "reclaim"] as const;
 
-const NAV_TYPES = ["navigate", "reload", "back_forward", "prerender"] as const;
-const SHELLS = ["mac", "win", "browser"] as const;
+export const NAV_TYPES = ["navigate", "reload", "back_forward", "prerender"] as const;
+export const SHELLS = ["mac", "win", "browser"] as const;
 /** `boundary`：页面里某一块的错误边界接住了（那一块换成了「加载失败」，整页还在）。 */
-const ERROR_KINDS = ["error", "rejection", "boundary"] as const;
+export const ERROR_KINDS = ["error", "rejection", "boundary"] as const;
+
+/**
+ * 页面一次最多发几条（页面按这个分批，服务端一次最多收这么多）。两边用同一个数：服务端不能在认出事件性质之前
+ * 就把多出来的截掉，页面也不能一批塞得比服务端收的多。
+ */
+export const WEB_EVENTS_PER_POST = 20;
+/** 页面那边的状态变化（不是详情）：分批时排在最前，服务端超额时也先收它们。 */
+export const WEB_STATE_EVENTS: readonly WebRuntimeEvent[] = ["page.crash", "page.reload", "page.boot"];
 
 /**
  * 报错原文**一个字都不进日志**，只看它是不是下面哪一类引擎报错，是就记那一类的固定说法。引擎报错的原文
@@ -85,8 +100,12 @@ export function scrubErrorMessage(_name: string | undefined, message: unknown): 
   return ERROR_TEMPLATES.find(([pattern]) => pattern.test(message))?.[1];
 }
 
-/** 固定说法反查：页面报上来的 msg 必须正好是表里的一句。 */
+/** 固定说法反查：页面报上来的 msg、读回来的旧记录里的 msg 必须正好是表里的一句。 */
 const ERROR_TEMPLATE_TEXTS = new Set(ERROR_TEMPLATES.map(([, text]) => text));
+
+export function isErrorTemplate(msg: unknown): msg is string {
+  return typeof msg === "string" && ERROR_TEMPLATE_TEXTS.has(msg);
+}
 
 /**
  * 错误名只认名单（引擎自带的、Node/浏览器常见的、navi 代码里会抛的几类）。名单外的一律记成 `OtherError`：
@@ -326,7 +345,7 @@ export function sanitizeWebEvent(
       const name = scrubErrorName(event.name);
       set("kind", pick(event.kind, ERROR_KINDS));
       set("name", name);
-      set("msg", typeof event.msg === "string" && ERROR_TEMPLATE_TEXTS.has(event.msg) ? event.msg : undefined);
+      set("msg", isErrorTemplate(event.msg) ? event.msg : undefined);
       set("frames", verifyFrames(event.frames, locations));
       break;
     }

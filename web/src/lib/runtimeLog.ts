@@ -4,8 +4,12 @@
 // 页面主动整页重载的原因，没人接住的脚本报错，和事件流断开了多久。报错只带名字、报错类别的固定说法
 // 和栈上的代码位置，原文和页面内容一个字都不带（服务端收的时候再按同一份白名单核一遍）。
 //
-// 攒一小批再发；整页重载之前那一条要用 keepalive，否则页面一走请求就被掐掉了。
-import { scrubErrorMessage, scrubErrorName, scrubStack, type WEB_RELOAD_REASONS, type WebRuntimeEvent } from "@navi/shared/runtime-log";
+// 攒一小批再发；整页重载之前那一条要用 keepalive，否则页面一走请求就被掐掉了。一次最多发 `WEB_EVENTS_PER_POST`
+// 条（服务端一次就收这么多），多了分几次发，崩溃、重载、载入这几条状态排在最前；详情攒太多就不再攒，
+// 状态一条不丢。
+import {
+  WEB_EVENTS_PER_POST, WEB_STATE_EVENTS, scrubErrorMessage, scrubErrorName, scrubStack, type WEB_RELOAD_REASONS, type WebRuntimeEvent,
+} from "@navi/shared/runtime-log";
 import { apiPath } from "./apiClient.ts";
 
 type Event = { ev: WebRuntimeEvent; [field: string]: unknown };
@@ -13,6 +17,8 @@ type Event = { ev: WebRuntimeEvent; [field: string]: unknown };
 type Pending = { event: Event; t: number };
 
 const FLUSH_MS = 3000;
+/** 攒着没发的详情（报错、断线）最多这么多：服务一直连不上时不能无限攒。 */
+const MAX_PENDING_DETAILS = 100;
 /**
  * 一页最多报几条普通报错（`page.error`）：一个坏组件每帧抛一次时，日志不能跟着刷屏。
  * 整页崩溃（`page.crash`）是状态变化不是详情，不占这份额度：一次载入只会崩一次，前面报错再多它也要记下。
@@ -51,8 +57,15 @@ const tab = tabId();
 /** 这一次载入：每次载入新起一个，这一页上报的每一条都带着它。 */
 const load = randomId();
 
+const isState = (pending: Pending) => WEB_STATE_EVENTS.includes(pending.event.ev);
+
 function send(events: Pending[], keepalive: boolean): void {
   if (!events.length) return;
+  const ordered = [...events.filter(isState), ...events.filter((pending) => !isState(pending))];
+  for (let start = 0; start < ordered.length; start += WEB_EVENTS_PER_POST) post(ordered.slice(start, start + WEB_EVENTS_PER_POST), keepalive);
+}
+
+function post(events: Pending[], keepalive: boolean): void {
   void fetch(apiPath("/runtime-log/events"), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -70,7 +83,9 @@ function flush(keepalive = false): void {
 }
 
 function queue(event: Event): void {
-  pending.push({ event, t: Date.now() });
+  const next = { event, t: Date.now() };
+  if (!isState(next) && pending.filter((item) => !isState(item)).length >= MAX_PENDING_DETAILS) return;
+  pending.push(next);
   timer ??= setTimeout(() => flush(), FLUSH_MS);
 }
 

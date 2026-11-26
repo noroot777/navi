@@ -32,8 +32,22 @@ const recentGc: Gc[] = [];
 
 let started = false;
 let stallSeq = 0;
+/** 观察者的回调排在心跳之后也可能还没跑：算一次卡顿里的 GC 之前先把已经结束、还没交过来的 GC 收进来。 */
+let gcObserver: PerformanceObserver | null = null;
+
+function takeGc(entries: PerformanceEntryList): void {
+  for (const entry of entries) {
+    const kind = (entry as unknown as { detail?: { kind?: number } }).detail?.kind ?? 0;
+    recentGc.push({ start: entry.startTime, end: entry.startTime + entry.duration, kind });
+    if (entry.duration >= LONG_GC_MS) {
+      runtimeLog("gc.long", { ms: Math.round(entry.duration), kind, heapMB: mb(process.memoryUsage().heapUsed) });
+    }
+  }
+  if (recentGc.length > 200) recentGc.splice(0, recentGc.length - 200);
+}
 
 function gcWithin(from: number, to: number): number {
+  if (gcObserver) takeGc(gcObserver.takeRecords());
   let total = 0;
   for (const gc of recentGc) {
     const overlap = Math.min(gc.end, to) - Math.max(gc.start, from);
@@ -44,17 +58,8 @@ function gcWithin(from: number, to: number): number {
 
 function watchGc(): void {
   try {
-    const observer = new PerformanceObserver((list) => {
-      for (const entry of list.getEntries()) {
-        const kind = (entry as unknown as { detail?: { kind?: number } }).detail?.kind ?? 0;
-        recentGc.push({ start: entry.startTime, end: entry.startTime + entry.duration, kind });
-        if (entry.duration >= LONG_GC_MS) {
-          runtimeLog("gc.long", { ms: Math.round(entry.duration), kind, heapMB: mb(process.memoryUsage().heapUsed) });
-        }
-      }
-      if (recentGc.length > 200) recentGc.splice(0, recentGc.length - 200);
-    });
-    observer.observe({ entryTypes: ["gc"] });
+    gcObserver = new PerformanceObserver((list) => takeGc(list.getEntries()));
+    gcObserver.observe({ entryTypes: ["gc"] });
   } catch {
     /* 拿不到 GC 事件就不报 gcMs 之外的东西 */
   }

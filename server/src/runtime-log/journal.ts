@@ -13,7 +13,7 @@
 //     的那一份也会记一条 `server.refused`），读-改-写会吞掉别人刚写的记录。
 import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { RuntimeLogRecord, RuntimeLogSource } from "@navi/shared/runtime-log";
+import { RUNTIME_LOG_SCHEMA, type RuntimeLogRecord, type RuntimeLogSource } from "@navi/shared/runtime-log";
 import { resolveNaviDbFile } from "../db/path.js";
 
 /** 单个文件超过这么大就轮转成 `.1`。两代合起来够看两三周的卡顿和重启。 */
@@ -69,7 +69,7 @@ function admit(ev: string, now: number): number | null | "first" {
 }
 
 function append(record: RuntimeLogRecord, retry = true): void {
-  const line = JSON.stringify(record);
+  const line = JSON.stringify({ ...record, v: RUNTIME_LOG_SCHEMA });
   if (line.length > MAX_LINE) return;
   const file = logFile();
   try {

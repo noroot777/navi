@@ -4,14 +4,15 @@
 //   1. 脱敏是白名单 —— 报错原文只换成固定说法（不按形状删字），路由记注册时的模板，栈帧只留核对成 navi 自己
 //      代码文件的位置（不存函数名）；业务报错原文、文件路径、任务号、页面多塞的字段一个都进不了日志；页面上
 //      整页崩溃不被普通报错的额度吞掉；
-//   2. 落盘尽力而为且限流，目录被清掉了会重建；
+//   2. 落盘尽力而为且限流，目录被清掉了会重建；页面分批发、状态排前，服务端超额先收状态、截掉的留个数；
+//      读回来的每一条（含更早版本写下的）都按当前规则重新投影，报告和导出只见投影之后的；
 //   3. 卡顿检测 + 采样器在真实卡顿里采得到调用栈（JS 忙算、同步子进程两种都要采到 —— 后者正是
 //      「服务卡住、窗口闪一下」最常见的样子，采不到这个功能就没有意义）；
 //   4. 分析把每一次撤页归到对的原因上；上一轮服务是谁按身份（runId）对，怎么没的只说记录里有的；每次「闪一下」
 //      只由看见它的那一方（窗口 / 页面）来数，两边的次数分开报、不相加，别的来源只附「按时间对上」。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -155,9 +156,10 @@ function serverLines(): Array<Record<string, unknown>> {
     { ev: "page.boot", nav: "reload", hidden: false, sincePrevMs: 1200 }, "多塞的字段、不像标识的标识都不收");
 }
 
-// ── 1c. 页面采集：整页崩溃是状态变化，不占普通报错的额度 ─────────────────
+// ── 1c. 页面采集：整页崩溃是状态变化，不占普通报错的额度，也不被批量上限挤掉 ─────
 {
   const posted: Array<Record<string, unknown>> = [];
+  const batches: string[][] = [];
   const listeners = new Map<string, (event: { error?: unknown; reason?: unknown }) => void>();
   const store = new Map<string, string>();
   Object.assign(globalThis, {
@@ -166,18 +168,37 @@ function serverLines(): Array<Record<string, unknown>> {
     document: { visibilityState: "visible" },
     window: { addEventListener: (name: string, fn: (event: { error?: unknown }) => void) => listeners.set(name, fn) },
     fetch: async (_url: string, init: { body: string }) => {
-      posted.push(...(JSON.parse(init.body) as { events: Array<Record<string, unknown>> }).events);
+      const { events } = JSON.parse(init.body) as { events: Array<Record<string, unknown>> };
+      posted.push(...events);
+      batches.push(events.map((event) => String(event.ev)));
       return new Response("{}");
     },
   });
   const page = await import("../../web/src/lib/runtimeLog.ts");
   const fail = (i: number) => Object.assign(new Error("x"), { stack: `Error: x\n    at f${i} (http://localhost:4317/assets/a.js:${i}:1)` });
   for (let i = 1; i <= 12; i += 1) listeners.get("error")!({ error: fail(i) });
+  // 第 4 轮复审实测：连接反复断开恢复攒出二十几条详情，排在后面的崩溃被服务端只收前 20 条截掉了。
+  for (let i = 0; i < 11; i += 1) { page.reportEventsConnection(false); page.reportEventsConnection(true); }
   page.reportPageCrash(new TypeError("boom"));
   page.reportPageCrash(new TypeError("again"));
   assert.equal(posted.filter((event) => event.ev === "page.error").length, 10, "普通报错照旧只报前 10 条");
   assert.equal(posted.filter((event) => event.ev === "page.crash").length, 1, "普通报错用完了额度，整页崩溃也要记下（一次载入只记一次）");
+  assert.ok(batches.every((batch) => batch.length <= shared.WEB_EVENTS_PER_POST), `每次发的不超过服务端一次收的：${batches.map((b) => b.length)}`);
+  assert.deepEqual(batches[0]!.slice(0, 2), ["page.boot", "page.crash"], "状态排在最前");
+  assert.equal(posted.length, 1 + 10 + 22 + 1, "分批发完，一条不少");
   for (const name of ["location", "sessionStorage", "document", "window", "fetch"]) Reflect.deleteProperty(globalThis, name);
+
+  // 服务端：老页面一批塞得比上限多时，先收状态、再收详情，没收的记个数。
+  const { Hono } = await import("hono");
+  const { mountRuntimeLogRoutes } = await import("../src/runtime-log/routes.js");
+  const api = new Hono();
+  mountRuntimeLogRoutes(api);
+  const oversized = [...Array.from({ length: 24 }, () => ({ ev: "events.down", tab: "tabA", load: "loadA" })), { ev: "page.crash", name: "TypeError", tab: "tabA", load: "loadA" }];
+  const response = await api.request("/runtime-log/events", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ events: oversized }) });
+  assert.deepEqual(await response.json(), { kept: 20, dropped: 5 });
+  const web = serverLines().filter((line) => line.src === "web");
+  assert.equal(web.filter((line) => line.ev === "page.crash").length, 1, "排在第 25 条的崩溃照样收下");
+  assert.deepEqual(web.filter((line) => line.ev === "log.dropped").map((line) => [line.of, line.count]), [["events.down", 5]], "截掉的留下个数");
 }
 
 // ── 1b. 慢请求和卡顿时在处理的请求记注册的路由模板，不是请求路径 ─────────
@@ -502,6 +523,9 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.ok(throttled.notes.some((note) => note.includes("至少 4 条") && note.includes("下限")), JSON.stringify(throttled.notes));
   const startedDropping = analyzeRuntimeLog([W(100, "page.boot", { nav: "reload", tab: "t", load: "l2" }), W(101, "log.dropping", { of: "page.reload" })], []);
   assert.ok(startedDropping.notes.some((note) => note.includes("下限")), JSON.stringify(startedDropping.notes));
+  // 起不来的那次进报错汇总，带着卡在哪一步。
+  const startupFailed = analyzeRuntimeLog([S(100, "server.startup_failed", { stage: "server listen failed", name: "Error", code: "EADDRINUSE" })], []);
+  assert.equal(startupFailed.errors[0]?.name, "启动失败（server listen failed） Error(EADDRINUSE)");
   // 整页崩溃的那一条排在证据最前，前面的普通报错是上下文。
   const crashAfterErrors = analyzeRuntimeLog([
     ...[1, 2, 3].map((n) => W(100 + n, "page.error", { kind: "error", name: "RangeError", tab: "t", load: "lc" })),
@@ -530,6 +554,33 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.ok(!JSON.stringify(bundle).includes("--token=abc"), "退出账本的 note（可能带别的进程的命令行）不进导出包");
   assert.ok(!JSON.stringify(bundle).includes(root), "导出包里不带本机路径");
   assert.equal(readRuntimeLogDir(runtimeLogDir()).length, loaded.records.length);
+
+  // 读回来的每一条都按当前规则重新投影：更早版本写下的原文、请求路径、多余字段、认不出的事件都不出去。
+  const legacy = [
+    { at: new Date().toISOString(), src: "server", pid: 7, ev: "server.error", kind: "uncaught", name: "CustomerAcquisitionBudget",
+      msg: "CustomerAcquisitionBudget is not a function", code: "ERR_CUSTOMER", frames: ["CustomerAcquisitionBudget server/src/main.ts:1"], title: "客户名单" },
+    { at: new Date().toISOString(), src: "server", pid: 7, ev: "http.slow", route: "/api/tasks/abc123/customer", method: "GET", ms: 4000 },
+    { at: new Date().toISOString(), src: "web", pid: 7, ev: "page.error", tab: "Customer42", name: "Error", frames: ["src/Customer/../lib/runtimeLog.ts:1"] },
+    { at: new Date().toISOString(), src: "server", pid: 7, ev: "task.content", text: "客户名单" },
+  ];
+  appendFileSync(join(runtimeLogDir(), "server.jsonl"), `${legacy.map((line) => JSON.stringify(line)).join("\n")}\n`);
+  runtimeLog("http.slow", { route: "/api/tasks/:id/messages", method: "GET", ms: 4000, status: 200 });
+  const reread = loadDataDir(root).records;
+  const exported = JSON.stringify(buildRuntimeLogBundle(null));
+  assert.ok(!/Customer|abc123|客户/.test(exported), "旧记录里的原文、路径、标识不进导出包");
+  assert.ok(!/Customer|abc123|客户/.test(JSON.stringify(reread)), "报告和时间线读到的也是投影之后的");
+  const oldError = reread.find((r) => r.ev === "server.error" && r.pid === 7)!;
+  assert.deepEqual(oldError, { at: oldError.at, src: "server", pid: 7, ev: "server.error", kind: "uncaught", name: "OtherError", code: "OTHER", frames: ["server/src/main.ts:1"] });
+  assert.equal(reread.find((r) => r.ev === "http.slow" && r.pid === 7)!.route, undefined, "没有格式号的旧行，路由读回来核对不了，不留");
+  assert.equal(reread.find((r) => r.ev === "page.error" && r.pid === 7)!.tab, undefined, "不是摘要的标识不留");
+  assert.ok(!reread.some((r) => r.ev === "task.content"), "认不出的事件整条不要");
+  assert.equal(serverLines().find((line) => line.ev === "http.slow" && line.pid === process.pid)?.v, shared.RUNTIME_LOG_SCHEMA, "当前写入端每行带格式号");
+  assert.ok(reread.some((r) => r.ev === "http.slow" && r.route === "/api/tasks/:id/messages"), "带格式号的路由模板照留");
+  // 更早版本导出的包（version 1）读的时候同样投影；version 2 是导出时投影过的。
+  const oldBundle = join(root, "old-bundle.json");
+  writeFileSync(oldBundle, JSON.stringify({ ...buildRuntimeLogBundle(null), version: 1, records: legacy, exits: [{ at: legacy[0]!.at, kind: "signal", signal: "SIGTERM; rm -rf", note: "x" }] }));
+  const oldLoaded = loadRuntimeLogPath(oldBundle);
+  assert.ok(!/Customer|abc123|客户|rm -rf/.test(JSON.stringify(oldLoaded)), JSON.stringify(oldLoaded.records));
 
   // 按窗口读时，窗口前最后一次服务启动作为上下文带上，别的窗口外记录不带。
   const day = 86_400_000;

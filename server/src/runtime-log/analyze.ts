@@ -268,8 +268,10 @@ export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummar
   const restarts = [...restartMap].filter(([start, verdict]) => verdict.basis !== "none" && inWindow(start.at)).map(([start, verdict]) => ({ at: start.at, how: verdict.how }));
 
   const errorTally = new Map<string, { src: string; name: string; count: number; last: string }>();
-  for (const error of sorted.filter((r) => r.ev === "server.error" || r.ev === "page.error" || r.ev === "page.crash")) {
-    const name = `${error.name ?? "?"}${error.code ? `(${error.code})` : ""}${Array.isArray(error.frames) && error.frames.length ? ` @ ${(error.frames as string[])[0]}` : ""}`;
+  for (const error of sorted.filter((r) => r.ev === "server.error" || r.ev === "server.startup_failed" || r.ev === "page.error" || r.ev === "page.crash")) {
+    // 起不来的那次带上卡在哪一步，跟运行中没人接的异常分开数。
+    const stage = error.ev === "server.startup_failed" ? `启动失败（${error.stage ?? "other"}）` : "";
+    const name = `${[stage, error.name ?? (stage ? "" : "?")].filter(Boolean).join(" ")}${error.code ? `(${error.code})` : ""}${Array.isArray(error.frames) && error.frames.length ? ` @ ${(error.frames as string[])[0]}` : ""}`;
     const key = `${error.src}:${name}`;
     const tally = errorTally.get(key) ?? { src: error.src, name, count: 0, last: error.at };
     tally.count += 1;

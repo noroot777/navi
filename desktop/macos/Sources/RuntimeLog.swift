@@ -33,6 +33,8 @@ enum RuntimeLog {
       line["src"] = "mac"
       line["pid"] = Int(getpid())
       line["ev"] = event
+      // 格式号，同 @navi/shared/runtime-log 的 RUNTIME_LOG_SCHEMA。
+      line["v"] = 2
       guard JSONSerialization.isValidJSONObject(line),
             let data = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]) else { return }
       append(data)

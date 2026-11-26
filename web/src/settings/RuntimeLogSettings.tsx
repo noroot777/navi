@@ -8,6 +8,8 @@ import { Button } from "../components/ui.tsx";
 import "./runtime-log-settings.css";
 
 const DAYS = 7;
+/** 停在这一页时隔这么久重新取一次：新出的事要看得到，不必离开再进来。 */
+const REFRESH_MS = 30_000;
 const secs = (ms: number) => `${(ms / 1000).toFixed(1)} 秒`;
 
 export function RuntimeLogSettings({ notify }: { notify: (message: string) => void }) {
@@ -17,10 +19,12 @@ export function RuntimeLogSettings({ notify }: { notify: (message: string) => vo
 
   useEffect(() => {
     let live = true;
-    request<{ dir: string; report: RuntimeLogReport }>(`/runtime-log/report?days=${DAYS}`)
-      .then((next) => { if (live) setState(next); })
+    const load = () => request<{ dir: string; report: RuntimeLogReport }>(`/runtime-log/report?days=${DAYS}`)
+      .then((next) => { if (live) { setState(next); setFailed(null); } })
       .catch((error) => { if (live) setFailed(error instanceof ApiError ? error.message : "读不到运行日志"); });
-    return () => { live = false; };
+    void load();
+    const timer = setInterval(() => { if (document.visibilityState === "visible") void load(); }, REFRESH_MS);
+    return () => { live = false; clearInterval(timer); };
   }, []);
 
   const doExport = useCallback(async () => {
