@@ -1,12 +1,17 @@
 // 这台设备上此刻有没有哪个页面正对着看某个任务 —— 系统通知据此不弹（lib/systemNotify.ts）。
 //
-// 「看着」= 那个任务的会话视图挂在页面上（TaskDetail / TeamView / DuetView 挂载时登记），且这个页面在前台（可见、
-// 有焦点）。认视图挂没挂，不认地址栏：切到 Git 工作台、助手、聊天时地址栏里的 task 还留着，人已经不在看它了。
+// 「看着」= 那个任务的会话视图此刻摆在页面上（TaskDetail / TeamView / DuetView 登记），且这个页面在前台（可见、有焦点）。
+// 认视图，不认地址栏：切到 Git 工作台、助手、聊天时地址栏里的 task 还留着，人已经不在看它了。
+// 视图挂着不等于摆出来：布局把整块内容收起来、组件却留着的（窄屏切回列表，workspace.css is-narrow-list），由布局经
+// TaskContentShown 告诉里面的视图「此刻没摆出来」。浮在上面的随手记、抽屉不算收起：任务还摆在旁边。
 //
 // 几个页面（几个标签、几个窗口）各收到同一条通知，后台那几个也得知道前台那个正看着：各页面经 BroadcastChannel
 // 互相报一声自己此刻在前台看着哪几个任务。页面崩掉来不及说「不看了」的，那一声过了 STALE_MS 不再算数，在前台
 // 看着的页面每 BEAT_MS 重报一次。
-import { useEffect } from "react";
+import { createContext, useContext, useEffect } from "react";
+
+/** 这块内容此刻摆没摆出来（布局给，默认摆着）。 */
+export const TaskContentShown = createContext(true);
 
 const CHANNEL = "navi:task-viewing";
 const BEAT_MS = 15_000;
@@ -62,10 +67,11 @@ export function startTaskViewing(): void {
   window.setInterval(() => { if (watching().length) announce(); }, BEAT_MS);
 }
 
-/** 任务视图挂着期间登记「这一页在看它」。 */
+/** 任务视图摆出来期间登记「这一页在看它」。 */
 export function useViewingTask(taskId: string | null | undefined): void {
+  const shown = useContext(TaskContentShown);
   useEffect(() => {
-    if (!taskId) return;
+    if (!taskId || !shown) return;
     startTaskViewing();
     mounted.set(taskId, (mounted.get(taskId) ?? 0) + 1);
     announce();
@@ -75,7 +81,7 @@ export function useViewingTask(taskId: string | null | undefined): void {
       else mounted.delete(taskId);
       announce();
     };
-  }, [taskId]);
+  }, [taskId, shown]);
 }
 
 /** 这台设备上有没有哪个页面此刻在前台看着这个任务（本页或别的页）。 */

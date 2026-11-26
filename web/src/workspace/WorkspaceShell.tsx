@@ -63,6 +63,7 @@ import { AssistantView } from "../assistant/AssistantView.tsx";
 import { readGitLocation } from "../git-workbench/navigation.ts";
 import { useProjects } from "./useProjects.ts";
 import { useNarrowPane } from "./useNarrowPane.ts";
+import { TaskContentShown } from "../lib/taskViewing.ts";
 import { ErrorBoundary, LoadFailure } from "../components/ErrorBoundary.tsx";
 const GitWorkbench = lazy(() => import("../git-workbench/GitWorkbench.tsx").then((module) => ({ default: module.GitWorkbench })));
 
@@ -628,7 +629,7 @@ export function WorkspaceShell() {
   return (
     <><div className="workspace-system-layout">{handoffAlert}<div className={`workspace-shell${spread.laidOut ? " is-spread" : ""}${chatOpen ? " is-chat" : ""}${assistantOpen ? " is-assistant" : ""}${narrowPane.pane === "both" ? "" : ` is-narrow-${narrowPane.pane}`}`} style={{ "--workspace-sidebar-width": `${sidebarWidth}px` } as CSSProperties}>
       <WorkspaceSidebar projects={projects} currentProject={currentProject} scope={scope} tasks={tasks} selectedTaskId={taskId} selectedRemoteTaskId={remoteSelection?.task.id ?? null} collapsed={collapsed && !narrowPane.narrow} spread={spread} width={sidebarWidth} onWidthChange={setSidebarWidth} onProject={selectProject} onTaskMode={selectTaskMode} onTask={toContent(selectTask)} onRemoteTask={toContent(selectRemoteTask)} onHandoffFinished={() => refetchTasks({ silent: true }).then(() => {})} onQueueChanged={() => refetchTasks({ silent: true }).then(() => {})} outbound={outboundBar} onOpenTerminal={currentProject && canUseTerminal ? terminal.reveal : null} commands={commandsWiring} notify={notify} onToggleCollapsed={() => { spread.close(); setCollapsed((value) => !value); }} onSearch={() => setPaletteOpen(true)} onOpenRecall={() => setRecallOpen(true)} onNotes={() => openNotes()} onChat={toContent(openChat)} chatOpen={chatOpen} onAssistant={toContent(openAssistant)} assistantOpen={assistantOpen} onCreate={toContent(() => openComposer())} onNewProject={() => setCreateDialog({ kind: "project", reason: null })} onSettings={openSettingsHome} />
-      <main className="workspace-main">
+      <TaskContentShown.Provider value={narrowPane.pane !== "list"}><main className="workspace-main">
         {narrowPane.pane === "content" && <button type="button" className="workspace-narrow-back" onClick={narrowPane.showList}><CaretLeft size={14} weight="bold" aria-hidden="true" />列表</button>}
         {loadError && <div className="workspace-load-error">{loadError.message}</div>}
         {assistantOpen ? <AssistantView project={currentProject} projects={projects} onTask={(task) => { updateTask(task); selectTask(task); }} onSettings={openSettings} onExit={closeAssistant} /> : chatOpen && currentProject ? <ChatView key={currentProject.id} project={currentProject} onTask={selectTask} onExit={() => setChatOpen(false)} /> : composer && currentProject ? composerPanel(currentProject) : remoteSelection ? (
@@ -652,7 +653,7 @@ export function WorkspaceShell() {
           onExpand: () => openComposer(),
           below: <HomeTodo rows={homeRows} all={tasks} onOpen={(task) => toContent(selectTask)(task)} />,
         }) : <><header className="workspace-app-bar"><span className="workspace-app-title">{scopeKind === "tasks" ? TASK_MODE_LABEL : currentProject?.name ?? "Navi"}</span></header><div className="workspace-columns"><section className="workspace-primary" aria-label="主工作区"><TaskPlaceholder project={currentProject} task={selectedTask} onCreateProject={() => setCreateDialog({ kind: "project", reason: null })} /></section></div></>}
-      </main>
+      </main></TaskContentShown.Provider>
     </div>{terminalDock}{statusBar}</div>{overlays}</>
   );
 }

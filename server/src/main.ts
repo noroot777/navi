@@ -188,6 +188,9 @@ async function initializeServer() {
   if (!IS_PREVIEW_INSTANCE) {
     // 自动开工先按住，接回之后数名额才数得对（launch-request.ts），由下面 startPrerequisiteLaunches 放开。
     (await import("./launch-request.js")).holdLaunchesForBoot();
+    // 系统通知记底要排在接回、收拾之前：之后收拾出来的中断才是「新发生的」，不会被当成历史记掉（system-notify.ts）。
+    await (await import("./system-notify.js")).baselineSystemNotify()
+      .catch((err) => console.error("[navi] 系统通知记底失败（不影响启动，全量对账时再记）:", err));
     await reattachRunningTasks();
     // 回合里交出去、那一轮却没被接回来的哨兵结果退回待发送 —— 必须夹在这两步之间
     // (顺序的理由见 monitor-turn-handoff.ts 的 `returnOrphanTurnHandoffs`)。
