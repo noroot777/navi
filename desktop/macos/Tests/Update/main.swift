@@ -136,9 +136,10 @@ case "launch":
 
 case "record":
   ServerRecord.write(pid: Int(args[2])!, runtime: NaviConfig.targetRuntimeURL)
-  // 测试按需把构建号改成别的，模拟「旧版 app 起的」。
+  // 测试按需把构建号改成别的，模拟「旧版 app 起的」（同一种记账：记着它开着的是眼前这份库）。
   if args.count > 3 {
-    let data = try! JSONEncoder().encode(ServerRecord(pid: Int(args[2])!, bundleVersion: args[3], confirmedAt: ServerRecord.read()?.confirmedAt))
+    let data = try! JSONEncoder().encode(ServerRecord(pid: Int(args[2])!, bundleVersion: args[3], confirmedAt: ServerRecord.read()?.confirmedAt,
+                                                      database: DatabaseFile.identity(in: NaviConfig.dataURL)))
     try! data.write(to: ServerRecord.url)
   }
   emit("STALE \(ServerRecord.staleVersion(servingPID: Int(args[2])!) ?? "none")")

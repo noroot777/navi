@@ -64,11 +64,10 @@ struct ServerRecord: Codable {
   /// 库最后交给了哪一版 app（见类型顶部）。
   var lastHandedTo: String {
     let current = DatabaseFile.identity(in: NaviConfig.dataURL)
-    let sameDatabase = { (recorded: String?) in recorded == nil || recorded == current }
-    if let attempt, attempt.startedAt > (confirmedAt ?? .distantPast), sameDatabase(attempt.database) {
+    if let attempt, attempt.startedAt > (confirmedAt ?? .distantPast), DatabaseFile.isSame(attempt.database, as: current) {
       return attempt.bundleVersion
     }
-    return sameDatabase(database) ? bundleVersion : "unknown"
+    return DatabaseFile.isSame(database, as: current) ? bundleVersion : "unknown"
   }
 
   /// 要起服务了：先记下是这一版、用哪一份运行时、什么时候起的、对着哪一份库（还没有库也记）。写不进去抛错，
@@ -100,17 +99,26 @@ struct ServerRecord: Codable {
   /// 记上了，比确认时刻早、同一份库的恢复点作废，这次切换的恢复事务（RuntimeRecovery.confirmed）也在同一把锁里了结。
   /// 别的进程、过时的一眼、记着另一份库的账、跑的不是那次尝试那份运行时的都不算。尝试里的进程号还是 0 时，只有
   /// `launchedHere`（调用方就是起这个进程、拿着它进程号的启动器）认它。返回这一眼记上了没有（没有记录可对也算）。
+  ///
+  /// 记下的「是哪份库」是这一刻数据根里那份，所以先要证明它就是这个进程开着的那份：它此刻还握着这份库的单实例锁
+  /// （server 开库之前就拿锁，一直握到退出；app 起的服务都写锁）。它已经退了、握锁的是别人，这一眼就说明不了眼前
+  /// 这份库 —— 不管记录里记的是「那时没有库」、没记、还是同一份 —— 一律不记。导入、回退换库都要求没人握着锁，
+  /// 所以握着锁的进程开着的不会是换上来之前的那份。
   @discardableResult
   static func confirmServing(pid: Int?, codeDir: String? = nil, observedAt: Date, launchedHere: Bool = false) -> Bool {
     guard let pid, pid > 1 else { return false }
     return (try? locked { () -> Bool in
+      guard let holder = DatabaseFile.liveHolder(in: NaviConfig.dataURL), Int(holder.pid) == pid else {
+        RuntimeLog.record("server.confirm_deferred", ["serverPid": pid, "step": "database"])
+        return false
+      }
       guard let record = read() else {
         RuntimeRecovery.confirmed(codeDir: codeDir)
         return true
       }
       let database = DatabaseFile.identity(in: NaviConfig.dataURL)
       let confirmed: ServerRecord
-      // 那时没有库（"none"）：库就是它建的。
+      // 那时没有库（"none"）：库就是它建的（它握着眼前这份库的锁，见上）。
       if let attempt = record.attempt, attempt.database == "none" || !DatabaseFile.contradicts(attempt.database, database),
          attempt.pid == pid || (attempt.pid == 0 && launchedHere),
          attempt.runtime == nil || codeDir.map({ NaviHealth.samePath($0, attempt.runtime!) }) ?? true {

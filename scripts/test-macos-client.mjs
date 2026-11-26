@@ -104,6 +104,9 @@ fs.writeFileSync(${JSON.stringify(seen)},JSON.stringify({cwd:process.cwd(),dataD
   leaked:Object.keys(process.env).filter(k=>k.startsWith('NAVI_MAC_'))}));
 ${exitAtOnce ? "process.exit(1);" : ""}
 fs.writeFileSync(path.join(dataDir,'navi.db'),'');
+// 像真 server 一样握着这份库的单实例锁：app 确认在服务只认握着锁的那个进程。
+const startedAt=Date.now()-process.uptime()*1000;
+fs.writeFileSync(path.join(dataDir,'navi.db.navi.lock'),JSON.stringify({version:1,pid:process.pid,processStartedAtMs:startedAt,token:'fixture'}));
 http.createServer((req,res)=>{res.setHeader('Content-Type','application/json');
 res.end(JSON.stringify({ok:true,pid:process.pid+${pidOffset},instance:{id:'svc-'+process.pid,dataDir,codeDir:path.resolve(__dirname,'../..'),
   localOnly:process.env.NAVI_LOCAL_ONLY==='1',desktop:process.env.NAVI_DESKTOP_APP==='1',windowPort:Number(process.env.NAVI_WINDOW_PORT)}}));})

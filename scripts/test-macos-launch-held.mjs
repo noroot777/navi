@@ -10,7 +10,8 @@
 // 「停掉它」只停那一个、它缓过来就不停、不理 SIGTERM 时再给强制结束；起出来的那份没服务过就退了（被锁挡下 /
 // 自己没起来 / 等满时限之后才退）→ 在服务的那一份一字不动、旧版照样认得出，这一次只记成一次没成的尝试（留的底
 // 照常固定，这一版在同一份库上再起不重备；那时没有库、或者之后换了一份库 → 照常备份）；旧服务在尝试之后应答 → 它的恢复点作废；尝试之前的一眼迟到了才交来确认 → 什么都
-// 不改；别的库的恢复点不算这份库备过、也不当它的恢复入口，没记是哪份库的（旧版留下的）哪份库都不算；作废了的
+// 不改，应答过的那份退了、库换了之后才交来的一眼也不改（确认只认此刻握着这份库锁的那个进程）；别的库的恢复点
+// 不算这份库备过、也不当它的恢复入口，没记是哪份库的（旧版留下的）哪份库都不算；作废了的
 // 别的库的备份也不当「最近一份备份」指给人；进程号没补上的尝试，不是这个启动器起的进程应答了不替它认；闸在等着
 // 换掉旧服务时端口上已经是这一版起的那份 → 不再接管它。
 import assert from "node:assert/strict";
@@ -118,6 +119,9 @@ async function startHolder({ lock = true, listen = true, stubborn = false } = {}
 }
 
 const alive = (child) => child.exitCode === null && child.signalCode === null;
+/** 让一个起的时候没写锁的假旧服务此刻握上这份库的单实例锁（真 server 一直握着；确认只认握着锁的那个进程）。 */
+const holdLock = (holder) => writeFileSync(lockFile, JSON.stringify({ version: 1, pid: holder.pid,
+  processStartedAtMs: holder.startedAt, processStartedAt: new Date(holder.startedAt).toISOString(), token: 'old' }));
 
 async function stop(holder) {
   if (alive(holder.child)) {
@@ -245,6 +249,7 @@ await withTestResources(async () => {
   assert.equal(record().bundleVersion, OLD);
   assert.equal(await staleness(holder.pid), OLD, "an exit nobody waited for does not cost the old service its version");
   setHealth("ok");
+  holdLock(holder);
   result = await drive(["launch", "5"]);
   assert.match(result.out, /LAUNCH ready/, result.out);
   assert.deepEqual(spawnedPids(), [lingering], "the recovered old service is adopted, nothing new is started");
@@ -376,7 +381,7 @@ await withTestResources(async () => {
   result = await drive(["launch", "3"]);
   assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
   const [releasedBackup] = backups();
-  holder = await startHolder({ lock: false });
+  holder = await startHolder();
   await drive(["record", String(holder.pid)]);
   await drive(["confirm", String(holder.pid)]);
   await stop(holder);
@@ -397,6 +402,41 @@ await withTestResources(async () => {
     spawnSync("chmod", ["0700", join(data, "backups")]);
   }
   console.log("PASS: a released backup of another database is not offered as this database's way back");
+
+  // ── 第一次全新开始（那时没有库）起的那份应答过、之后退了；库被挪走换上另一份，那一眼才交来确认：它没开过这份库，
+  //    不记；这份库下次起之前照常备份 ──
+  reset();
+  setHealth("ok");
+  rmSync(join(data, "navi.db"));
+  await drive(["attempt-marker"]);
+  holder = await startHolder();
+  await drive(["record", String(holder.pid)]);
+  assert.equal(record().attempt.database, "none", "fixture: the attempt was made with no database");
+  const createdByIt = new DatabaseSync(join(data, "navi.db"));
+  createdByIt.exec("create table tasks (id text primary key); insert into tasks values ('first')");
+  createdByIt.close();
+  const goLate = join(temporary, "go-late");
+  const lateObserver = driveAsync(["observe", goLate]);
+  for (let i = 0; i < 100 && !lateObserver.output().includes("OBSERVED"); i++) await delay(50);
+  assert.match(lateObserver.output(), new RegExp(`OBSERVED ${holder.pid}`), lateObserver.output());
+  await stop(holder);
+  rmSync(join(data, "navi.db"));
+  const stagedE = join(temporary, "e.db");
+  const e = new DatabaseSync(stagedE);
+  e.exec("create table tasks (id text primary key); insert into tasks values ('imported')");
+  e.close();
+  renameSync(stagedE, join(data, "navi.db"));
+  writeFileSync(goLate, "");
+  result = await lateObserver.done;
+  assert.notEqual(record().pid, holder.pid, "a service that has exited is not confirmed on the database put in place after it");
+  assert.equal(record().database, undefined);
+  assert.equal(record().attempt.pid, holder.pid);
+  writeFileSync(newServerMode, "crash");
+  result = await drive(["launch", "3"]);
+  assert.match(result.out, /LAUNCH failed .*起来就退出了/, result.out);
+  assert.equal(backups().length, 1, "the database put in place gets its pre-migration backup");
+  assert.deepEqual(await pinsHere(), backups());
+  console.log("PASS: a late look at a service that has since exited does not vouch for whatever database is in place now");
 
   // ── 补进程号那一下没记上：之后不管是谁应答（更早就在的、之后才起的），别人都认不出是不是这次起的，不替它确认 ──
   reset();

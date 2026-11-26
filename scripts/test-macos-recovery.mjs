@@ -48,6 +48,9 @@ if(${JSON.stringify(version)}==='next'&&!fs.existsSync(data+'/.recovery-retry-cl
  if(fs.existsSync(data+'/.recovery-linger')){setTimeout(()=>process.exit(7),7000);return}
  process.exit(7);
 }
+// 像真 server 一样握着这份库的单实例锁：app 确认在服务只认握着锁的那个进程。
+const startedAt=Date.now()-process.uptime()*1000;
+fs.writeFileSync(data+'/navi.db.navi.lock',JSON.stringify({version:1,pid:process.pid,processStartedAtMs:startedAt,token:'fixture-token'}));
 const event=value=>fs.appendFileSync(data+'/../events.jsonl',JSON.stringify(value)+'\\n');
 const cleanupToken=fs.readFileSync(data+'/.recovery-cleanup-token','utf8');
 const server=http.createServer((request,response)=>{

@@ -117,7 +117,7 @@ const SCHEMA: Record<string, Record<string, Check>> = {
   "server.exited_while_held": { serverPid: num, holderPid: num },
   // 服务的账这一次没记上：起出来的进程号没补进尝试（attempt，之后只有起它的启动器认得出它）/ 应答了但 current
   // 切不过去（runtime）/ 服务记录写不进去（record），后两种下一次看到它应答再记。
-  "server.confirm_deferred": { serverPid: num, step: oneOf(["attempt", "runtime", "record"]) },
+  "server.confirm_deferred": { serverPid: num, step: oneOf(["attempt", "database", "runtime", "record"]) },
   "server.ensure": { outcome: oneOf(["ready", "needs_setup", "occupied", "unresponsive", "failed"]), ms: num },
   "cover.show": { kind: oneOf(["starting", "maintenance"]) },
   "cover.hide": {},

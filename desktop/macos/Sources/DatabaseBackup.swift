@@ -148,7 +148,7 @@ enum DatabaseBackup {
     let database = DatabaseFile.identity(in: NaviConfig.dataURL)
     do {
       try SQLiteFile.snapshot(from: db, to: partial)
-      setOrigin(database, of: partial)
+      try setOrigin(database, of: partial)
       try FileManager.default.moveItem(at: partial, to: target)
     } catch {
       try? FileManager.default.removeItem(at: partial)
@@ -184,10 +184,14 @@ enum DatabaseBackup {
   }
 
   /// 每份备份备的是哪份库，记在它自己的扩展属性里：跟着文件走，轮换删掉它也就没了，解除固定不影响。
+  /// 记不上就算这份备份没做成：解除固定之后就再也认不出它是哪份库的了。
   private static let originAttribute = "dev.navi.database"
 
-  private static func setOrigin(_ database: String, of url: URL) {
-    _ = database.withCString { value in setxattr(url.path, originAttribute, value, strlen(value), 0, 0) }
+  private static func setOrigin(_ database: String, of url: URL) throws {
+    let status = database.withCString { value in setxattr(url.path, originAttribute, value, strlen(value), 0, 0) }
+    guard status == 0 else {
+      throw SQLiteFile.Failure("备份 \(url.lastPathComponent) 记不下它备的是哪份库（\(String(cString: strerror(errno)))）")
+    }
   }
 
   static func origin(of url: URL) -> String? {
