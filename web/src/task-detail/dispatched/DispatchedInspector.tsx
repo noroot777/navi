@@ -52,8 +52,9 @@ function SubtaskTable({ task, allTasks, onOpenTask, onTaskUpdated, notify, branc
     const below = dispatchView.look(item).below;
     const { word, tone } = dispatchedWord(item);
     const meta = !accepted ? dispatchedMeta(item, now) : null;
+    const branch = open && (children.get(item.id)?.length ?? 0) > 0;
     return <li key={item.id}>
-      <div data-subtask-id={item.id} className={`dispatched-row${hint === item.id ? " is-hinted" : ""}${accepted ? " is-settled" : ""}`}>
+      <div data-subtask-id={item.id} className={`dispatched-row${hint === item.id ? " is-hinted" : ""}${accepted ? " is-settled" : ""}${branch ? " has-branch" : ""}`}>
         <span className="dispatched-row__mark">{mark(item) ?? <i className="dispatched-pip--quiet" />}</span>
         <span className="dispatched-row__top">
           <button type="button" className="dispatched-row__title" onClick={() => onOpenTask(item.id)}>{item.title || "未命名任务"}</button>
@@ -62,7 +63,7 @@ function SubtaskTable({ task, allTasks, onOpenTask, onTaskUpdated, notify, branc
         {!accepted && <em className={tone ? `is-${tone}` : undefined}>{word}</em>}
         {meta && <MetaLine meta={meta} />}
       </div>
-      {open && (children.get(item.id)?.length ?? 0) > 0 && list(item.id, seen)}
+      {branch && list(item.id, seen)}
     </li>;
   };
   const list = (parentId: string, seen: ReadonlySet<string>) => {
