@@ -39,8 +39,6 @@ const BASELINED = "system-notify-baselined";
 /** 上一次全量对账开始的时刻：这之后改过的任务下一次全量对账都带上。 */
 const SWEPT = "system-notify-swept";
 const BATCH = 40;
-/** 同一个人一次对账里超过这么多条就合成一条：重启后补上一堆、一口气跑完一批，不该叮叮叮响一串。 */
-export const DIGEST_OVER = 4;
 const FULL_SWEEP_MS = 10 * 60_000;
 
 type Notice = Extract<ServerEvent, { type: "task.notify" }>;
@@ -135,30 +133,35 @@ export class SystemNotifier {
     await writeMeta(SWEPT, at);
   }
 
-  /** quiet = 只记账不推（记底）。 */
+  /**
+   * quiet = 只记账不推（记底）。一个任务记完账就把它那几条推出去，一个任务出错只记一句、不连累别的：先把一批都记了账
+   * 再一起推的话，后面一个出错，前面记过账的就再也推不出去了（下一次对账身份已经一样）。
+   */
   async reconcile(taskIds: string[], { quiet = false }: { quiet?: boolean } = {}): Promise<void> {
     const ids = await withTeamLeads(taskIds);
-    const notices: Notice[] = [];
     for (let i = 0; i < ids.length; i += BATCH) {
       const batch = ids.slice(i, i + BATCH);
       const [views, facts] = await Promise.all([viewsOf(batch), factsOf(batch)]);
       for (const [taskId, view] of views) {
-        const fact = facts.get(taskId);
-        if (!view || !fact) {
-          await db.delete(imOutcomes).where(and(eq(imOutcomes.appId, SINK), eq(imOutcomes.taskId, taskId)));
-          continue;
+        try {
+          const fact = facts.get(taskId);
+          if (!view || !fact) {
+            await db.delete(imOutcomes).where(and(eq(imOutcomes.appId, SINK), eq(imOutcomes.taskId, taskId)));
+            continue;
+          }
+          const entries = await entriesOf(view, fact);
+          if (!quiet && this.stillSettling(taskId, view, entries)) continue;
+          for (const notice of await this.advance(view, entries, quiet)) this.publish(notice);
+        } catch (error) {
+          console.error(`[navi] 系统通知对账出错 task=${taskId}:`, error);
         }
-        const entries = await entriesOf(view, fact);
-        if (!quiet && this.stillSettling(taskId, view, entries)) continue;
-        notices.push(...await this.advance(view, entries, quiet));
       }
     }
-    for (const notice of digest(notices)) this.publish(notice);
   }
 
   /** 有事要人管、回合锁却还占着：这一轮还在结算，先不动，锁放开再对（同 im/reconcile.ts stillSettling）。 */
   private stillSettling(taskId: string, view: TaskView, entries: Entry[]): boolean {
-    const pending = (view.turn && view.turn.kind !== "duet_gate") || entries.some((entry) => entry.kind === "interrupt");
+    const pending = (view.turn && view.turn.kind !== "duet_gate") || entries.some((entry) => entry.kind === "interrupt" || entry.kind === "stop");
     if (!pending || !isTurnClaimed(taskId)) return false;
     if (!this.settling.has(taskId)) {
       this.settling.add(taskId);
@@ -203,28 +206,6 @@ function noticeOf(view: TaskView, kind: TaskNotifyKind, identity: string, body: 
     subtitle: view.projectName.trim() ? scrubTitle(view.projectName, 30) : "",
     body,
   };
-}
-
-/** 同一个人这一次超过 DIGEST_OVER 条：合成一条，列几个标题。 */
-export function digest(notices: Notice[]): Notice[] {
-  const byOwner = new Map<string | null, Notice[]>();
-  for (const notice of notices) byOwner.set(notice.ownerUserId, [...(byOwner.get(notice.ownerUserId) ?? []), notice]);
-  const out: Notice[] = [];
-  for (const [ownerUserId, items] of byOwner) {
-    if (items.length <= DIGEST_OVER) {
-      out.push(...items);
-      continue;
-    }
-    const titles = [...new Set(items.map((item) => `「${item.title}」`))];
-    out.push({
-      type: "task.notify", taskId: null, projectId: null, ownerUserId, kind: "digest",
-      key: `digest:${items[0]!.key}:${items.length}`,
-      title: `${items.length} 件事等你看`,
-      subtitle: "",
-      body: titles.length > 3 ? `${titles.slice(0, 3).join("、")} 等 ${titles.length} 个任务` : titles.join("、"),
-    });
-  }
-  return out;
 }
 
 let shared: SystemNotifier | null = null;

@@ -88,9 +88,8 @@ export function makeEventFilter(actor: Actor): {
       // 挂在人身上的事件：只推给他本人。排在 unrestricted 之前 —— 实例管理员看得见所有项目，
       // 却不该被别人的已读记录叫去重拉一遍自己那份。
       if (ev.type === "task.reads") return ev.ownerUserId === ownerIdOf(actor);
-      // 系统通知只弹给任务主人（多人模式）；合成的那一条不带任务，主人对上就行。别人的任务看得见也不弹。
+      // 系统通知只弹给任务主人（多人模式），主人也得看得见这个任务（下面按任务照常核）。别人的任务看得见也不弹。
       if (ev.type === "task.notify" && multiUser && ev.ownerUserId !== ownerIdOf(actor)) return false;
-      if (ev.type === "task.notify" && !ev.taskId) return true;
       if (unrestricted) return true;
       // 挂在项目上、不挂在任务上的事件：直接按项目可见性判。
       if (ev.type === "project.updated") return !!visible?.has(ev.projectId);

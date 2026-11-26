@@ -12,6 +12,7 @@
 import type { ServerEvent } from "@navi/shared";
 import { subscribeEvents } from "./events.ts";
 import { safeStorage } from "./safeStorage.ts";
+import { batchNotices, WINDOW_MS, type Shown } from "./noticeBatch.ts";
 import { startTaskViewing, viewedSomewhere } from "./taskViewing.ts";
 
 type Notice = Extract<ServerEvent, { type: "task.notify" }>;
@@ -84,7 +85,7 @@ export function openNoticeTarget(projectId: string | null, taskId: string | null
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
-function show(notice: Notice): void {
+function show(notice: Shown): void {
   const bridge = nativeBridge();
   if (bridge) {
     bridge({
@@ -101,15 +102,31 @@ function show(notice: Notice): void {
   };
 }
 
-/** 整个页面听一份（App 里挂一次）。返回退订。 */
+/** 整个页面听一份（App 里挂一次）。前后脚到的几条攒一下，多了合成一条（lib/noticeBatch.ts）。返回退订。 */
 export function startSystemNotify(): () => void {
   startTaskViewing();
-  return subscribeEvents((event) => {
-    if (event.type !== "task.notify" || !systemNotifyEnabled() || (event.taskId && viewedSomewhere(event.taskId))) return;
-    try {
-      show(event);
-    } catch {
-      // 系统那边不收（权限中途被收回、原生桥这一下不在）：这一条就不弹了，侧栏照样标着。
+  let pending: Notice[] = [];
+  let timer: number | null = null;
+  const flush = () => {
+    timer = null;
+    const batch = pending.filter((notice) => !viewedSomewhere(notice.taskId));
+    pending = [];
+    if (!systemNotifyEnabled()) return;
+    for (const notice of batchNotices(batch)) {
+      try {
+        show(notice);
+      } catch {
+        // 系统那边不收（权限中途被收回、原生桥这一下不在）：这一条就不弹了，侧栏照样标着。
+      }
     }
+  };
+  const unsubscribe = subscribeEvents((event) => {
+    if (event.type !== "task.notify" || !systemNotifyEnabled() || viewedSomewhere(event.taskId)) return;
+    pending.push(event);
+    timer ??= window.setTimeout(flush, WINDOW_MS);
   });
+  return () => {
+    unsubscribe();
+    if (timer !== null) window.clearTimeout(timer);
+  };
 }
