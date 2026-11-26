@@ -20,6 +20,7 @@ import { ensureTaskNoticeSchema } from "./schema-task-notice.js";
 import { ensureTaskReadsSchema } from "./schema-task-reads.js";
 import { ensureAcceptMemorySchema } from "./schema-accept-memory.js";
 import { ensureTaskWritesSchema } from "./schema-task-writes.js";
+import { ensureRequestReceiptsSchema } from "./schema-request-receipts.js";
 import { installTaskActionTriggers } from "./task-action-triggers.js";
 
 const dbFile = resolveNaviDbFile();
@@ -411,6 +412,7 @@ export async function ensureSchema() {
   await ensureRegressionEvidenceSchema(client);
   await ensureImSchema(client);
   await ensurePrerequisiteSchema(client);
+  await ensureRequestReceiptsSchema(client);
   // DDL 到此为止。剩下那一半(一次性数据搬运 + 退役字段/表清理)在 `migrations.ts`。
   await runDataMigrations(client);
   // 表和列都齐了才装：「任务能做什么」依赖的事实一落库就记脏（task-action-triggers.ts）。

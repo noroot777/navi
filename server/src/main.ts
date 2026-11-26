@@ -22,6 +22,7 @@ import { listenWindowPort } from "./window-port.js";
 import { responseCompression } from "./response-compression.js";
 import { mountPreviewOpenRoutes } from "./preview-access.js";
 import { runtimeHandoverGate } from "./runtime-handover-gate.js";
+import { requestReceipts } from "./request-receipts.js";
 import { startRuntimeGateway } from "./runtime-channel-gateway.js";
 import { runtimeAgentChannel } from "./runtime-agent-channels.js";
 import { markRuntimeAdoption } from "./runtime-recovery.js";
@@ -428,6 +429,8 @@ app.use("/api/*", personalWriteGate());
 // 里,逐个传 ownerUserId 一定会漏 —— 漏掉的那条会不带 key 发出去,对端多人实例直接
 // 拒收。做成一道横切的 AsyncLocalStorage,出站客户端自己去取(auth/handoff-outbound.ts)。
 app.use("/api/*", async (c, next) => withHandoffActor(ownerIdOf(actorOf(c)), () => next()));
+// 按请求号只执行一次（request-receipts.ts）：排在各道闸之后，被它们拒掉的请求不占请求号。
+app.use("/api/*", requestReceipts());
 app.route("/api", api);
 
 // 没被上面任何一条 api 路由认领的 `/api/*`,到这里就停,不许落到下方的 SPA 兜底。

@@ -122,11 +122,18 @@ api.post("/tasks/:id/ask", async (c) => {
     const problems = checkChoiceQuestion({ question: q, options: opts, items: questionItems });
     if (problems.length) return c.json({ error: choiceQuestionRejection(problems), problems }, 400);
   }
+  const answer = {
+    asked: true,
+    options: opts,
+    questionItems,
+    willSettleAs: r.mode === "team" ? "idle" : "paused",
+  };
   const asked = await setTaskQuestion({
     taskId,
     question: q,
     options: opts,
     items: questionItems,
+    effect: { request: requestHeader(c, NAVI_HEADERS.requestId), answer },
     ...(r.mode === "team" ? {} : { currentTurn: {
       token: r.activeTurnToken,
       directionToken: r.activeDirectionToken,
@@ -137,12 +144,7 @@ api.post("/tasks/:id/ask", async (c) => {
     if (latest && waitingOnDispatch(latest)) return c.json({ error: DISPATCH_WAIT_BLOCKS_ASK }, 409);
     return c.json({ error: "当前回合已经结束或已被引导，提问未写入" }, 409);
   }
-  return c.json({
-    asked: true,
-    options: opts,
-    questionItems,
-    willSettleAs: r.mode === "team" ? "idle" : "paused",
-  });
+  return c.json(answer);
 });
 
 // 答复一个提问暂停中的任务(调度者或用户都可调):清空 question,把答复作为
