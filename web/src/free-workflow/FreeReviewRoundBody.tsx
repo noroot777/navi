@@ -69,11 +69,10 @@ function roundSubtitle(run: FreeReviewRun, round: FreeReviewRound): string {
   return [reviewRoundLabel(round), run.reviewerName, reviewModelText(run, round), checkModeText(run)].filter(Boolean).join(" · ");
 }
 
-/** 铺开那一份的第一行：一行记录上没摆的身份（审查者、思考强度）、检查类型、起止。 */
+/** 铺开那一份的第一行：哪个模型、哪档智能水平审的（行上只写审查者名字）、检查类型、起止。说不出模型就不写。 */
 function roundMeta(run: FreeReviewRun, round: FreeReviewRound): string {
-  // 说不出模型时那一行记录已经写了审查者名字（FreeReviewPane），这里不再写一遍。
-  const reviewer = reviewModelText(run, round) ? run.reviewerName : null;
-  return [reviewer, reviewEffortText(run, round), checkModeText(run), timeRange(round.startedAt, round.endedAt)].filter(Boolean).join(" · ");
+  return [reviewModelText(run, round), reviewEffortText(run, round), checkModeText(run), timeRange(round.startedAt, round.endedAt)]
+    .filter(Boolean).join(" · ");
 }
 
 type RoundFallback = { run: FreeReviewRun; round: FreeReviewRound } | null;

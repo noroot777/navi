@@ -1,4 +1,5 @@
 import { and, eq } from "drizzle-orm";
+import { bus } from "./bus.js";
 import { db } from "./db/index.js";
 import { freeReviewRounds, regressionEvidence, scheduledMessages, tasks } from "./db/schema.js";
 import type { ReviewRanOn } from "@navi/shared/free-workflow";
@@ -272,6 +273,7 @@ export async function commitReviewTurnDelivery(taskId: string, receipt: ReviewSt
   /** 这一回合**实际拉起**的执行器解析出的模型/智能水平(orchestrator 手里那一份 `ex`)。 */
   ranOn?: ReviewRanOn): Promise<void> {
   if (!receipt) return;
+  let recordedRanOn = false;
   await db.transaction(async (transaction) => {
     const task = (await transaction.select().from(tasks).where(eq(tasks.id, taskId)))[0];
     const start = task?.waitOwnership?.start;
@@ -283,8 +285,11 @@ export async function commitReviewTurnDelivery(taskId: string, receipt: ReviewSt
     // 这一轮是哪个模型审的:记在核过派发身份的这一笔里,用的是真正拉起进程的那份解析结果 —— 提前在派发时
     // 另解析一次的话,排队期间改了执行器配置,记下的就是没跑的那个模型。只认自由审查轮(修复回合、验证轮不是)。
     const scope = ranOn && !receipt.repair ? await activeReviewScope(transaction, task) : undefined;
-    if (scope?.run && scope.directory === receipt.directory) await transaction.update(freeReviewRounds).set({ ranOn })
-      .where(and(eq(freeReviewRounds.runId, scope.run.id), eq(freeReviewRounds.round, scope.round)));
+    if (scope?.run && scope.directory === receipt.directory) {
+      await transaction.update(freeReviewRounds).set({ ranOn })
+        .where(and(eq(freeReviewRounds.runId, scope.run.id), eq(freeReviewRounds.round, scope.round)));
+      recordedRanOn = true;
+    }
     if (receipt.delivery?.kind === "checkpoint") {
       // 这三列只许由 `task-resume-prompt.ts` 导出的 patch/条件助手写:自己拼 `.set` 会漏掉代次,
       // 而「文字」压根证明不了「还是同一次占用」(那边 `resumePromptHeldBy` 的说明)。
@@ -311,4 +316,8 @@ export async function commitReviewTurnDelivery(taskId: string, receipt: ReviewSt
         acceptance: "unknown", ...(sessionId ? { sessionId } : {}) } } })
       .where(eq(tasks.id, taskId));
   }, { behavior: "immediate" });
+  // 审议格里那一行要换上这个模型:库里变了就得发事件,状态版本才会往前走 —— 不发的话已经开着的页面
+  // 拿到的新快照跟上一份同版本,被当成重复拒收,一直停在没有模型的那一份(free-workflow-state.ts 的版本说明)。
+  // 提交之后再发:事务里发,页面可能抢在提交前重取,拿到的还是旧行。
+  if (recordedRanOn) bus.publish({ type: "task.review", taskId });
 }
