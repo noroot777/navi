@@ -13,7 +13,10 @@ type Event = { ev: WebRuntimeEvent; [field: string]: unknown };
 type Pending = { event: Event; t: number };
 
 const FLUSH_MS = 3000;
-/** 一页最多报几条报错：一个坏组件每帧抛一次时，日志不能跟着刷屏。 */
+/**
+ * 一页最多报几条普通报错（`page.error`）：一个坏组件每帧抛一次时，日志不能跟着刷屏。
+ * 整页崩溃（`page.crash`）是状态变化不是详情，不占这份额度：一次载入只会崩一次，前面报错再多它也要记下。
+ */
 const MAX_ERRORS = 10;
 const TAB_KEY = "navi.runtimeLog.tab";
 const BOOT_KEY = "navi.runtimeLog.lastBoot";
@@ -24,6 +27,7 @@ const pending: Pending[] = [];
 let timer: ReturnType<typeof setTimeout> | null = null;
 let errorsSent = 0;
 const seenErrors = new Set<string>();
+let crashReported = false;
 
 const shell = /\b(?:Navi|Ash)Mac\//.test(navigator.userAgent) ? "mac" : /\bNaviWin\//.test(navigator.userAgent) ? "win" : "browser";
 // 页面的代码位置按 origin 算相对路径（`assets/index-abc.js:1`）。
@@ -76,25 +80,27 @@ function errorFields(error: unknown): Record<string, unknown> {
   return { name, msg: scrubErrorMessage(name, error.message), frames: scrubStack(error.stack, codeRoots) };
 }
 
-function reportError(ev: "page.error" | "page.crash", kind: "error" | "rejection" | "boundary", error: unknown): void {
+function reportError(kind: "error" | "rejection" | "boundary", error: unknown): void {
   if (errorsSent >= MAX_ERRORS) return;
   const fields = errorFields(error);
-  const key = `${ev}:${String(fields.name)}:${String((fields.frames as string[] | undefined)?.[0] ?? "")}`;
+  const key = `${String(fields.name)}:${String((fields.frames as string[] | undefined)?.[0] ?? "")}`;
   if (seenErrors.has(key)) return;
   seenErrors.add(key);
   errorsSent += 1;
-  queue({ ev, kind, ...fields });
+  queue({ ev: "page.error", kind, ...fields });
 }
 
 /** 根上的错误边界接住了渲染报错（整页换成「页面没有正常显示」）。 */
 export function reportPageCrash(error: unknown): void {
-  reportError("page.crash", "error", error);
+  if (crashReported) return;
+  crashReported = true;
+  queue({ ev: "page.crash", kind: "error", ...errorFields(error) });
   flush();
 }
 
 /** 页面里某一块（终端、Git 工作台）的错误边界接住了：那一块换成「加载失败」，整页还在，不算整页崩溃。 */
 export function reportBoundaryError(error: unknown): void {
-  reportError("page.error", "boundary", error);
+  reportError("boundary", error);
 }
 
 /** 页面要主动整页重载了：先把原因记下（keepalive 发出去），调用方随后 reload。 */
@@ -136,8 +142,8 @@ function boot(): void {
     /* 拿不到存储就不报间隔和上一次载入 */
   }
   queue({ ev: "page.boot", nav: navigation?.type, hidden: document.visibilityState === "hidden", sincePrevMs, prev });
-  window.addEventListener("error", (event) => reportError("page.error", "error", event.error));
-  window.addEventListener("unhandledrejection", (event) => reportError("page.error", "rejection", event.reason));
+  window.addEventListener("error", (event) => reportError("error", event.error));
+  window.addEventListener("unhandledrejection", (event) => reportError("rejection", event.reason));
   window.addEventListener("pagehide", () => {
     leaving = true;
     flush(true);

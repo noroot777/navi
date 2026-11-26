@@ -10,7 +10,7 @@
 //   3. 窗口菜单里点了重载；浏览器里被整页刷新：刷新之前那一页报过的错
 // 别的来源只是时间上对得上的，在证据里一律标「按时间对上」，不当成已证实的因果；上一轮服务怎么停的只说
 // 记录里写了什么（analyze-restart.ts）。
-import type { CauseKind, Incident, RuntimeLogRecord, RuntimeLogReport, StackTally } from "@navi/shared/runtime-log";
+import type { CauseKind, Incident, Observer, RuntimeLogRecord, RuntimeLogReport, StackTally } from "@navi/shared/runtime-log";
 import { restartVerdicts, type RestartVerdict } from "./analyze-restart.js";
 import { groupOccurrences, isShell, loadKey, type Occurrence } from "./analyze-occurrences.js";
 import type { ExitSummary } from "./load.js";
@@ -118,7 +118,7 @@ function nearbyRestart(all: RuntimeLogRecord[], restarts: Map<RuntimeLogRecord, 
   return candidates.sort((a, b) => Math.abs(t(a) - at) - Math.abs(t(b) - at))[0];
 }
 
-function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Incident, "timeline"> {
+function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Incident, "timeline" | "seenBy"> {
   const { seen } = occurrence;
   const start = t(seen[0]!);
   const end = t(seen.at(-1)!);
@@ -216,6 +216,9 @@ function classify(occurrence: Occurrence, { all, restarts }: Context): Omit<Inci
   return { at, cause: "reload", summary: "页面被整页刷新（浏览器刷新 / ⌘R，或浏览器自己重载）", evidence };
 }
 
+/** 页面那边记下的状态变化（不是详情）。 */
+const PAGE_STATES = ["page.boot", "page.reload", "page.crash"];
+
 function median(values: number[]): number {
   if (!values.length) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -241,10 +244,11 @@ export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummar
     // 别的标签页的页面事件不进这一次的时间线。
     const tabs = new Set(occurrence.seen.filter((r) => r.src === "web").map((r) => r.tab));
     const timeline = within(all, from, to, (r) => r.ev !== "server.vitals" && (r.src !== "web" || !r.tab || tabs.size === 0 || tabs.has(r.tab))).slice(0, 40);
-    return { ...verdict, timeline };
+    const seenBy: Observer = isShell(occurrence.seen[0]!) ? "window" : "page";
+    return { ...verdict, seenBy, timeline };
   });
-  const causes: Partial<Record<CauseKind, number>> = {};
-  for (const incident of incidents) causes[incident.cause] = (causes[incident.cause] ?? 0) + 1;
+  const causes: Record<Observer, Partial<Record<CauseKind, number>>> = { window: {}, page: {} };
+  for (const incident of incidents) causes[incident.seenBy][incident.cause] = (causes[incident.seenBy][incident.cause] ?? 0) + 1;
 
   const stalls = sorted.filter((r) => r.ev === "loop.stall");
   const stallMs = stalls.map((s) => Number(s.ms ?? 0));
@@ -274,6 +278,10 @@ export function analyzeRuntimeLog(records: RuntimeLogRecord[], exits: ExitSummar
   const notes: string[] = [];
   if (!counts.server) notes.push("没有服务端运行日志：服务端可能还是加日志之前的版本。");
   if (!counts.mac && !counts.win) notes.push("没有桌面壳的运行日志：用的是浏览器，或桌面 app 还是旧版本。");
+  // 服务端按事件限流（journal.ts）：页面那边的状态变化被挡掉过，次数就只是下限，明说。
+  const droppedStates = sorted.filter((r) => r.ev === "log.dropped" && r.src === "web" && PAGE_STATES.includes(String(r.of)))
+    .reduce((sum, r) => sum + Number(r.count ?? 0), 0);
+  if (droppedStates) notes.push(`页面那边有 ${droppedStates} 条载入 / 重载 / 崩溃记录超过每分钟上限没记下来，页面看到的次数只是下限。`);
 
   return {
     from: sorted[0]?.at ?? null,

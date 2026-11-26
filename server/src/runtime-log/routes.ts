@@ -26,11 +26,16 @@ export function mountRuntimeLogRoutes(api: Hono): void {
     const events = Array.isArray(body?.events) ? body.events.slice(0, MAX_EVENTS_PER_POST) : [];
     let kept = 0;
     for (const raw of events) {
-      const event = sanitizeWebEvent(raw, { locations: webCodeLocations, digest: digestPageId });
-      if (!event) continue;
-      const { ev, ago, ...fields } = event;
-      runtimeLog(String(ev), fields, "web", typeof ago === "number" ? ago : 0);
-      kept += 1;
+      // 一条收不了只丢这一条：同一批里还可能有整页崩溃这种状态变化。
+      try {
+        const event = sanitizeWebEvent(raw, { locations: webCodeLocations, digest: digestPageId });
+        if (!event) continue;
+        const { ev, ago, ...fields } = event;
+        runtimeLog(String(ev), fields, "web", typeof ago === "number" ? ago : 0);
+        kept += 1;
+      } catch {
+        // 不收
+      }
     }
     return c.json({ kept });
   });

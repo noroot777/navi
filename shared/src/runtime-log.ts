@@ -187,19 +187,20 @@ export function verifyFrames(frames: unknown, locations: CodeLocations, limit = 
   const kept: string[] = [];
   for (const frame of frames.slice(0, limit)) {
     if (typeof frame !== "string" || frame.length > 300) continue;
+    // 「名字 位置」或者只有位置；形状不对的（空位置、只有名字）当成认不出的一帧，不让它拖垮整批。
     const split = frame.lastIndexOf(" ");
-    if (split <= 0) continue;
     const location = frame.slice(split + 1);
     if (location === "<native>" || location === "<other>") {
       kept.push(location);
       continue;
     }
-    const [, file, line] = /^(.+?)(?::(\d+))?(?::\d+)?$/.exec(location)!;
-    if (!locations.exists(file!)) {
+    const match = /^(.+?)(?::(\d+))?(?::\d+)?$/.exec(location);
+    if (!match || !locations.exists(match[1]!)) {
       kept.push("<other>");
       continue;
     }
-    const reported = frame.slice(0, split).replace(/^(?:async|new) /, "").replace(/ \[as [^\]]*\]$/, "");
+    const [, file, line] = match;
+    const reported = split > 0 ? frame.slice(0, split).replace(/^(?:async|new) /, "").replace(/ \[as [^\]]*\]$/, "") : "";
     const name = locations.nameAt(file!, line ? Number(line) : null, reported);
     kept.push(name ? `${name} ${location}` : location);
   }
@@ -337,8 +338,17 @@ export type CauseKind =
   | "sleep" | "restart" | "stall" | "webcontent" | "page_error" | "reload" | "load_failed" | "not_presented"
   | "not_ours" | "refused_connection" | "unknown";
 
+/**
+ * 这一次是谁看见的：桌面窗口（壳）还是页面自己。两边各数各的、不对成同一次（server/src/runtime-log/analyze-occurrences.ts），
+ * 所以次数也分开报，不相加——同一次故障两边可能都记了。
+ */
+export type Observer = "window" | "page";
+
+export const OBSERVER_LABELS: Record<Observer, string> = { window: "窗口", page: "页面" };
+
 export type Incident = {
   at: string;
+  seenBy: Observer;
   cause: CauseKind;
   /** 一句话结论。 */
   summary: string;
@@ -355,7 +365,8 @@ export type RuntimeLogReport = {
   to: string | null;
   counts: Record<string, number>;
   incidents: Incident[];
-  causes: Partial<Record<CauseKind, number>>;
+  /** 按看见的那一方分开数的原因。 */
+  causes: Record<Observer, Partial<Record<CauseKind, number>>>;
   stalls: { total: number; overOneAndHalf: number; maxMs: number; medianMs: number; cpuBound: number; waiting: number };
   /** 卡顿时最常出现的 navi 代码位置（按卡顿总时长排）。 */
   hotspots: StackTally[];
@@ -377,3 +388,12 @@ export const CAUSE_LABELS: Record<CauseKind, string> = {
   refused_connection: "连接被拒",
   unknown: "原因不明",
 };
+
+/** 「窗口看到 3 次（…）；页面看到 1 次（…）」：两边各数各的，不相加。 */
+export function observedCounts(report: RuntimeLogReport): string {
+  return (Object.keys(OBSERVER_LABELS) as Observer[]).flatMap((observer) => {
+    const causes = (Object.entries(report.causes[observer]) as Array<[CauseKind, number]>).sort((a, b) => b[1] - a[1]);
+    const total = causes.reduce((sum, [, n]) => sum + n, 0);
+    return total ? [`${OBSERVER_LABELS[observer]}看到 ${total} 次（${causes.map(([cause, n]) => `${CAUSE_LABELS[cause]} ${n}`).join("、")}）`] : [];
+  }).join("；");
+}

@@ -1,5 +1,5 @@
 // 把分析结果写成给人看的文字（`npm run diagnose` 用）。
-import { CAUSE_LABELS, type RuntimeLogRecord, type RuntimeLogReport } from "@navi/shared/runtime-log";
+import { OBSERVER_LABELS, observedCounts, type RuntimeLogRecord, type RuntimeLogReport } from "@navi/shared/runtime-log";
 
 const time = (iso: string) => new Date(iso).toLocaleString("zh-CN", { hour12: false });
 const clock = (iso: string) => new Date(iso).toLocaleTimeString("zh-CN", { hour12: false });
@@ -22,14 +22,13 @@ export function renderRuntimeLogReport(report: RuntimeLogReport, options: { time
   for (const note of report.notes) out.push(`  · ${note}`);
   out.push("");
 
-  const causes = Object.entries(report.causes).sort((a, b) => b[1] - a[1]);
-  out.push(`窗口闪一下 / 重载：${report.incidents.length} 次${causes.length ? `（${causes.map(([cause, n]) => `${CAUSE_LABELS[cause as keyof typeof CAUSE_LABELS]} ${n}`).join("、")}）` : ""}`);
+  out.push(`窗口闪一下 / 重载：${observedCounts(report) || "没有"}`);
   for (const incident of report.incidents.slice(-30)) {
-    out.push(`  ${time(incident.at)}  ${incident.summary}`);
+    out.push(`  ${time(incident.at)}  [${OBSERVER_LABELS[incident.seenBy]}] ${incident.summary}`);
     for (const evidence of incident.evidence) out.push(`      - ${evidence}`);
     if (options.timeline) for (const record of incident.timeline) out.push(line(record));
   }
-  if (report.incidents.length > 30) out.push(`  （只列了最近 30 次，共 ${report.incidents.length} 次）`);
+  if (report.incidents.length > 30) out.push(`  （只列了最近 30 条，共 ${report.incidents.length} 条）`);
   out.push("");
 
   const s = report.stalls;

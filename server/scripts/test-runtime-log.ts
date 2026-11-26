@@ -1,14 +1,14 @@
 // 运行日志回归：npm -w server run test:runtime-log
 //
 // 钉住四件事：
-//   1. 脱敏是白名单 —— 报错原文只换成固定说法（不按形状删字），路由记注册时的模板，栈帧的位置要核对成
-//      navi 自己的代码文件、名字由那个位置推出来（不回显上报的）；业务报错原文、文件路径、任务号、页面多塞的
-//      字段一个都进不了日志；
+//   1. 脱敏是白名单 —— 报错原文只换成固定说法（不按形状删字），路由记注册时的模板，栈帧只留核对成 navi 自己
+//      代码文件的位置（不存函数名）；业务报错原文、文件路径、任务号、页面多塞的字段一个都进不了日志；页面上
+//      整页崩溃不被普通报错的额度吞掉；
 //   2. 落盘尽力而为且限流，目录被清掉了会重建；
 //   3. 卡顿检测 + 采样器在真实卡顿里采得到调用栈（JS 忙算、同步子进程两种都要采到 —— 后者正是
 //      「服务卡住、窗口闪一下」最常见的样子，采不到这个功能就没有意义）；
-//   4. 分析把每一次撤页归到对的原因上；上一轮服务是谁按身份（runId）对，怎么没的只说证据说得到的，
-//      只靠时间对的明说是推测；任何一种「闪一下」的观察单独出现都要列出来，哪几条是同一次按载入 / 运行身份认。
+//   4. 分析把每一次撤页归到对的原因上；上一轮服务是谁按身份（runId）对，怎么没的只说记录里有的；每次「闪一下」
+//      只由看见它的那一方（窗口 / 页面）来数，两边的次数分开报、不相加，别的来源只附「按时间对上」。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -102,6 +102,8 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.equal(verified[8], "node:internal");
   assert.ok(!/CustomerAcquisitionBudget|OpenAI/.test(JSON.stringify(verified)));
   assert.equal(serverCodeLocations.exists("server/../../../etc/hosts"), false, "跳出代码目录的不认");
+  assert.deepEqual(shared.verifyFrames(["f ", "", "nospace", "f :1", `${at}`], serverCodeLocations), ["<other>", "<other>", "<other>", "<other>", at],
+    "形状不对的帧当成认不出的一帧，不抛");
 
   // 真抛一次：名字是运行时拼出来的（来自数据）也进不了日志；那一帧照样定位得到这个文件。
   // 这个名字在本文件里只能拼出来，不能整个写出来。
@@ -137,6 +139,31 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.equal(shared.sanitizeWebEvent({ ev: "task.content", text: "x" }, options), null, "名单外的事件不收");
   assert.deepEqual(shared.sanitizeWebEvent({ ev: "page.boot", nav: "reload", sincePrevMs: 1200.4, hidden: false, extra: "x", prev: "l0", shellPid: 4242 }, options),
     { ev: "page.boot", nav: "reload", hidden: false, sincePrevMs: 1200 }, "多塞的字段、不像标识的标识都不收");
+}
+
+// ── 1c. 页面采集：整页崩溃是状态变化，不占普通报错的额度 ─────────────────
+{
+  const posted: Array<Record<string, unknown>> = [];
+  const listeners = new Map<string, (event: { error?: unknown; reason?: unknown }) => void>();
+  const store = new Map<string, string>();
+  Object.assign(globalThis, {
+    location: { origin: "http://localhost:4317" },
+    sessionStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => store.set(k, v) },
+    document: { visibilityState: "visible" },
+    window: { addEventListener: (name: string, fn: (event: { error?: unknown }) => void) => listeners.set(name, fn) },
+    fetch: async (_url: string, init: { body: string }) => {
+      posted.push(...(JSON.parse(init.body) as { events: Array<Record<string, unknown>> }).events);
+      return new Response("{}");
+    },
+  });
+  const page = await import("../../web/src/lib/runtimeLog.ts");
+  const fail = (i: number) => Object.assign(new Error("x"), { stack: `Error: x\n    at f${i} (http://localhost:4317/assets/a.js:${i}:1)` });
+  for (let i = 1; i <= 12; i += 1) listeners.get("error")!({ error: fail(i) });
+  page.reportPageCrash(new TypeError("boom"));
+  page.reportPageCrash(new TypeError("again"));
+  assert.equal(posted.filter((event) => event.ev === "page.error").length, 10, "普通报错照旧只报前 10 条");
+  assert.equal(posted.filter((event) => event.ev === "page.crash").length, 1, "普通报错用完了额度，整页崩溃也要记下（一次载入只记一次）");
+  for (const name of ["location", "sessionStorage", "document", "window", "fetch"]) Reflect.deleteProperty(globalThis, name);
 }
 
 // ── 1b. 慢请求和卡顿时在处理的请求记注册的路由模板，不是请求路径 ─────────
@@ -299,7 +326,8 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.equal(report.hotspots[0]?.frame, "server/dist/regression-snapshot.js:14");
   assert.equal(report.stalls.waiting, 1);
   const text = renderRuntimeLogReport(report, { timeline: true });
-  assert.match(text, /窗口闪一下 \/ 重载：6 次/);
+  assert.match(text, /窗口闪一下 \/ 重载：窗口看到 6 次（/);
+  assert.ok(!text.includes("页面看到"), "这几次都只有窗口看见");
   assert.match(text, /卡顿时最常在跑的代码/);
 }
 
@@ -337,10 +365,11 @@ function serverLines(): Array<Record<string, unknown>> {
   assert.match(residualWithIntent, /收到 SIGTERM（进程自己记的），但锁还留着（下一份服务启动时看到的）；可能是/);
   // 进程自己写下的退出记录只说明它走到了哪一步：收到 SIGTERM、放掉了锁之后照样可能被强杀，不说成「它退出了」。
   const stopped = analyzeRuntimeLog(twoStarts, [sigterm(99, "a")]).restarts[0]!.how;
-  assert.match(stopped, /收到 SIGTERM（进程自己记的.*锁也放掉了；之后进程最终怎么结束的没有进程外的记录/);
+  assert.match(stopped, /收到 SIGTERM（进程自己记的.*），下一份服务启动时没看到它留下的锁；之后进程最终怎么结束的没有进程外的记录/);
+  assert.ok(!stopped.includes("放掉"), "退出记录写在释放锁之前，不说它放掉了锁");
   assert.ok(!/SIGTERM 退出|自己退出了|有人/.test(stopped), stopped);
   const exited = analyzeRuntimeLog(twoStarts, [{ at: at(99), pid: 100, runId: "a", kind: "exit", code: 0 }]).restarts[0]!.how;
-  assert.match(exited, /走到了退出、退出码 0（进程自己记的），锁也放掉了；之后进程最终怎么结束的没有进程外的记录/);
+  assert.match(exited, /走到了退出、退出码 0（进程自己记的），下一份服务启动时没看到它留下的锁/);
 
   // 上一轮不在这份日志里：退回按时间找，且写明推测；残留记录也算。
   const guessed = analyzeRuntimeLog([S(100, "server.start", { run: "new", pid: 200 })], [sigterm(99)]);
@@ -442,6 +471,19 @@ function serverLines(): Array<Record<string, unknown>> {
   ], []);
   assert.deepEqual(loadFailedInStall.incidents.map((i) => i.cause), ["stall"], "没载出来也拿服务那一侧解释");
   assert.ok(loadFailedInStall.incidents[0]!.evidence.some((line) => line.startsWith("（按时间对上）服务主线程卡了")), JSON.stringify(loadFailedInStall.incidents[0]!.evidence));
+
+  // 同一次故障窗口和页面可能都记了：各数各的，次数分开报、不相加。
+  const bothSaw = analyzeRuntimeLog([
+    M(100, "page.takedown", { probe: "down" }),
+    W(104, "page.crash", { tab: "t", load: "l1", name: "TypeError", shell: "mac" }),
+  ], []);
+  assert.deepEqual(bothSaw.incidents.map((i) => i.seenBy), ["window", "page"]);
+  assert.deepEqual(bothSaw.causes, { window: { refused_connection: 1 }, page: { page_error: 1 } });
+  assert.equal(shared.observedCounts(bothSaw), "窗口看到 1 次（连接被拒 1）；页面看到 1 次（页面脚本出错 1）");
+  assert.ok(!/2 次/.test(renderRuntimeLogReport(bothSaw)), "不把两边的次数加成一个总数");
+  // 页面那边的状态变化被限流挡掉过：明说次数只是下限。
+  const throttled = analyzeRuntimeLog([W(100, "page.boot", { nav: "reload", tab: "t", load: "l2" }), W(160, "log.dropped", { of: "page.boot", count: 4 })], []);
+  assert.ok(throttled.notes.some((note) => note.includes("4 条") && note.includes("下限")), JSON.stringify(throttled.notes));
 
   // 壳发现实例号变了：重启是壳自己看见的；服务那一侧的启动记录离得远（进程号复用、日志对不上）就不附。
   const reused = analyzeRuntimeLog([

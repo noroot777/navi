@@ -354,20 +354,30 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         self.unreachableProbes = 0
         // 还是自己那份，但服务重起过（实例号换了）：页面手上的旧实例号会被拒，换上新的重载一遍。
         if instance.id != self.boundInstance {
-          RuntimeLog.record("page.reload", ["reason": "instance_changed", "serverPid": instance.pid ?? -1,
-                                            "inst": String((instance.id ?? "").prefix(8))])
           self.bind(instance) { current in
-            if current, self.guardTimer === timer { self.webView.reload() }
+            guard current, self.guardTimer === timer else { return }
+            // 真重载了才记：认人中途被别的状态顶掉时页面没动。
+            RuntimeLog.record("page.reload", ["reason": "instance_changed", "serverPid": instance.pid ?? -1,
+                                              "inst": String((instance.id ?? "").prefix(8))])
+            self.webView.reload()
           }
         }
       }
     }
   }
 
+  /// 运行日志只在页面真被换掉的那一步记 `page.takedown`：取消了这次导航、原来那页还留着的，只是一次没答上的探活。
   func navigationProbeFailed(_ probe: NaviProbe, target: URL) {
-    RuntimeLog.record("page.takedown", RuntimeLog.fields(of: probe).merging(["via": "navigation"]) { a, _ in a })
-    guard case .unreachable(let reason, _) = probe else { return instanceLost() }
-    if hasPresentedPage { return }
+    let fields = RuntimeLog.fields(of: probe).merging(["via": "navigation"]) { a, _ in a }
+    guard case .unreachable(let reason, _) = probe else {
+      RuntimeLog.record("page.takedown", fields)
+      return instanceLost()
+    }
+    if hasPresentedPage {
+      RuntimeLog.record("probe.miss", fields)
+      return
+    }
+    RuntimeLog.record("page.takedown", fields)
     resetPageConnection()
     resumeURL = target
     offlineView.show(title: "连不上 Navi", detail: reason,

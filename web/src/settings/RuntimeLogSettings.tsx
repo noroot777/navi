@@ -1,7 +1,7 @@
-// 「运行日志」设置节：最近几天窗口闪过几次、各是什么原因，以及把日志导出成一个文件发给别人分析。
+// 「运行日志」设置节：最近几天窗口闪过几次、各是什么原因、服务重启过几次，以及把日志导出成一个文件发给别人分析。
 // 记什么、不记什么见 @navi/shared/runtime-log 顶部；分析口径见 server/src/runtime-log/analyze.ts。
 import { useCallback, useEffect, useState } from "react";
-import { CAUSE_LABELS, type CauseKind, type RuntimeLogReport } from "@navi/shared/runtime-log";
+import { observedCounts, type RuntimeLogReport } from "@navi/shared/runtime-log";
 import { ApiError, apiPath, request } from "../lib/apiClient.ts";
 import { localeDateTime } from "../lib/localeFormat.ts";
 import { Button } from "../components/ui.tsx";
@@ -44,7 +44,9 @@ export function RuntimeLogSettings({ notify }: { notify: (message: string) => vo
 
   const report = state?.report;
   const incidents = report ? [...report.incidents].reverse().slice(0, 12) : [];
-  const causes = report ? (Object.entries(report.causes) as Array<[CauseKind, number]>).sort((a, b) => b[1] - a[1]) : [];
+  // 窗口和页面各数各的（同一次可能两边都记了），分开说，不相加。
+  const observed = report ? observedCounts(report) : "";
+  const restarts = report ? [...report.restarts].reverse().slice(0, 8) : [];
 
   return (
     <section className="settings-section rtlog">
@@ -60,17 +62,28 @@ export function RuntimeLogSettings({ notify }: { notify: (message: string) => vo
       {report && (
         <>
           <p className="rtlog-summary">
-            最近 {DAYS} 天窗口闪了 {report.incidents.length} 次
-            {causes.length > 0 && <>：{causes.map(([cause, n]) => `${CAUSE_LABELS[cause]} ${n}`).join("、")}</>}
+            最近 {DAYS} 天{observed ? `，${observed}` : "窗口没有闪过"}
+            {report.restarts.length > 0 && <>。服务重启 {report.restarts.length} 次</>}
             {report.stalls.total > 0 && <>。服务卡顿 {report.stalls.total} 次，最长 {secs(report.stalls.maxMs)}</>}
           </p>
           {incidents.length > 0 && (
             <ol className="rtlog-incidents">
               {incidents.map((incident) => (
-                <li key={incident.at}>
+                <li key={`${incident.seenBy}:${incident.at}`}>
                   <time>{localeDateTime(incident.at)}</time>
                   <strong>{incident.summary}</strong>
                   {incident.evidence.map((line) => <span key={line}>{line}</span>)}
+                </li>
+              ))}
+            </ol>
+          )}
+          {restarts.length > 0 && (
+            <ol className="rtlog-incidents">
+              {restarts.map((restart) => (
+                <li key={restart.at}>
+                  <time>{localeDateTime(restart.at)}</time>
+                  <strong>服务重启</strong>
+                  <span>{restart.how}</span>
                 </li>
               ))}
             </ol>
