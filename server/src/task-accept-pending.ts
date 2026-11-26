@@ -40,7 +40,7 @@ import { gitError } from "./git.js";
 import { withRepoLock } from "./repo-lock.js";
 import { acceptingBusyText, beginAccepting, endAccepting } from "./acceptance-lock.js";
 import { holdTeamForAcceptance } from "./team-acceptance-hold.js";
-import { RuntimeHandoverBlockedError } from "./runtime-handover-state.js";
+import { ServiceFrozenError } from "./runtime-handover-state.js";
 import { acceptanceGuard } from "./task-accept-guard.js";
 import { appendTaskTimeline, alertLine, receiptLine } from "./task-timeline.js";
 import { publishTaskUpdated } from "./task-store.js";
@@ -362,7 +362,7 @@ export async function commitPendingMerge(taskId: string): Promise<PendingMergeAc
       } as PendingMergeActionResult;
     });
   } catch (error) {
-    if (!(error instanceof RuntimeHandoverBlockedError)) throw error;
+    if (!(error instanceof ServiceFrozenError)) throw error;
     return { ok: false, httpStatus: 409, reason: "runtime_handover", error: error.message };
   } finally {
     endAccepting(taskId); // 先摘互斥再放占位，理由同 acceptTask
@@ -437,7 +437,7 @@ export async function remergePendingMerge(
       } as PendingMergeActionResult;
     });
   } catch (error) {
-    if (!(error instanceof RuntimeHandoverBlockedError)) throw error;
+    if (!(error instanceof ServiceFrozenError)) throw error;
     return { ok: false, httpStatus: 409, reason: "runtime_handover", error: error.message };
   } finally {
     endAccepting(taskId); // 先摘互斥再放占位，理由同 acceptTask

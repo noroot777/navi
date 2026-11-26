@@ -28,6 +28,8 @@ import { dispatchRejection, executorOwnerScope, noteExecutorDowngrade } from "..
 import { acknowledgeTaskStart } from "../task-start-receipt.js";
 import { runEnvForOwner } from "../auth/run-env.js";
 import { applyAutoTitle } from "../auto-title-apply.js";
+import { waitServiceThaw } from "../runtime-handover-state.js";
+import { registerShutdownCleanup } from "../shutdown-resources.js";
 
 // duet 的所有权与 single 共用 runs.ts 那把单飞锁。这里原来是个模块内的 `running`
 // Set:调用方看不见它,于是 /run、/fire、/retry、scheduler 都能声称「已启动」而第二次
@@ -417,10 +419,29 @@ async function genDuetTitle(
     const said = parseAttachmentText(topic).body || topic;
     // 起名也是一次真的 CLI 调用 —— 同样要落在本人的配置目录里(§八),别让它成为
     // 唯一一条还摸得到宿主机 ~/.claude 的缝。
-    const handle = ex.run({ prompt: P.title(said), cwd, env: await runEnvForOwner(runOwner, ex.type) });
+    const env = await runEnvForOwner(runOwner, ex.type);
+    await waitServiceThaw(); // 服务准备重启时先不拉起(restart-freeze.ts)
+    const handle = ex.run({ prompt: P.title(said), cwd, env });
+    const stop = () => { try { handle.kill(); } catch { /* 已经退了 */ } };
     let text = "";
-    for await (const event of handle.events) {
-      if (event.kind === "text") text += event.text;
+    // 收完流(或被停掉)之后照聊天那条收尾:kill + cleanup,CLI 甩到后台的后代也收掉,收不净的交给执行器的清理责任。
+    const consumed = (async () => {
+      try {
+        for await (const event of handle.events) {
+          if (event.kind === "text") text += event.text;
+        }
+      } finally {
+        stop();
+        await handle.cleanup?.().catch(() => {});
+      }
+    })();
+    // 起名是尽力而为,重启时不值得摆进确认(名单里不列),但进程得跟着服务一起走:关服排空时停掉并等它收完尾
+    // (shutdown-resources.ts),exit 那一下兜底。收完尾才撤这份责任。
+    const release = registerShutdownCleanup(() => [], stop, async () => { stop(); await consumed.catch(() => {}); });
+    try {
+      await consumed;
+    } finally {
+      release();
     }
     const line = text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
     const newTitle = line.replace(/^标题[:：]\s*/, "").replace(/[`*"「」]/g, "").trim().slice(0, 20);

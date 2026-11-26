@@ -6,7 +6,8 @@ import { join, resolve } from "node:path";
 import { readStorageEnv } from "./env.mjs";
 import { dbFileIn } from "./db-file.mjs";
 import { LEGACY_HTTP_HEADER_PREFIX, LEGACY_SINGLETON_LOCK_SUFFIX } from "./legacy-names.mjs";
-import { IS_WINDOWS, isNotListening, killServerProcesses, listenerPids, localGet, localJson, sleep } from "./platform.mjs";
+import { IS_WINDOWS, isNotListening, killServerProcesses, listenerPids, localGet, localJson, localRequest, sleep } from "./platform.mjs";
+import { RESTART_FREEZE_PATH } from "./restart-freeze.mjs";
 
 const LOCK_SUFFIX = ".navi.lock";
 const HOST_TOKEN_HEADER = "x-navi-host-token";
@@ -93,6 +94,15 @@ export async function queryImpact(port, lockFile, { requireOk = false, includeSh
   if (probe.status !== null) return { refused: probe.status };
   if (isNotListening(probe.error)) return {};
   return { unknown: probe.error || "unknown" };
+}
+
+/**
+ * 重启前冻结那条 POST 的传输（协议在 scripts/restart-freeze.mjs）：同一张宿主机凭证、同样直连本机。
+ * 冻结那一下服务端要先等还在起跑的回合落定再算快照，所以时限给得比问判据宽。
+ */
+export function restartFreezeSender(port, lockFile) {
+  const headers = hostTokenHeaders(lockFile, port);
+  return (body) => localRequest(port, RESTART_FREEZE_PATH, { method: "POST", body, timeoutMs: 20_000, headers });
 }
 
 export function countOf(data, field) {
