@@ -7,7 +7,7 @@ import { dispatchedOf, dispatchFacts, dispatchTally } from "../../lib/dispatchTr
 import { DispatchGlyph, dispatchGlyphSaid } from "../../components/DispatchGlyph.tsx";
 import { InspectorHeadActions } from "../../inspector/index.ts";
 import type { Notify } from "../../lib/notify.ts";
-import { dispatchedMeta, dispatchedOrder, dispatchedWord } from "./dispatchedRows.ts";
+import { dispatchedMeta, dispatchedOrder, dispatchedWord, type DispatchedMeta } from "./dispatchedRows.ts";
 import { DispatchHoldKey } from "./DispatchHoldKey.tsx";
 import type { DispatchFoldState } from "./dispatchFolds.ts";
 
@@ -51,29 +51,31 @@ function SubtaskTable({ task, allTasks, onOpenTask, onTaskUpdated, notify, branc
     const count = dispatchTally(facts, item.id);
     const below = dispatchView.look(item).below;
     const { word, tone } = dispatchedWord(item);
-    const meta = !accepted ? dispatchedMeta(item, now) : "";
+    const meta = !accepted ? dispatchedMeta(item, now) : null;
+    const branch = open && (children.get(item.id)?.length ?? 0) > 0;
     return <li key={item.id}>
-      <div data-subtask-id={item.id} className={`dispatched-row${hint === item.id ? " is-hinted" : ""}${accepted ? " is-settled" : ""}`}>
-        <span className="dispatched-row__mark">{!accepted && mark(item)}</span>
-        <span className="dispatched-row__main">
-          <span className="dispatched-row__top">
-            <button type="button" className="dispatched-row__title" onClick={() => onOpenTask(item.id)}>{item.title || "未命名任务"}</button>
-            {count != null && <button type="button" className="dispatched-fold" aria-label={dispatchGlyphSaid(count, below)} aria-expanded={open} onClick={() => toggle(item.id, open)}><DispatchGlyph below={below} />{count}<CaretDown size={10} className="dispatched-fold__caret" aria-hidden="true" /></button>}
-          </span>
-          {meta && <small className={item.question ? undefined : "is-mono"}>{meta}</small>}
+      <div data-subtask-id={item.id} className={`dispatched-row${hint === item.id ? " is-hinted" : ""}${accepted ? " is-settled" : ""}${branch ? " has-branch" : ""}`}>
+        <span className="dispatched-row__mark">{mark(item) ?? <i className="dispatched-pip--quiet" />}</span>
+        <span className="dispatched-row__top">
+          <button type="button" className="dispatched-row__title" onClick={() => onOpenTask(item.id)}>{item.title || "未命名任务"}</button>
+          {count != null && <button type="button" className="dispatched-fold" aria-label={dispatchGlyphSaid(count, below)} aria-expanded={open} onClick={() => toggle(item.id, open)}><DispatchGlyph below={below} />{count}<CaretDown size={10} className="dispatched-fold__caret" aria-hidden="true" /></button>}
         </span>
         {!accepted && <em className={tone ? `is-${tone}` : undefined}>{word}</em>}
+        {meta && <MetaLine meta={meta} />}
       </div>
-      {open && (children.get(item.id)?.length ?? 0) > 0 && list(item.id, seen)}
+      {branch && list(item.id, seen)}
     </li>;
   };
   const list = (parentId: string, seen: ReadonlySet<string>) => {
     if (seen.has(parentId)) return null;
     const next = new Set(seen).add(parentId);
     const level = dispatchLevel(children, parentId, task.id);
-    const open = (hint && dispatchLevel(children, parentId, hint).selectedInAccepted) || (folds.get(`accepted:${parentId}`) ?? level.acceptedOpen);
+    // 「N 条已验收」只用来把收完尾的跟还没收尾的分开；一层全验收了就没什么可分的，直接列出来
+    //（这一层显不显示归父行的折叠键管），不再多一个不是任务的节点。
+    const grouped = level.accepted.length > 0 && level.rest.length > 0;
+    const open = !grouped || (hint && dispatchLevel(children, parentId, hint).selectedInAccepted) || (folds.get(`accepted:${parentId}`) ?? level.acceptedOpen);
     return <ul className="dispatched-list">
-      {level.accepted.length > 0 && <li><button type="button" className="dispatched-accepted" aria-expanded={open} onClick={() => toggle(`accepted:${parentId}`, open)}><CaretRight size={10} aria-hidden="true" />{level.accepted.length} 条已验收</button></li>}
+      {grouped && <li><button type="button" className="dispatched-accepted" aria-expanded={open} onClick={() => toggle(`accepted:${parentId}`, open)}><CaretRight size={10} aria-hidden="true" />{level.accepted.length} 条已验收</button></li>}
       {open && level.accepted.map((item) => row(item, next))}
       {level.rest.map((item) => row(item, next))}
     </ul>;
@@ -90,4 +92,13 @@ function SubtaskTable({ task, allTasks, onOpenTask, onTaskUpdated, notify, branc
     <div aria-label="子任务">{list(root.id, new Set())}</div>
     {!(children.get(root.id)?.length) && <p className="dispatched-head">还没有子任务</p>}
   </div>;
+}
+
+// 小字占满标题下面整行（连状态词底下也用上）；干活那句只截执行器，时长不折行。
+function MetaLine({ meta }: { meta: DispatchedMeta }) {
+  if ("ask" in meta) return <small className="dispatched-row__ask">{meta.ask}</small>;
+  return <small className="dispatched-row__run">
+    {meta.executor && <span className="dispatched-row__who">{meta.executor}</span>}
+    {meta.duration && <span className="dispatched-row__took">{meta.duration}</span>}
+  </small>;
 }
