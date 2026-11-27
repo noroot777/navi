@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type RefObject } from "react";
 
 // 项目切换下拉里拖动调先后。行本身就是拖柄：按住挪过几像素才算拖，没挪就是一次普通的点选。
-// 拖动中其余行实时让位，松手才写一次整份顺序（onCommit）；Esc 或开始搜索就作废。
+// 拖动中其余行实时让位，松手才写一次整份顺序（onCommit）；Esc、开始搜索、切走窗口、在窗口外松手都作废。
 // 键盘走 ⌥↑ / ⌥↓，一下挪一格、当场写下。
 //
 // 没用原生 HTML5 拖放：它拖的是一张半透明快照、松手前列表不让位，在一个会滚动的小菜单里
@@ -75,6 +75,11 @@ export function useProjectReorder({
     const move = (event: globalThis.PointerEvent) => {
       const start = gesture.current;
       if (!start || event.pointerId !== start.pointerId) return;
+      // 在窗口外松的手，这一页可能收不到那次 pointerup：回来时键已经松开，这次手势就算结束、作废不提交。
+      if (event.buttons === 0) {
+        finish();
+        return;
+      }
       pointerY.current = event.clientY;
       if (!draftRef.current) {
         if (start.dragged || Math.abs(event.clientY - start.startY) < DRAG_THRESHOLD) return;
@@ -95,13 +100,17 @@ export function useProjectReorder({
     const cancel = (event: globalThis.PointerEvent) => {
       if (gesture.current?.pointerId === event.pointerId) finish();
     };
+    // 切走窗口（⌘Tab、点了别的应用）：手势的下文不归这一页了，同样作废。
+    const blur = () => { if (gesture.current) finish(); };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", cancel);
+    window.addEventListener("blur", blur);
     return () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("blur", blur);
     };
   }, [finish, ids, onCommit, placeAt]);
 

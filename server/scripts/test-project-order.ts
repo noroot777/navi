@@ -2,7 +2,8 @@
 //  · GET /projects 按排过的先后下发，没排过的接在后面、保持创建先后；
 //  · PUT /project-order 只留存在的项目 id，去重；坏请求体 400；
 //  · 写完推一条只给本人的 projects.reordered；
-//  · 同一页面（page）的意图按 seq 只认更大的：超时后被取代的旧请求晚到，回 stale、不改顺序；别的页面不受影响。
+//  · 同一页面（page）的意图按 seq 只认更大的：超时后被取代的旧请求晚到，回 stale、不改顺序；别的页面不受影响；
+//  · 这份记录在库里（服务重启后晚到的旧请求照样作废），每人只留最近的 200 页。
 //
 // 跑：npx tsx server/scripts/test-project-order.ts
 import assert from "node:assert/strict";
@@ -18,8 +19,9 @@ process.env.NAVI_DB = join(root, "navi.db");
 process.env.NAVI_RUNS_DIR = join(root, "runs");
 requireTmpDb("project-order");
 
-const [{ ensureSchema }, projectRoutes, order, { bus }, context] = await Promise.all([
+const [{ db, ensureSchema }, { projectOrderIntents }, projectRoutes, order, { bus }, context] = await Promise.all([
   import("../src/db/index.js"),
+  import("../src/db/schema.js"),
   import("../src/project-routes.js"),
   import("../src/project-order.js"),
   import("../src/bus.js"),
@@ -92,6 +94,34 @@ assert.deepEqual(await listed(), ["alpha", "beta", "gamma"], "出厂按创建先
   assert.deepEqual(await listed(), ["gamma", "alpha", "beta", "delta"]);
   assert.equal((await put(["alpha", "beta", "gamma", "delta"], "page-a", 3)).body.stale, undefined);
   assert.deepEqual(await listed(), ["alpha", "beta", "gamma", "delta"]);
+}
+
+// ── 重启之后晚到的旧意图照样作废 ─────────────────────────────────────────────
+{
+  // 记录在库里，路由本身不持状态：换一个全新挂载的路由（相当于服务重启后的新进程）照样认得出旧序号。
+  const rows = await db.select().from(projectOrderIntents);
+  assert.deepEqual(rows.map((row) => [row.owner, row.page, row.seq]).sort(), [["", "page-a", 3], ["", "page-b", 1]]);
+  const restarted = new Hono();
+  restarted.use("*", async (c, next) => { context.setActor(c, context.SINGLE_ACTOR); await next(); });
+  order.mountProjectOrderRoutes(restarted);
+  const late = await restarted.request("http://x/project-order", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectIds: ["gamma", "beta", "alpha", "delta"].map((name) => ids[name]), page: "page-a", seq: 2 }),
+  });
+  assert.equal((await late.json()).stale, true, "重启前已被取代的意图，重启后晚到也不算数");
+  assert.deepEqual(await listed(), ["alpha", "beta", "gamma", "delta"]);
+}
+
+// ── 每人只留最近的 200 页 ───────────────────────────────────────────────────
+{
+  for (let index = 0; index < 205; index += 1) {
+    await call("/project-order", "PUT", { projectIds: [ids.alpha], page: `bulk-${index}`, seq: 1 });
+  }
+  const pages = (await db.select({ page: projectOrderIntents.page }).from(projectOrderIntents)).map((row) => row.page);
+  assert.equal(pages.length, 200);
+  assert.ok(pages.includes("bulk-204") && !pages.includes("page-a"), "裁掉的是最早的那些页");
+  await call("/project-order", "PUT", { projectIds: ["alpha", "beta", "gamma", "delta"].map((name) => ids[name]) });
 }
 
 // ── 坏请求体 ─────────────────────────────────────────────────────────────────

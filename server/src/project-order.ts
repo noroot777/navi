@@ -2,31 +2,44 @@
 //
 // 排序做在服务端 `GET /projects` 出门之前，而不是让各端拿设置自己排：网页的切换下拉、任务模式按
 // 项目分组、手机、飞书里的项目列表读的都是这一份列表，各排各的必有一处跟不上。
+import { and, desc, eq, ne, notInArray } from "drizzle-orm";
 import type { Hono } from "hono";
 import { db } from "./db/index.js";
-import { projects } from "./db/schema.js";
+import { projectOrderIntents, projects } from "./db/schema.js";
 import { bus } from "./bus.js";
 import { actorOf, authErrorResponse, ownerIdOf } from "./auth/context.js";
-import { patchSettingsFor } from "./auth/personal-settings.js";
+import { writePersonalSettings } from "./auth/personal-settings.js";
 import { visibleProjectIds } from "./auth/visibility.js";
 import { parseAppSettingsPatch } from "./app-settings.js";
 
 export { orderProjects } from "@navi/shared/project";
 
 // 同一个页面的先后意图带着递增的序号来（page + seq）：页面保存超时后会接着发更新的那一份，被它掐掉
-// 的旧请求万一晚到，不能把顺序盖回去 —— 按（人, 页面）只认序号更大的。只记在内存里：页面 id 每次
-// 打开都是新的，重启前在途的旧请求重启后也到不了；不带这两项的调用方（脚本、老页面）不受这道闸。
-const SEEN_LIMIT = 500;
-const latestSeq = new Map<string, number>();
+// 的旧请求可能滞留在代理或网络里、晚些才到 —— 按（人, 页面）只认序号更大的。记录进库，和顺序在同一个
+// 事务里读写（db/schema-project-order-intents.ts）：重启不失忆，也不会「序号记下了、顺序没写」。
+// 不带这两项的调用方（脚本、老页面）不受这道闸。
+const KEEP_PAGES = 200;
+type Intent = { page: string; seq: number };
+type OrderTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-function claimIntent(owner: string | null, page: unknown, seq: unknown): boolean {
-  if (typeof page !== "string" || !page || page.length > 64 || typeof seq !== "number" || !Number.isSafeInteger(seq)) return true;
-  const key = `${owner ?? ""}\u0000${page}`;
-  const seen = latestSeq.get(key);
-  if (seen !== undefined && seq <= seen) return false;
-  latestSeq.delete(key);
-  latestSeq.set(key, seq);
-  if (latestSeq.size > SEEN_LIMIT) latestSeq.delete(latestSeq.keys().next().value!);
+function intentOf(page: unknown, seq: unknown): Intent | null {
+  if (typeof page !== "string" || !page || page.length > 64 || typeof seq !== "number" || !Number.isSafeInteger(seq)) return null;
+  return { page, seq };
+}
+
+/** 这份意图还算数吗（没有比它更新的同页意图被接受过）。算数就记下它，并只留这个人最近的若干页。 */
+async function claimIntent(tx: OrderTx, owner: string, intent: Intent): Promise<boolean> {
+  const seen = (await tx.select({ seq: projectOrderIntents.seq }).from(projectOrderIntents)
+    .where(and(eq(projectOrderIntents.owner, owner), eq(projectOrderIntents.page, intent.page)))).at(0);
+  if (seen && seen.seq >= intent.seq) return false;
+  const at = Date.now();
+  await tx.insert(projectOrderIntents).values({ owner, ...intent, at })
+    .onConflictDoUpdate({ target: [projectOrderIntents.owner, projectOrderIntents.page], set: { seq: intent.seq, at } });
+  const keep = tx.select({ page: projectOrderIntents.page }).from(projectOrderIntents)
+    .where(eq(projectOrderIntents.owner, owner)).orderBy(desc(projectOrderIntents.at)).limit(KEEP_PAGES);
+  // 同一毫秒里记下的几页谁先谁后说不清：刚记下的这一页无论如何不能被裁掉。
+  await tx.delete(projectOrderIntents).where(and(eq(projectOrderIntents.owner, owner),
+    ne(projectOrderIntents.page, intent.page), notInArray(projectOrderIntents.page, keep)));
   return true;
 }
 
@@ -44,9 +57,14 @@ export function mountProjectOrderRoutes(api: Hono): void {
       const projectOrder = [...new Set(body.projectIds.filter((value): value is string =>
         typeof value === "string" && known.has(value) && (visible === null || visible.has(value))))];
       const patch = parseAppSettingsPatch({ projectOrder });
-      // 认领和写之间不夹别的 await：同页两份请求按认领先后落库，序号小的晚到就直接作废。
-      if (!claimIntent(ownerIdOf(actor), body.page, body.seq)) return c.json({ projectOrder, stale: true });
-      await patchSettingsFor(actor, patch);
+      const intent = intentOf(body.page, body.seq);
+      const owner = ownerIdOf(actor) ?? "";
+      const written = await db.transaction(async (tx) => {
+        if (intent && !(await claimIntent(tx, owner, intent))) return false;
+        await writePersonalSettings(actor, patch, tx);
+        return true;
+      });
+      if (!written) return c.json({ projectOrder, stale: true });
       bus.publish({ type: "projects.reordered", ownerUserId: ownerIdOf(actor) });
       return c.json({ projectOrder });
     } catch (error) {
