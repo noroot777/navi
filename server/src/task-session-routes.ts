@@ -29,6 +29,7 @@ import {
 } from "./transcript.js";
 import type { SessionTraceEntry } from "./transcript.js";
 import { sessionContext, sessionUsage } from "./usage.js";
+import { parseStoredContextBreakdown } from "./context-breakdown.js";
 import { codexHome, findArchivedRollout, readCodexCliVersion } from "./executors/codex-rollout.js";
 import { affectedCodexSessionWarning } from "./executors/version-policy.js";
 import { enrichNativeWorkModels } from "./native-work-models.js";
@@ -59,6 +60,8 @@ async function toSession(
     usage: sessionUsage(r),
     monitorWakeTurns: r.usageMonitorWakeTurns ?? 0,
     context: sessionContext(r),
+    // 行上那一列是 JSON 文本,读回来校验过才出门(坏了就当没有)。
+    contextBreakdown: parseStoredContextBreakdown(r.contextBreakdown),
     cliVersion,
     versionWarning: affectedCodexSessionWarning(cliVersion),
     // 「此刻还在等上游」跟着会话行一起出门:刷新重建要用它,而不是去 trace 的末条上猜

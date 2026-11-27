@@ -436,4 +436,6 @@ export const COLUMN_MIGRATIONS: string[] = [
   // 团队名下共享执行者真完成的次数 / 持续目标停住等续跑的那一刻(见 db/schema.ts 同名列)。存量行 0 / NULL。
   "ALTER TABLE tasks ADD COLUMN team_done_seq INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE tasks ADD COLUMN goal_stopped_at TEXT",
+  // 上下文分项(见 schema-sessions.ts 同名列)。存量行 NULL = 没有分项。
+  "ALTER TABLE sessions ADD COLUMN context_breakdown TEXT",
 ];

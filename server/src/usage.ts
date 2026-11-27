@@ -8,7 +8,7 @@
 // **这个文件里还住着上下文水位（setSessionContext），它是覆盖式的**——两组列摆在
 // 一起是为了让下一个人一眼看见「有两种账，加法只适用于其中一种」。
 import { and, eq, sql } from "drizzle-orm";
-import type { AgentEvent, AgentType, ContextUsage, TokenUsage, UsageAccountingMark } from "@navi/shared";
+import type { AgentEvent, AgentType, ContextBreakdown, ContextUsage, TokenUsage, UsageAccountingMark } from "@navi/shared";
 import {
   COMPACT_SNAPSHOT_ENV_KEYS,
   type CompactSnapshot,
@@ -247,6 +247,18 @@ export async function setSessionContext(sessId: string, context: ContextUsage): 
       .where(eq(sessions.id, sessId));
   } catch (error) {
     console.warn(`[navi] failed to record context usage for session ${sessId}:`, error);
+  }
+}
+
+/**
+ * 上下文分项落到会话行(shared/src/context-breakdown.ts)。覆盖式,跟水位分开写:水位每次请求都更新,
+ * 分项只在回合末更新。同样 best-effort:写不进去只记日志,不影响回合结算。
+ */
+export async function setSessionContextBreakdown(sessId: string, breakdown: ContextBreakdown): Promise<void> {
+  try {
+    await db.update(sessions).set({ contextBreakdown: JSON.stringify(breakdown) }).where(eq(sessions.id, sessId));
+  } catch (error) {
+    console.warn(`[navi] failed to record context breakdown for session ${sessId}:`, error);
   }
 }
 

@@ -269,6 +269,8 @@ async function* claudeStreamEvents(
     }
     if (ev.type === "system" && ev.session_id) {
       if (ev.subtype === "init" && !replaying) onInitialized();
+      // 自报了版本才是认控制请求的真 claude(回合结束问分项靠它,见 ClaudeControlBridge.cliVersion);重放里的也算。
+      if (ev.subtype === "init" && resident && typeof ev.claude_code_version === "string") resident.cliVersion = ev.claude_code_version;
       // 计划回合以 CLI 自己报的权限模式为准：被 settings 之类顶成别的模式，就等于没拦着写文件，当场停下。
       const planProblem = ev.subtype === "init" && !replaying ? resident?.planGate?.initProblem(ev.permissionMode) : null;
       if (planProblem) {

@@ -18,6 +18,7 @@ import { relayRoot } from "../llm.js";
 import { monitorRedirectHook } from "../claude-monitor-hook.js";
 import { anthropicContext1mBaseUrl, modelUsesContext1m, withContext1mSuffix } from "../anthropic-context-1m.js";
 import { ClaudeControlBridge } from "./claude-control.js";
+import { contextBreakdownFromClaude } from "../context-breakdown.js";
 import { parseClaudeStream } from "./claude-stream.js";
 import { claudeNaviMcpInjection, type ClaudeNaviMcpInjection } from "./navi-mcp-inject.js";
 import { claudeGoalInvocation, cleanupClaudeGoalContext } from "./claude-goal.js";
@@ -403,6 +404,15 @@ export class ClaudeExecutor implements AgentExecutor {
         stdin.write(userLine(text));
         resident.beginTurn(true);
         return true;
+      },
+      contextBreakdown: async () => {
+        const response = await resident.contextUsage((line) => {
+          const stdin = child.stdin;
+          if (!stdin || stdin.destroyed || stdin.writableEnded || !stdin.writable) return false;
+          stdin.write(line);
+          return true;
+        });
+        return response ? contextBreakdownFromClaude(response, new Date().toISOString()) : null;
       },
       turnActive: () => resident.turnActive,
       epoch: () => resident.epoch,

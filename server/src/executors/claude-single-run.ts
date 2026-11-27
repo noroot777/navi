@@ -131,6 +131,11 @@ export function singleRunFromResident(
             continue;
           }
           accepting = false;
+          // 收台之前问一次分项:进程还活着、MCP 都连着,回合刚收口,这一刻的数才准(冷启动再问就缺
+          // MCP 那一项)。最多等 CONTEXT_USAGE_TIMEOUT_MS,拿不到照常收台、不留快照;等的时候被停止,
+          // 进程一没回包就作废,同样立刻往下走。
+          const breakdown = await resident.contextBreakdown?.();
+          if (breakdown) yield { kind: "contextBreakdown", breakdown };
           resident.close();
           yield { kind: "done", exitStatus: 0 };
           return;

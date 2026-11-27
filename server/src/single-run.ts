@@ -48,7 +48,7 @@ import { clearSessionStalled, markSessionStalled } from "./session-stall-flag.js
 import { createExecutionCloser, recordFreeTaskExecutionStartIfFree } from "./free-workflow-events.js";
 import { clearTurnStart } from "./turn-output.js";
 import { turnInterruptionOf } from "./turn-interruption.js";
-import { recordSessionUsageEvent, setSessionContext } from "./usage.js";
+import { recordSessionUsageEvent, setSessionContext, setSessionContextBreakdown } from "./usage.js";
 import { markCliGoalStarted } from "./task-cli-state.js";
 import { settleSingleRunTurn } from "./single-run-settle.js";
 import { windDownStep } from "./turn-wind-down.js";
@@ -458,6 +458,10 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
         }
         // 水位相反：**覆盖**。它属于整条会话的此刻，不属于某一个回合，所以也不进 trace。
         if (emittedEvent.kind === "context") await setSessionContext(sessId, emittedEvent.context);
+        // 分项同理住在会话行上;先落库再播,页面收到它重读会话行时读到的就是这一份。
+        if (emittedEvent.kind === "contextBreakdown") {
+          await setSessionContextBreakdown(sessId, { ...emittedEvent.breakdown, turnStartedAt: a.turnStart });
+        }
         publishEvent(emittedEvent, record);
       }
     }

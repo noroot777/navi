@@ -1,5 +1,6 @@
 import type { AgentType } from "./index.ts";
 import type { ContextUsage, TokenUsage } from "./usage.ts";
+import type { ContextBreakdown } from "./context-breakdown.ts";
 
 // "lead" = 团队任务的常驻调度台会话（一个进程跑很多回合，见 server/src/team）；
 // 执行者自己的会话仍是 "single"。
@@ -118,6 +119,10 @@ export interface Session {
   // 个概念(见 shared/src/usage.ts)。null = 没采到(那家 CLI 不给,或会话建在该功能
   // 之前)。
   context: ContextUsage | null;
+  // 上下文分项(系统提示、工具、消息…各占多少),只在回合结束时问 CLI 一次,带自己的取数时刻,
+  // 跟上面的水位分开存(见 shared/src/context-breakdown.ts)。null/缺省 = 没有:这家 CLI 给不出、
+  // 老会话、或者那一回合没取到。
+  contextBreakdown?: ContextBreakdown | null;
 }
 
 /**
