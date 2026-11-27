@@ -79,9 +79,11 @@ export async function releaseCloud(platforms, version, { cwd, github, say = cons
   if (spawnSync("git", ["merge-base", "--is-ancestor", remote, head], { cwd }).status !== 0) {
     throw new Error("远端 main 有本地尚未包含的提交：先自行同步、处理分叉，再发布。没有修改版本或推送。");
   }
-  const changed = () => git(cwd, ["rev-parse", "HEAD"]) !== head || git(cwd, ["status", "--porcelain"])
+  // 只在开始时那个 main 上动：别处切了分支、多了提交、改了文件，都停
+  const leftMain = () => git(cwd, ["branch", "--show-current"]) !== "main";
+  const changed = () => leftMain() || git(cwd, ["rev-parse", "HEAD"]) !== head || git(cwd, ["status", "--porcelain"])
     || jobs.some((job) => readFileSync(join(cwd, job.platform.versionFile), "utf8") !== job.original);
-  if (changed()) throw new Error("预检期间本地 main 或工作区被别处改动了（多了提交或改了文件），停止发布：只发开始时核对过的那个提交。");
+  if (changed()) throw new Error("预检期间本地 main 或工作区被别处改动了（切了分支、多了提交或改了文件），停止发布：只发开始时核对过的那个提交。");
   for (const job of jobs) job.platform.checkHead(job.state, version, head);
 
   // 推之前定下要做的事：沿用已有任务 / 已全部发过 / 只发了一部分（拒）/ 新发
@@ -100,17 +102,30 @@ export async function releaseCloud(platforms, version, { cwd, github, say = cons
   }
 
   if (bumps.length) {
-    for (const bump of bumps) writeFileSync(join(cwd, bump.platform.versionFile), bump.platform.writeVersion(bump.original, version));
+    for (const bump of bumps) {
+      bump.next = bump.platform.writeVersion(bump.original, version);
+      writeFileSync(join(cwd, bump.platform.versionFile), bump.next);
+    }
     const message = `chore(release): 版本号 ${version}（${bumps.map((bump) => bump.platform.label).join("、")}）`;
     try {
+      if (leftMain()) throw new Error("写版本号期间本地切走了 main：没有提交、没有推送。");
       git(cwd, ["commit", "--only", "-m", message, "--", ...bumps.map((bump) => bump.platform.versionFile)]);
     } catch (error) {
-      if (git(cwd, ["rev-parse", "HEAD"]) === head) for (const bump of bumps) writeFileSync(join(cwd, bump.platform.versionFile), bump.original);
+      // 只还原仍是自己写出的那份的文件：提交等待期间编辑器、钩子可能改过它，HEAD 没动不代表文件没被别人碰过
+      const touched = [];
+      if (git(cwd, ["rev-parse", "HEAD"]) === head) {
+        for (const bump of bumps) {
+          const path = join(cwd, bump.platform.versionFile);
+          if (readFileSync(path, "utf8") === bump.next) writeFileSync(path, bump.original);
+          else touched.push(bump.platform.versionFile);
+        }
+      }
+      if (touched.length) throw new Error(`${error.message}\n${touched.join("、")} 在提交期间被别处改过：原样留着没还原（版本号改动也在里面），检查后自行处理。`);
       throw error;
     }
   }
   const commit = git(cwd, ["rev-parse", "HEAD"]);
-  if ((bumps.length ? git(cwd, ["rev-parse", "HEAD^"]) : commit) !== head) throw new Error("提交期间本地 main 被别处改动了：没有推送；检查后重试。");
+  if (leftMain() || (bumps.length ? git(cwd, ["rev-parse", "HEAD^"]) : commit) !== head) throw new Error("提交期间本地 main 被别处改动了（切了分支或多了提交）：没有推送；检查后重试。");
   if (git(cwd, ["status", "--porcelain"])) throw new Error("提交期间出现额外改动：版本提交保留，没有推送；检查工作区后重试。");
   say(`▶ 推送 main：${commit}`);
   git(cwd, ["push", "origin", `${commit}:refs/heads/main`]);

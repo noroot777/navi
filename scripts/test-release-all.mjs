@@ -2,8 +2,8 @@
 //   · 两边的版本号进同一个提交、推一次，按这个提交触发一次 release.yml；同一提交已有任务就沿用（失败的重跑），成功的不再触发
 //   · 动版本号之前所有判断都做完：工作区、分支、倒退、工作流、Actions 读权限、两边更新源、远端领先 —— 不过就什么都不动
 //   · 这一版只在一部分平台（或 Mac 一部分架构）发过、又没有原工作流：推之前就拒，不建提交、不推、不触发
-//   · 预检期间本地 main 多了提交：停，不把没核对过的提交发出去
-//   · 触发失败：代码已推送，重跑同一命令不再建版本提交；推送被拒保留版本提交；提交被钩子拒只撤回版本号
+//   · 预检期间本地 main 多了提交、或切走了 main：停，不把没核对过的提交发出去、不在别的分支上提交
+//   · 触发失败：代码已推送，重跑同一命令不再建版本提交；推送被拒保留版本提交；提交被钩子拒只撤回版本号（提交期间被别处改过的文件原样留着）
 //   · 两边都已发过这一版：什么都不做
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -180,6 +180,18 @@ try {
     console.log("✓ 预检期间本地 main 多了提交：停，不推、不触发，只发开始时核对过的那个提交");
   }
 
+  // ── 预检期间切走了 main（同一个提交上的别的分支）：停 ─────────────────────
+  {
+    const item = fixture("switched");
+    const before = item.head();
+    const github = fakeGithub({ onRead(path) { if (path === WIN_FEED) git(item.dir, "switch", "-qc", "feature"); } });
+    await assert.rejects(releaseAll("0.3.6", { cwd: item.dir, github, ...quiet }), /预检期间本地 main 或工作区被别处改动了（切了分支/);
+    assert.equal(item.remote(), before);
+    assert.equal(item.head(), before, "feature 上没有版本提交");
+    assert.deepEqual(github.state.dispatched, []);
+    console.log("✓ 预检期间切走了 main：停，不在别的分支上提交、不推");
+  }
+
   // ── 一起发：一个提交、推一次、触发一次；沿用、重跑、不重复 ─────────────────
   {
     const item = fixture("happy");
@@ -236,7 +248,19 @@ try {
     await assert.rejects(releaseAll("0.3.6", { cwd: hooks.dir, github: fakeGithub(), ...quiet }), /git commit 失败/);
     assert.deepEqual(hooks.versions(), ["0.3.5", "0.1.0"], "提交被拒：只撤回版本号");
     assert.equal(git(hooks.dir, "status", "--porcelain"), "");
-    console.log("✓ 触发失败重跑不再建提交；推送被拒保留版本提交、不触发；提交被拒只撤回版本号");
+
+    // 提交等待期间别处（编辑器、钩子）改了版本文件：那份原样留着，只还原仍是自己写出的那份
+    const edited = fixture("edited");
+    mkdirSync(join(edited.dir, "hooks"));
+    writeFileSync(join(edited.dir, "hooks/pre-commit"), `#!/bin/sh\nprintf '# saved during commit\\n' >> ${MAC_FILE}\nexit 1\n`, { mode: 0o755 });
+    git(edited.dir, "config", "core.hooksPath", "hooks");
+    git(edited.dir, "add", "hooks");
+    git(edited.dir, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "add editing hook");
+    await assert.rejects(releaseAll("0.3.6", { cwd: edited.dir, github: fakeGithub(), ...quiet }), new RegExp(`git commit 失败[\\s\\S]*${MAC_FILE.replace(/[.]/g, "\\.")} 在提交期间被别处改过：原样留着没还原`));
+    assert.ok(readFileSync(join(edited.dir, MAC_FILE), "utf8").includes("# saved during commit"), "别处的改动还在");
+    assert.deepEqual(edited.versions(), ["0.3.6", "0.1.0"], "被改过的那份不还原；没被碰过的那份撤回版本号");
+    assert.equal(git(edited.dir, "status", "--porcelain"), `M ${MAC_FILE}`);
+    console.log("✓ 触发失败重跑不再建提交；推送被拒保留版本提交、不触发；提交被拒只撤回版本号，提交期间被别处改过的文件原样留着");
   }
 
   // ── 版本号已经对齐 / 只有一边要改 ──────────────────────────────────────
