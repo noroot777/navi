@@ -54,9 +54,12 @@ const APP = resolve(process.argv[2] || join(HERE, "..", "build", "runtime"));
 buildProducts({ skip: readEnv(process.env, "NAVI_WIN_SKIP_BUILD") === "1" });
 
 // ── 2. node（zip 用 tar 解：macOS 和 Windows 10 起自带的 tar 都是 bsdtar，认 zip）────────────
+// Windows 上点名用系统那份：PATH 里可能先排着 Git 带的 GNU tar（GitHub 的 windows runner 就是），
+// 它不认 zip，还把 D:\… 当成「主机:路径」去连网络。
+const TAR = process.platform === "win32" ? join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe") : "tar";
 const archive = await fetchNode(CACHE, NODE_ARCHIVE, NODE_SHA256);
 const nodeHome = unpackOnce(CACHE, NODE_HOME, "node.exe",
-  (unpacking) => run("tar", ["-xf", archive, "-C", unpacking, "--strip-components", "1"]));
+  (unpacking) => run(TAR, ["-xf", archive, "-C", unpacking, "--strip-components", "1"]));
 const npmCli = join(nodeHome, "node_modules", "npm", "bin", "npm-cli.js");
 
 // ── 3. 生产依赖 ────────────────────────────────────────────────────────────
