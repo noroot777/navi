@@ -131,8 +131,21 @@ try {
   await page.getByTestId("outside").focus();
   assert.equal(await pressFind(), true);
   await input.waitFor();
-  // 留着上次的词，全选好直接打新的。
+  // 留着上次的词，全选好直接打新的；而且一打开就拿这个词再找了一遍（用户 2026-11-27：Esc 关掉
+  // 再 ⌘F，框里还是那个词，却什么都搜不到）。
   assert.equal(await input.inputValue(), "编辑器", "再开时留着上次的词");
+  await count.filter({ hasText: "/4" }).waitFor({ timeout: WAIT_TIMEOUT_MS });
+  assert.equal((await marks()).text, "编辑器", "重新打开就标出来，不用再打一遍");
+  assert.ok(await page.evaluate(() => CSS.highlights.get("conversation-find")?.size === 3), "其余三处也标上");
+  await page.waitForFunction(() => {
+    const node = document.activeElement;
+    return node instanceof HTMLInputElement && node.selectionStart === 0 && node.selectionEnd === node.value.length;
+  }, null, { timeout: WAIT_TIMEOUT_MS });
+  const reopenedAt = await count.textContent();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction((before) => document.querySelector(".conversation-find__count")?.textContent !== before, reopenedAt, { timeout: WAIT_TIMEOUT_MS });
+  assert.match(await count.textContent(), /^[1-4]\/4$/, "回车照常往下跳");
+  await input.press(`${mod}+a`);
   await page.waitForFunction(() => {
     const node = document.activeElement;
     return node instanceof HTMLInputElement && node.selectionStart === 0 && node.selectionEnd === node.value.length;

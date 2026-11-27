@@ -57,6 +57,7 @@ export function ConversationFind({
   const queryRef = useRef(query);
   queryRef.current = query;
   const settle = useRef(0);
+  const reopened = useRef(false);
 
   const roots = useCallback(() => [
     ...(extras.current ?? []).flatMap((root) => root.current ? [root.current] : []),
@@ -169,6 +170,7 @@ export function ConversationFind({
     if (!openRef.current) {
       const active = document.activeElement;
       restoreFocus.current = active && active !== document.body ? active : null;
+      reopened.current = true;
     }
     setOpen(true);
     setFocusRequest((value) => value + 1);
@@ -180,7 +182,13 @@ export function ConversationFind({
     if (!focusRequest) return;
     input.current?.focus();
     input.current?.select();
-  }, [focusRequest]);
+    // 关掉时命中全清了，词却留在框里：重新打开就拿这个词当场再找一遍。不找的话框里写着词、
+    // 计数却是 0/0，回车也跳不动；再照原样打一遍同一个词，值没变，onChange 也不来。
+    if (reopened.current) {
+      reopened.current = false;
+      if (queryRef.current.trim()) searchFresh();
+    }
+  }, [focusRequest, searchFresh]);
 
   useEffect(() => registerConversationFinder({
     region: () => scrollRef.current?.parentElement ?? scrollRef.current,
