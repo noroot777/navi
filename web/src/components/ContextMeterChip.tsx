@@ -7,6 +7,8 @@ import { useDismissable } from "../lib/useDismissable.ts";
 import { placementStyle, usePanelPlacement } from "../lib/usePanelPlacement.ts";
 import { ContextCompactQuickSettings } from "./ContextCompactQuickSettings.tsx";
 import { SessionContext1mNotice } from "./Context1mNotice.tsx";
+import { ContextBreakdownView } from "./ContextBreakdownView.tsx";
+import { hasBreakdown } from "./contextBreakdown.ts";
 
 /**
  * 「这条会话离上下文塞满还有多远」的那颗胶囊。
@@ -49,6 +51,11 @@ export function contextMeterView(context: ContextUsage) {
   return { window, usesCompactWindow, displayWindowEstimated, clampedByModel, ratio, compactTrigger, approx, remain, spoken, tight };
 }
 
+/** 面板收起设置时的宽度:有分项那张表就要宽一些,装得下「自动压缩预留」加两列数。 */
+export function contextPanelWidth(session?: Session | null): number {
+  return hasBreakdown(session?.contextBreakdown) ? 272 : 224;
+}
+
 /**
  * 水位明细加快捷设置那一层（挂在 body 上的浮层）。胶囊和「信息」格的「压缩设置」打开的是
  * 同一个它；开合、定位、焦点归调用方。
@@ -61,6 +68,7 @@ export const ContextMeterPanel = forwardRef<HTMLDivElement, {
   style?: CSSProperties;
 }>(function ContextMeterPanel({ context, session, editing, onToggleEditing, style }, ref) {
   const { window, usesCompactWindow, displayWindowEstimated, clampedByModel, compactTrigger } = contextMeterView(context);
+  const breakdown = session?.contextBreakdown;
   return (
     <div
       className="token-usage-panel is-cols-1"
@@ -74,6 +82,8 @@ export const ContextMeterPanel = forwardRef<HTMLDivElement, {
         <span>上下文</span>
         <span>token</span>
       </header>
+      {/* 分项是回合末问来的(只有 claude 给得出),下面那几行是最近一次请求的水位,两者不同时刻。 */}
+      {hasBreakdown(breakdown) && <ContextBreakdownView breakdown={breakdown} />}
       <dl>
         <div>
           <dt>已装入</dt>
@@ -133,8 +143,8 @@ export function ContextMeterChip({ context, session, className }: {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const place = usePanelPlacement(triggerRef, panelRef, {
-    // 展开设置后面板里是一排输入框，224px 塞不下；收起时仍按明细的窄宽度走。
-    minWidth: editing ? 296 : 224,
+    // 展开设置后面板里是一排输入框，224px 塞不下；收起时仍按明细的窄宽度走，有分项时放宽到装得下分项名。
+    minWidth: editing ? 296 : contextPanelWidth(session),
     minHeight: 108,
     fallbackHeight: 180,
     enabled: open,

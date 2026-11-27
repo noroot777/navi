@@ -284,7 +284,8 @@ export function useConversation(
           id: createClientId(),
           event,
         });
-        if (event.event.kind === "session") {
+        // 上下文分项落在会话行上(回合末才到,排在 session 那一下之后),到了就重读一次。
+        if (event.event.kind === "session" || event.event.kind === "contextBreakdown") {
           refreshSessions();
         }
       }
