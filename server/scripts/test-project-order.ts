@@ -1,7 +1,8 @@
 // 项目先后（个人设置 projectOrder，server/src/project-order.ts）的后端回归：
 //  · GET /projects 按排过的先后下发，没排过的接在后面、保持创建先后；
 //  · PUT /project-order 只留存在的项目 id，去重；坏请求体 400；
-//  · 写完推一条只给本人的 projects.reordered。
+//  · 写完推一条只给本人的 projects.reordered；
+//  · 同一页面（page）的意图按 seq 只认更大的：超时后被取代的旧请求晚到，回 stale、不改顺序；别的页面不受影响。
 //
 // 跑：npx tsx server/scripts/test-project-order.ts
 import assert from "node:assert/strict";
@@ -76,11 +77,28 @@ assert.deepEqual(await listed(), ["alpha", "beta", "gamma"], "出厂按创建先
   assert.deepEqual(await listed(), ["gamma", "alpha", "beta", "delta"]);
 }
 
+// ── 同一页面晚到的旧意图作废 ─────────────────────────────────────────────────
+{
+  const put = (names: string[], page: string, seq: number) =>
+    call("/project-order", "PUT", { projectIds: names.map((name) => ids[name]), page, seq });
+  assert.equal((await put(["beta", "alpha", "gamma", "delta"], "page-a", 2)).status, 200);
+  assert.deepEqual(await listed(), ["beta", "alpha", "gamma", "delta"]);
+  const stale = await put(["alpha", "beta", "gamma", "delta"], "page-a", 1);
+  assert.equal(stale.status, 200);
+  assert.equal(stale.body.stale, true, "序号更小的是被取代的旧意图");
+  assert.deepEqual(await listed(), ["beta", "alpha", "gamma", "delta"], "晚到的旧意图盖不回去");
+  assert.equal((await put(["delta", "beta", "alpha", "gamma"], "page-a", 2)).body.stale, true, "同一序号也不重放");
+  assert.equal((await put(["gamma", "alpha", "beta", "delta"], "page-b", 1)).body.stale, undefined, "别的页面各记各的");
+  assert.deepEqual(await listed(), ["gamma", "alpha", "beta", "delta"]);
+  assert.equal((await put(["alpha", "beta", "gamma", "delta"], "page-a", 3)).body.stale, undefined);
+  assert.deepEqual(await listed(), ["alpha", "beta", "gamma", "delta"]);
+}
+
 // ── 坏请求体 ─────────────────────────────────────────────────────────────────
 {
   assert.equal((await call("/project-order", "PUT", { projectIds: "alpha" })).status, 400);
   assert.equal((await call("/project-order", "PUT", {})).status, 400);
-  assert.deepEqual(await listed(), ["gamma", "alpha", "beta", "delta"], "坏请求不改顺序");
+  assert.deepEqual(await listed(), ["alpha", "beta", "gamma", "delta"], "坏请求不改顺序");
 }
 
 await releaseTmpDb();

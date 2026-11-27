@@ -90,7 +90,7 @@ export function WorkspaceShell() {
   const [gitOpen, setGitOpen] = useState(initial.view === "git");
   const [gitLocation, setGitLocation] = useState(readGitLocation);
   const [projectId, setProjectId] = useState<string | null>(initial.projectId);
-  const { projects, ready: projectsReady, error: projectsError, lagging: projectsLagging, apply: setProjects, commit: commitProjects, setLocal: setProjectsLocal } =
+  const { projects, ready: projectsReady, error: projectsError, lagging: projectsLagging, apply: setProjects, saveOrder: saveProjectOrder, setLocal: setProjectsLocal } =
     useProjects((rows) => setProjectId((current) => current && rows.some((project) => project.id === current) ? current : rows[0]?.id ?? null));
   const currentProject = projects.find((project) => project.id === projectId) ?? null;
   const hasCurrentProject = currentProject !== null;
@@ -162,11 +162,8 @@ export function WorkspaceShell() {
   // 底部坞的会话账本：开着哪几个终端、哪个在前台、抽屉展开没有。住在这一层是因为 tab 条摆在
   // 状态栏上（StatusBar），抽屉收起时它照样要说得出还有什么活着。
   const reorderProjects = useCallback((projectIds: string[]) => {
-    const rank = new Map(projectIds.map((id, index) => [id, index]));
-    const sorted = (rows: ProjectView[]) => [...rows].sort((a, b) => (rank.get(a.id) ?? rank.size) - (rank.get(b.id) ?? rank.size));
-    commitProjects(sorted, () => api.reorderProjects(projectIds),
-      (error) => notify(error instanceof Error ? `项目顺序没存上：${error.message}` : "项目顺序没存上"));
-  }, [commitProjects, notify]);
+    saveProjectOrder(projectIds, (error) => notify(error instanceof Error ? `项目顺序没存上：${error.message}` : "项目顺序没存上"));
+  }, [saveProjectOrder, notify]);
   const terminal = useTerminalDock({ project: currentProject, enabled: canUseTerminal, notify });
   const remoteReturns = useRemoteReturns(notify);
   // 主仓 git 操作落定时那一句话挂在这一层，为的是**盖得住切项目**：分支胶囊跟着当前项目

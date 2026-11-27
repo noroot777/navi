@@ -11,14 +11,23 @@ import { patchSettingsFor } from "./auth/personal-settings.js";
 import { visibleProjectIds } from "./auth/visibility.js";
 import { parseAppSettingsPatch } from "./app-settings.js";
 
-/** 排过的在前、按排出来的先后；没排过的（新建的、后来才看得见的）接在后面，保持原来的先后。 */
-export function orderProjects<T extends { id: string }>(rows: readonly T[], order: readonly string[]): T[] {
-  if (!order.length) return [...rows];
-  const rank = new Map(order.map((projectId, index) => [projectId, index]));
-  return rows
-    .map((row, index) => ({ row, key: rank.get(row.id) ?? order.length + index }))
-    .sort((a, b) => a.key - b.key)
-    .map((entry) => entry.row);
+export { orderProjects } from "@navi/shared/project";
+
+// 同一个页面的先后意图带着递增的序号来（page + seq）：页面保存超时后会接着发更新的那一份，被它掐掉
+// 的旧请求万一晚到，不能把顺序盖回去 —— 按（人, 页面）只认序号更大的。只记在内存里：页面 id 每次
+// 打开都是新的，重启前在途的旧请求重启后也到不了；不带这两项的调用方（脚本、老页面）不受这道闸。
+const SEEN_LIMIT = 500;
+const latestSeq = new Map<string, number>();
+
+function claimIntent(owner: string | null, page: unknown, seq: unknown): boolean {
+  if (typeof page !== "string" || !page || page.length > 64 || typeof seq !== "number" || !Number.isSafeInteger(seq)) return true;
+  const key = `${owner ?? ""}\u0000${page}`;
+  const seen = latestSeq.get(key);
+  if (seen !== undefined && seq <= seen) return false;
+  latestSeq.delete(key);
+  latestSeq.set(key, seq);
+  if (latestSeq.size > SEEN_LIMIT) latestSeq.delete(latestSeq.keys().next().value!);
+  return true;
 }
 
 export function mountProjectOrderRoutes(api: Hono): void {
@@ -28,13 +37,16 @@ export function mountProjectOrderRoutes(api: Hono): void {
   api.put("/project-order", async (c) => {
     const actor = actorOf(c);
     try {
-      const body = await c.req.json<{ projectIds?: unknown }>();
+      const body = await c.req.json<{ projectIds?: unknown; page?: unknown; seq?: unknown }>();
       if (!Array.isArray(body.projectIds)) return c.json({ error: "projectIds 必须是数组" }, 400);
       const visible = await visibleProjectIds(actor);
       const known = new Set((await db.select({ id: projects.id }).from(projects)).map((row) => row.id));
       const projectOrder = [...new Set(body.projectIds.filter((value): value is string =>
         typeof value === "string" && known.has(value) && (visible === null || visible.has(value))))];
-      await patchSettingsFor(actor, parseAppSettingsPatch({ projectOrder }));
+      const patch = parseAppSettingsPatch({ projectOrder });
+      // 认领和写之间不夹别的 await：同页两份请求按认领先后落库，序号小的晚到就直接作废。
+      if (!claimIntent(ownerIdOf(actor), body.page, body.seq)) return c.json({ projectOrder, stale: true });
+      await patchSettingsFor(actor, patch);
       bus.publish({ type: "projects.reordered", ownerUserId: ownerIdOf(actor) });
       return c.json({ projectOrder });
     } catch (error) {

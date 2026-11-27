@@ -111,9 +111,12 @@ export const api = {
     request("/host/pick-directory", json("POST", { startIn })),
 
   projects: (signal?: AbortSignal): Promise<ProjectView[]> => request("/projects", { signal }),
-  // 整份先后一次写下（个人设置，服务端按它排 `/projects`）。
-  reorderProjects: (projectIds: string[]): Promise<{ projectOrder: string[] }> =>
-    request("/project-order", json("PUT", { projectIds })),
+  // 整份先后一次写下（个人设置，服务端按它排 `/projects`）。page + seq 让服务端认出同一页面里
+  // 更早的那份意图、晚到就作废（server/src/project-order.ts）；`stale` = 被本页更新的一份取代了。
+  reorderProjects: (
+    projectIds: string[], intent: { page: string; seq: number }, signal?: AbortSignal,
+  ): Promise<{ projectOrder: string[]; stale?: true }> =>
+    request("/project-order", { ...json("PUT", { projectIds, ...intent }), signal }),
   // `createDir` 为真时服务端会把不存在的目录（连同缺失的上级）建出来；不带它就是老行为
   // ——目录不存在也照记不误。只有在界面上明确告诉过用户「这个目录会被建出来」时才带上。
   createProject: (name: string, repoPath: string, createDir = false): Promise<ProjectView> =>
