@@ -165,8 +165,8 @@ export function ProjectSwitcher({
                   role="menuitemradio"
                   aria-checked={selected}
                   {...reorder.rowProps(project.id)}
-                  onClick={() => {
-                    if (reorder.shouldSwallowClick()) return;
+                  onClick={(event) => {
+                    if (reorder.shouldSwallowClick(event)) return;
                     setSearch("");
                     setOpen(false);
                     onProject(project.id);

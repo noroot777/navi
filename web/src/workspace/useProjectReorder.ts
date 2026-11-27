@@ -10,8 +10,12 @@ const DRAG_THRESHOLD = 4;
 const EDGE = 28;
 const EDGE_STEP = 8;
 
-// 一次按下到松手是一个手势。`dragged`：这次挪过阈值、已经算拖了 —— 拖动被 Esc 撤销之后手势还没完，
-// 剩下的移动不再接着拖，松手时那一下 click 照样得吞掉（它是拖动的收尾，不是点选）。
+// 一次按下到松手是一个手势。`dragged`：这次挪过阈值、已经算拖了。
+// 终止分两种，别混用：
+//  · 取消拖动（abort）—— Esc、开始搜索/菜单关掉、切走窗口。只撤掉排出来的顺序；键还按着，手势留到真正
+//    松手，剩下的移动不再接着拖。
+//  · 手势结束（finish）—— 松手、浏览器取消指针、回来时键已松开（窗口外松的手）。拖过的就吞掉随后那一下
+//    click：它是拖动的收尾，不是点选。
 type Gesture = { id: string; pointerId: number; startY: number; dragged: boolean };
 
 export function useProjectReorder({
@@ -30,7 +34,9 @@ export function useProjectReorder({
   const gesture = useRef<Gesture | null>(null);
   const draftRef = useRef<string[] | null>(null);
   const pointerY = useRef(0);
-  // 拖完松手时指针底下那一行会收到一次 click，不能把它当成「切到这个项目」。
+  // 拖过的手势结束后，紧跟这次**物理松手**的那一下 click 不能当成「切到这个项目」。标记一直留到那次松手
+  // 之后才放（见 up），下一次按下也会清掉它 —— 不按计时器算：手势可能先于松手就结束了（切回标签时浏览器
+  // 补发一次「键已松开」的移动），松手和 click 要等人真的松开才来。
   const swallowClick = useRef(false);
 
   // 撤掉这一次拖动排出来的顺序。手势本身留着到松手（只有没拖过的才直接丢）。
@@ -46,9 +52,7 @@ export function useProjectReorder({
     const ended = gesture.current;
     gesture.current = null;
     abort();
-    if (!ended?.dragged) return;
-    swallowClick.current = true;
-    window.setTimeout(() => { swallowClick.current = false; }, 0);
+    if (ended?.dragged) swallowClick.current = true;
   }, [abort]);
 
   useEffect(() => { if (!enabled) abort(); }, [enabled, abort]);
@@ -92,21 +96,29 @@ export function useProjectReorder({
       placeAt(start.id, event.clientY);
     };
     const up = (event: globalThis.PointerEvent) => {
-      if (gesture.current?.pointerId !== event.pointerId) return;
-      const finished = draftRef.current;
-      finish();
-      if (finished && finished.some((value, i) => value !== ids[i])) onCommit(finished);
+      if (gesture.current?.pointerId === event.pointerId) {
+        const finished = draftRef.current;
+        finish();
+        if (finished && finished.some((value, i) => value !== ids[i])) onCommit(finished);
+      }
+      // 这次松手之后紧跟着的那一下 click 被吞掉之后，再放行后面的点选。
+      if (swallowClick.current) window.setTimeout(() => { swallowClick.current = false; }, 0);
     };
+    // 新的一次按下：上一次手势留下的吞点击标记跟它无关了。
+    const down = () => { swallowClick.current = false; };
     const cancel = (event: globalThis.PointerEvent) => {
       if (gesture.current?.pointerId === event.pointerId) finish();
     };
-    // 切走窗口（⌘Tab、点了别的应用）：手势的下文不归这一页了，同样作废。
-    const blur = () => { if (gesture.current) finish(); };
+    // 切走窗口（⌘Tab、切标签）：这次拖动作废，但键还按着 —— 手势留到真正松手，切回来再松手的那一下
+    // click 照样吞掉（同 Esc）。
+    const blur = () => abort();
+    window.addEventListener("pointerdown", down, true);
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", cancel);
     window.addEventListener("blur", blur);
     return () => {
+      window.removeEventListener("pointerdown", down, true);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", cancel);
@@ -176,6 +188,7 @@ export function useProjectReorder({
     order: draft ?? ids,
     dragging,
     rowProps,
-    shouldSwallowClick: () => swallowClick.current,
+    // 键盘触发的 click（回车 / 空格，detail 为 0）不是哪次松手的收尾，不吞。
+    shouldSwallowClick: (event: { detail: number }) => event.detail !== 0 && swallowClick.current,
   };
 }
