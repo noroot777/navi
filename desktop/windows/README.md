@@ -195,7 +195,7 @@ npm run release -- 0.3.6
 node desktop/windows/scripts/release.mjs --installer <安装包> --version <v> --commit <完整 sha> --key-file <私钥> [--notes '…']
 ```
 
-与云端 publish 段是同一个脚本；不带 `--stage` / `--finish` 时自己建 Release、自己公开，只放这一个安装包。
+与云端 publish 段是同一个脚本。不带 `--stage` / `--finish` 时自己把安装包传进这一版共用的 Release 草稿、核对；三个包都在草稿里了才公开、推清单，没齐就停在草稿里（单独一个平台发不出只有一个包的版本）。
 
 ### 本地演练
 

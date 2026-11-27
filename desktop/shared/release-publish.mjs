@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
+import { requiredAssets } from "./release-assets.mjs";
 
 export class ReleaseStop extends Error {}
 const die = (line) => { throw new ReleaseStop(line); };
@@ -14,8 +15,9 @@ const sha256 = (buffer) => createHash("sha256").update(buffer).digest("hex");
  * 经 API 下回来核对，任何一步失败都不留公开的东西。公开之后（包括公开请求发出去、却没收到答复）出的错
  * 都只能重跑往前补：重跑会认出已公开的 Release、沿用上面的附件。
  *
- * mode 是给「一个版本一个 Release、里面放几个平台的包」用的（desktop/shared/release-together.mjs）：
- *   single  缺省：这一个包自己建草稿、传、核对、公开（本机备用发版）
+ * 一个版本一个 Release（tag v<版本>，release-assets.mjs）：三个包都在草稿里核对过才公开，不论从哪个入口来；
+ * 公开之后也不往上补没在草稿里核对过的包。mode（合并发布用法见 desktop/shared/release-together.mjs）：
+ *   single  缺省（本机备用发版）：这一个包传进草稿、核对；Release 要的包这时都在了就公开，没齐就停在草稿里、不往下推更新源
  *   stage   只传进草稿并下回核对，不公开；Release 已经公开时，包必须已经在上面（不往公开的 Release 里补没核对过的包）
  *   finish  Release 必须已经由那边公开、包已经在上面：只核对 tag、给出下载地址
  */
@@ -31,7 +33,8 @@ export async function putOnRelease(github, config, { tag, commit, file, length, 
     say(`▶ 沿用 ${repo} 里已有的${release.draft ? "草稿 " : " "}Release ${tag}`);
   }
   const existing = (release.assets || []).find((a) => a.name === basename(file));
-  if (!release.draft && mode !== "single" && !existing) {
+  const required = requiredAssets(tag, basename(file));
+  if (!release.draft && !existing && (mode !== "single" || required.length > 1)) {
     die(`Release ${tag} 已经公开，上面却没有 ${basename(file)}：不往公开的 Release 里补没在草稿里核对过的包。改用新版本发布。`);
   }
   if (existing && existing.size !== length) die(`Release ${tag} 里已经有一份 ${existing.name}，大小 ${existing.size}，和这次的 ${length} 不一样：不覆盖。`);
@@ -45,12 +48,8 @@ export async function putOnRelease(github, config, { tag, commit, file, length, 
       say(`▶ ${asset.name} 已在草稿 ${tag} 里核对过，等其它包齐了一起公开`);
       return { staged: true, asset };
     }
-    say(`▶ 公开 Release ${tag}`);
-    try {
-      release = await github.publishRelease(repo, release, target);
-    } catch (error) {
-      die(`公开 Release ${tag} 时出错（${error.message}）：它可能已经公开了。${feed} 没有推；直接重跑，会认出它接着补。`);
-    }
+    release = await publishComplete(github, repo, { tag, target, assets: required, feed, say,
+      missing: (names) => `${asset.name} 已在草稿 ${tag} 里核对过，但还缺 ${names}：没有公开，${feed} 没有推。一个版本的包要一起发（npm run release -- <版本>）。` });
   }
   const tagged = await github.tagCommit(repo, tag);
   if (tagged !== target) {
@@ -60,6 +59,22 @@ export async function putOnRelease(github, config, { tag, commit, file, length, 
   const published = (release.assets || []).find((a) => a.name === asset.name);
   if (!published) die(`公开后的 Release ${tag} 里找不到 ${asset.name}：${feed} 没有推，重跑会接着补。`);
   return { url: published.browser_download_url, staged: mode === "stage" };
+}
+
+/**
+ * 公开草稿 Release 的唯一一道门：assets 都在上面了才公开（已经公开的原样返回）；缺的时候按 missing(缺的名字) 停下。
+ */
+export async function publishComplete(github, repo, { tag, target, assets, feed = "更新源", say = () => {}, missing }) {
+  const release = await github.findRelease(repo, tag);
+  const absent = assets.filter((name) => !(release?.assets ?? []).some((asset) => asset.name === name));
+  if (absent.length) die(missing ? missing(absent.join("、")) : `Release ${tag} 里还缺 ${absent.join("、")}：没有公开，重跑会接着补。`);
+  if (!release.draft) return release;
+  say(`▶ ${assets.length > 1 ? `${assets.length} 个包都在草稿里核对过了，` : ""}公开 Release ${tag}`);
+  try {
+    return await github.publishRelease(repo, release, target);
+  } catch (error) {
+    die(`公开 Release ${tag} 时出错（${error.message}）：它可能已经公开了。${feed} 没有推；直接重跑，会认出它接着补。`);
+  }
 }
 
 /**

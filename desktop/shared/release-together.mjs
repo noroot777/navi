@@ -17,13 +17,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as mac from "../macos/scripts/cloud-workflow.mjs";
-import { distributionName } from "../macos/scripts/architecture.mjs";
 import { parseItems } from "../macos/scripts/appcast.mjs";
 import { itemDetails, readConfig as readMacConfig } from "../macos/scripts/release-state.mjs";
 import * as win from "../windows/scripts/cloud-workflow.mjs";
-import { installerName, readConfig as readWinConfig, tagFor } from "../windows/scripts/release-state.mjs";
+import { readConfig as readWinConfig, tagFor } from "../windows/scripts/release-state.mjs";
+import { releaseAssets, releaseTag } from "./release-assets.mjs";
 import { GitHub } from "./release-github.mjs";
-import { ReleaseStop, tagTarget } from "./release-publish.mjs";
+import { ReleaseStop, publishComplete, tagTarget } from "./release-publish.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -42,12 +42,10 @@ export function releasePlan(version, { root = ROOT } = {}) {
   const macConfig = readMacConfig(join(root, "desktop/macos/release.json"));
   const winConfig = readWinConfig(join(root, "desktop/windows/release.json"));
   assert.equal(macConfig.releaseRepo, winConfig.releaseRepo, "mac 与 Windows 的装包仓库不同");
-  const tag = `${macConfig.tagPrefix}${version}`;
+  const tag = releaseTag(version);
+  assert.equal(`${macConfig.tagPrefix}${version}`, tag, "mac 的 Release tag 不是 v<版本>");
   assert.equal(tagFor(winConfig, version), tag, "mac 与 Windows 的 Release tag 不同：一个版本只能有一个 Release");
-  return {
-    repo: macConfig.releaseRepo, tag, macConfig,
-    assets: [distributionName(version, "arm64"), distributionName(version, "x64"), installerName(version)],
-  };
+  return { repo: macConfig.releaseRepo, tag, macConfig, assets: releaseAssets(version) };
 }
 
 export async function locate({ env = process.env, prepare = (part, partEnv) => part.flow.prepareWorkflow({ env: partEnv }) } = {}) {
@@ -103,17 +101,7 @@ export async function publish({ env = process.env, root = ROOT, github = new Git
   }
 
   // ③ 齐了才公开
-  release = await github.findRelease(plan.repo, plan.tag);
-  const missing = plan.assets.filter((name) => !(release?.assets ?? []).some((asset) => asset.name === name));
-  if (missing.length) throw new ReleaseStop(`Release ${plan.tag} 里还缺 ${missing.join("、")}：没有公开，重跑会接着补。`);
-  if (release.draft) {
-    say(`▶ 三个包都在草稿里核对过了，公开 Release ${plan.tag}`);
-    try {
-      release = await github.publishRelease(plan.repo, release, target);
-    } catch (error) {
-      throw new ReleaseStop(`公开 Release ${plan.tag} 时出错（${error.message}）：它可能已经公开了。更新源都没有推；直接重跑，会认出它接着补。`);
-    }
-  }
+  release = await publishComplete(github, plan.repo, { tag: plan.tag, target, assets: plan.assets, feed: "更新源", say });
   const tagged = await github.tagCommit(plan.repo, plan.tag);
   if (tagged !== target) {
     throw new ReleaseStop(`Release ${plan.tag} 已经公开，但 tag 指着 ${tagged ?? "（没有）"}，不是构建提交 ${target}：更新源都没有推。请核查，改用新版本发布。`);
