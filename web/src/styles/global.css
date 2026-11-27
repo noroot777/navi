@@ -275,6 +275,13 @@ body,
   height: 100%;
 }
 
+/* 整页是铺满一屏的外壳，文档本身没有可滚的东西；可 WebKit（mac 壳、Safari）照样让它弹性回弹，
+   触控板在状态栏这类不滚的地方一划、或里面的列表滚到头把余量传上来，整页就被提起来，
+   回弹还可能停不回 0 —— 状态栏底下露出一条窗口底色。只关竖向：横向留给前进/后退的轻扫手势。 */
+html {
+  overscroll-behavior-y: none;
+}
+
 body {
   margin: 0;
   background: var(--chrome);
