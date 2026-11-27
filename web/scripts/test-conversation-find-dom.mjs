@@ -8,7 +8,9 @@
 //   · 会话还在长时计数跟着变，但视口不动；
 //   · Esc 关掉、标记收掉、焦点还回去；
 //   · 页面上有好几条会话时交给正在用的那一条，同一时间只开一条；
-//   · 一条会话都不在屏幕上（卸下了、被整块盖住）就不拦，浏览器自己的查找照常出来。
+//   · 一条会话都不在屏幕上（卸下了、被整块盖住）就不拦，浏览器自己的查找照常出来；
+//   · 查找条平时不画；按了才停进标题行里留的空位、在右边那排图标的左边（用户 2026-11-27 指的位置），
+//     没留空位的会话（侧聊）就浮在会话右上角。
 // 跑法：npm -w web run test:conversation-find-dom
 import assert from "node:assert/strict";
 import { launchChrome, startWebServer } from "./dom-stage.mjs";
@@ -27,7 +29,8 @@ try {
 
   const mod = await page.evaluate(() => /Mac|iPhone|iPad|iPod/.test(navigator.platform) ? "Meta" : "Control");
   const feed = page.getByTestId("feed");
-  const bar = page.getByTestId("region").locator(".conversation-find");
+  const header = page.getByTestId("main-header");
+  const bar = header.locator(".conversation-find");
   const sideBar = page.getByTestId("side-region").locator(".conversation-find");
   const input = bar.getByRole("textbox", { name: "在会话中查找" });
   const count = bar.locator(".conversation-find__count");
@@ -64,12 +67,26 @@ try {
     return node && node.scrollTop > 0 && node.scrollHeight - node.scrollTop - node.clientHeight <= 2;
   }, null, { timeout: WAIT_TIMEOUT_MS });
 
+  // ── 0. 平时不画：标题行里那个空位是空的、不占地方 ──────────────────────────────
+  assert.equal(await page.locator(".conversation-find").count(), 0, "没按 ⌘F 就没有查找条");
+  assert.equal(await header.locator(".conversation-find-slot").evaluate((node) => getComputedStyle(node).display), "none", "空位平时不占地方");
+
   // ── 1. ⌘F 开出查找条，焦点在输入框里，浏览器的查找被拦下 ─────────────────────
   await feed.click({ position: { x: 20, y: 20 } });
   assert.equal(await pressFind(), true, "会话在屏幕上时 ⌘F 归会话查找");
   await input.waitFor();
   assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("conversation-find__input")), true, "焦点进了输入框");
   assert.equal(await sideBar.count(), 0, "只开焦点所在的那一条");
+  // 停在标题行里：在这一行的高度之内、紧挨在右边那排图标的左边，不浮在会话上。
+  const docked = await page.evaluate(() => {
+    const bar = document.querySelector('[data-testid="main-header"] .conversation-find').getBoundingClientRect();
+    const row = document.querySelector('[data-testid="main-header"]').getBoundingClientRect();
+    const acts = document.querySelector('[data-testid="acts"]').getBoundingClientRect();
+    const title = document.querySelector('[data-testid="main-header"] .task-detail-title').getBoundingClientRect();
+    return { inRow: bar.top >= row.top && bar.bottom <= row.bottom, gap: acts.left - bar.right, afterTitle: bar.left > title.right };
+  });
+  assert.ok(docked.inRow, "查找条在标题行的高度之内");
+  assert.ok(docked.afterTitle && docked.gap >= 0 && docked.gap <= 16, `紧挨在图标左边（隔 ${docked.gap}px）`);
 
   // ── 2. 打字就找：从正在看的地方（底部）找起 ───────────────────────────────
   await page.keyboard.type("编辑器");
@@ -161,6 +178,7 @@ try {
   await page.getByTestId("side").click({ position: { x: 20, y: 20 } });
   assert.equal(await pressFind(), true);
   await sideBar.waitFor();
+  assert.equal(await sideBar.evaluate((node) => getComputedStyle(node).position), "absolute", "没留空位的会话里查找条浮着");
   await bar.waitFor({ state: "detached", timeout: WAIT_TIMEOUT_MS });
   // 紧跟着 ⌘F 就打字，不等：字得落进刚开的查找条，而不是别处。
   await page.keyboard.type("编辑器");

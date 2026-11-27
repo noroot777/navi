@@ -22,6 +22,7 @@ import { TaskCreationBadge } from "../components/TaskOrigin.tsx";
 import type { IndicatorForTask } from "../lib/useTaskReadState.ts";
 import { ConfirmDialog } from "../task-detail/ConfirmDialog.tsx";
 import { safeDownloadName } from "../task-detail/utils.ts";
+import { ConversationFindSlot } from "../components/ConversationFind.tsx";
 
 export function TeamHeader({
   task,
@@ -138,6 +139,7 @@ export function TeamHeader({
           {indicator && <TaskStatusDot indicator={indicator} surface="team" />}
           {display.label}
         </span>
+        <ConversationFindSlot />
         <div className="team-header-actions">
           <button type="button" className={reviewOpen ? "is-primary" : ""} onClick={onReview}>
             <CheckCircle size={14} weight="fill" />{reviewOpen ? "返回协作" : "验收"}

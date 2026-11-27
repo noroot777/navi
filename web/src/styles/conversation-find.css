@@ -1,4 +1,4 @@
-/* 会话里的 ⌘F 查找条（components/ConversationFind.tsx），浮在会话区域右上角。 */
+/* 会话里的 ⌘F 查找条（components/ConversationFind.tsx）。标题行没留空位时浮在会话区域右上角。 */
 .conversation-find {
   position: absolute;
   z-index: 9;
@@ -14,9 +14,27 @@
   box-shadow: var(--control-shadow), var(--menu-shadow);
 }
 
+/* 停在标题行的空位里（ConversationFindSlot）：跟着行走、不浮。空位平时是空的，不占地方。 */
+.conversation-find-slot {
+  display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  margin-left: auto;
+}
+
+.conversation-find-slot:empty { display: none; }
+
+.conversation-find-slot > .conversation-find {
+  position: static;
+  min-width: 0;
+  height: 30px;
+  box-shadow: var(--control-shadow);
+}
+
 .conversation-find__input {
   width: 190px;
-  min-width: 0;
+  min-width: 60px;
+  flex: 0 1 auto;
   border: 0;
   outline: 0;
   background: transparent;

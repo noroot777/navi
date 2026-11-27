@@ -2,6 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import { X } from "@phosphor-icons/react";
 import { useDismissable } from "../lib/useDismissable.ts";
 import { motionReduced } from "../lib/useSwapText.ts";
+import { ConversationFindSlot } from "./ConversationFind.tsx";
+import { FIND_SCOPE } from "../search/conversationFind.ts";
 // 样式在 styles/side-drawer.css，由 global.css 统一 @import：夹具里直接手写这套类名也得有样式。
 
 /**
@@ -94,6 +96,7 @@ export function SideDrawer({
       <aside
         ref={drawerRef}
         className={`side-drawer side-drawer--${variant}${stacked ? " is-stacked" : ""}${closing ? " is-closing" : ""}`}
+        {...FIND_SCOPE}
         aria-label={ariaLabel}
         onAnimationEnd={(event) => {
           if (closing && event.animationName === "side-drawer-out") onClose();
@@ -101,6 +104,7 @@ export function SideDrawer({
       >
         <header>
           <span className="side-drawer__kind">{kind}</span><b>{title}</b>
+          <ConversationFindSlot />
           {actions}
           <button type="button" aria-label={closeLabel} onClick={requestClose}><X size={14} weight="bold" /></button>
         </header>

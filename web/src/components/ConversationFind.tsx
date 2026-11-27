@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import { CaretDown, CaretUp, X } from "@phosphor-icons/react";
 import { useDismissable } from "../lib/useDismissable.ts";
-import { clearFind, paintFind, registerConversationFinder } from "../search/conversationFind.ts";
+import { FIND_SLOT, clearFind, findSlotFor, paintFind, registerConversationFinder } from "../search/conversationFind.ts";
 import { findOccurrences, revealOccurrence, type SearchOccurrence } from "../search/searchReveal.ts";
 
 /** 单字查询在长会话里能有上万处：数到这里为止，计数写成「N+」。 */
@@ -16,7 +17,8 @@ const placeOf = (occurrence: SearchOccurrence) =>
   (occurrence.closed.at(-1) ?? occurrence.range).getBoundingClientRect();
 
 /**
- * 一条会话的查找条（⌘F，见 search/conversationFind.ts）。画在会话区域的右上角，开着时：
+ * 一条会话的查找条（⌘F，见 search/conversationFind.ts）。平时不画，按了 ⌘F 才出来：停在这条会话
+ * 所在那一块的标题行空位里（`ConversationFindSlot`），没有空位就浮在会话右上角。开着时：
  * 打字就找、标出每一处并落到第一处；回车 / ⌘G 下一处，⇧回车 / ⇧⌘G 上一处，Esc 关（走 useDismissable）。
  *
  * - 找的是此刻 DOM 里的字（跟浏览器的查找一样），所以会话还在长时会跟着重数，但不会把人拽走：
@@ -192,6 +194,7 @@ export function ConversationFind({
 
   useEffect(() => registerConversationFinder({
     region: () => scrollRef.current?.parentElement ?? scrollRef.current,
+    owns: (node) => !!bar.current?.contains(node),
     isOpen: () => openRef.current,
     open: show,
     close,
@@ -236,7 +239,8 @@ export function ConversationFind({
 
   if (!open) return null;
   const { index, count, capped } = tally;
-  return (
+  const slot = findSlotFor(scrollRef.current);
+  const node = (
     <div ref={bar} className="conversation-find" role="search">
       <input
         ref={input}
@@ -269,4 +273,10 @@ export function ConversationFind({
       </button>
     </div>
   );
+  return slot ? createPortal(node, slot) : node;
+}
+
+/** 标题行里给查找条留的空位，见 search/conversationFind.ts 的 FIND_SLOT。 */
+export function ConversationFindSlot() {
+  return <span className="conversation-find-slot" {...FIND_SLOT} />;
 }

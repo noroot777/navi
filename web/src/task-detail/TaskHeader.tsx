@@ -32,6 +32,7 @@ import { useLayoutMotion } from "../lib/motion/index.ts";
 import { TaskPinButton } from "./TaskPinButton.tsx";
 import { sealState } from "./taskHeadSteps.ts";
 import { formatInstant, safeDownloadName } from "./utils.ts";
+import { ConversationFindSlot } from "../components/ConversationFind.tsx";
 
 export type PrimaryAction = "run" | "retry" | "stop" | "accept" | "unarchive";
 
@@ -204,6 +205,7 @@ export function TaskHeader({
         {planChip}
       </div>
       <span className="task-head-grow" />
+      <ConversationFindSlot />
       <span className="task-head-acts" ref={acts}>
         {/* 回合级的重来（上一回合崩了、任务却停在已完成）不在头上：它挂在会话里说这件事的那句话后面
             （「重试这一回合」/「继续本轮审查」，见 turnRetry.ts）。 */}

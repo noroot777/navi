@@ -1,13 +1,15 @@
 // 会话里 ⌘F 查找的夹具（断言在 test-conversation-find-dom.mjs）。
 //
-// 主会话用的是真的 ConversationScrollControls（贴底、查找条都是产品代码），旁边摆一条
-// 侧聊那样直接挂 ConversationFind 的小会话：⌘F 该交给哪一条、同一时间只开一条，靠它看。
+// 主会话照任务详情那样摆：一块（FIND_SCOPE）里上面一行标题、标题行里留着查找条的空位，下面是
+// 真的 ConversationScrollControls（贴底、查找条都是产品代码）。旁边摆一条侧聊那样直接挂
+// ConversationFind、没留空位的小会话：⌘F 该交给哪一条、同一时间只开一条、没空位时浮着，靠它看。
 // 外面用 `window.fixture` 驱动：来一段新回复、挂上 / 卸下会话、拿一层东西盖住整页。
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ConversationFind } from "../../src/components/ConversationFind.tsx";
+import { ConversationFind, ConversationFindSlot } from "../../src/components/ConversationFind.tsx";
 import { ConversationScrollControls } from "../../src/components/ConversationScrollControls.tsx";
 import { contentVersion } from "../../src/lib/useStickToBottom.ts";
+import { FIND_SCOPE } from "../../src/search/conversationFind.ts";
 import "../../src/styles/global.css";
 
 type Item = { id: string; text: string; fold?: string };
@@ -36,6 +38,13 @@ function Feed({ items }: { items: Item[] }) {
   const scroll = useRef<HTMLDivElement>(null);
   const tailKey = contentVersion(items, (item) => item.text.length, (item) => item.id);
   return (
+    <div {...FIND_SCOPE} style={{ display: "flex", minWidth: 0, flex: 1, flexDirection: "column" }}>
+    <header className="task-detail-header" data-testid="main-header">
+      <span className="task-detail-title is-readonly">排查</span>
+      <span className="task-head-grow" />
+      <ConversationFindSlot />
+      <span className="task-head-acts" data-testid="acts"><button type="button">更多</button></span>
+    </header>
     <div className="conversation-scroll-region" data-testid="region" style={{ minHeight: 0, flex: 1 }}>
       <div className="task-conversation" ref={scroll} data-testid="feed">
         {items.map((item) => (
@@ -51,6 +60,7 @@ function Feed({ items }: { items: Item[] }) {
         ))}
       </div>
       <ConversationScrollControls scrollRef={scroll} resetKey="t1" tailKey={tailKey} />
+    </div>
     </div>
   );
 }

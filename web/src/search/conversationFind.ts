@@ -11,13 +11,32 @@ import "../styles/conversation-find.css";
  * 一条都不在屏幕上（设置页、新建面板）就原样放过，浏览器自己的查找照常出来。
  */
 export type ConversationFinder = {
-  /** 会话那一块（查找条画在它里面），用来判断它在不在屏幕上、焦点在不在它里面。 */
+  /** 会话那一块，用来判断它在不在屏幕上、焦点在不在它里面。 */
   region: () => HTMLElement | null;
+  /** 查找条自己（停靠在标题行里时不在 region 里面）：焦点在它上面再按 ⌘F 也算这一条。 */
+  owns: (node: Node) => boolean;
   isOpen: () => boolean;
   open: () => void;
   close: () => void;
   step: (direction: 1 | -1) => void;
 };
+
+/**
+ * 查找条停在哪：会话所在的那一块（`FIND_SCOPE`，一个任务详情、一个抽屉、一个群聊）在自己的标题行里
+ * 留一个空位（`FIND_SLOT`），查找条就画进那里；只认离会话最近的那一块，那一块没留空位（侧聊那样
+ * 窄的面板）就浮在会话右上角。空位平时是空的、不占地方，按了 ⌘F 才有东西。
+ */
+export const FIND_SCOPE = { "data-conversation-find-scope": "" } as const;
+export const FIND_SLOT = { "data-conversation-find-slot": "" } as const;
+
+export function findSlotFor(element: Element | null): HTMLElement | null {
+  const scope = element?.closest("[data-conversation-find-scope]");
+  if (!scope) return null;
+  for (const slot of scope.querySelectorAll<HTMLElement>("[data-conversation-find-slot]")) {
+    if (slot.closest("[data-conversation-find-scope]") === scope) return slot;
+  }
+  return null;
+}
 
 const finders = new Set<ConversationFinder>();
 let lastPointer: EventTarget | null = null;
@@ -53,7 +72,7 @@ function pick(target: EventTarget | null): ConversationFinder | null {
   if (!candidates.length) return null;
   for (const anchor of [target, document.activeElement, lastPointer]) {
     if (!(anchor instanceof Node)) continue;
-    const owner = candidates.find(({ region }) => region.contains(anchor));
+    const owner = candidates.find(({ finder, region }) => region.contains(anchor) || finder.owns(anchor));
     if (owner) return owner.finder;
   }
   // 焦点和最近一次点击都不在任何一条会话里：给占地方最大的那一条（主会话，而不是旁边的侧聊）。

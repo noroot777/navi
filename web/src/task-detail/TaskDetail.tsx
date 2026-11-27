@@ -58,6 +58,7 @@ import { useAddReplyQuote } from "./replyQuote.ts";
 import { useReuseInput } from "./ReuseInput.tsx";
 import { DispatchHeldLine, useDispatchHolder } from "./dispatched/DispatchHeldLine.tsx";
 import { useViewingTask } from "../lib/taskViewing.ts";
+import { FIND_SCOPE } from "../search/conversationFind.ts";
 
 type InspectorOpenTab = InspectorHostControls["openTab"];
 
@@ -364,7 +365,7 @@ export function TaskDetail({
       >
         {({ toggleButton, openTab }) => (
           <>
-            <div className="task-detail">
+            <div className="task-detail" {...FIND_SCOPE}>
               <TaskHeader
                 task={task}
                 actions={actions}

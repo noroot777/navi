@@ -13,6 +13,7 @@ import { SideChatHeadControls } from "./SideChatHeadControls.tsx";
 import { SideChatMessage } from "./SideChatMessage.tsx";
 import { useSideChat } from "./useSideChat.ts";
 import "./side-chat.css";
+import { FIND_SCOPE } from "../search/conversationFind.ts";
 
 /**
  * 第一行说清这一场带着的是主会话哪一刻的内容：侧聊是在开场那一刻拍下主会话的快照，
@@ -34,7 +35,8 @@ export function SideChatPane({ task }: { task: Task }) {
   const { resume, noteUserScrollIntent } = useStickToBottom(scroll, chat.room?.id ?? task.id, chatTailKey(chat.snapshot?.messages));
   const { atBottom } = useScrollEdges(scroll, chat.room?.id ?? task.id);
   const messages = chat.snapshot?.messages ?? [];
-  return <section className="side-chat-pane" aria-label="任务侧聊" data-room-id={chat.room?.id ?? ""}>
+  // 自成一块、不留空位：窄面板里查找条浮在会话右上角，也不会跑去外面那个任务的标题行。
+  return <section className="side-chat-pane" {...FIND_SCOPE} aria-label="任务侧聊" data-room-id={chat.room?.id ?? ""}>
     <SideChatHeadControls chat={chat} />
     <div className="side-chat-scroll-wrap">
       <div className="side-chat-scroll" ref={scroll}>

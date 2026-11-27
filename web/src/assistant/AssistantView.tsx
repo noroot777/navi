@@ -27,6 +27,8 @@ import type { SettingsSection } from "../settings/SettingsPage.tsx";
 import "./assistant.css";
 import { AutoTextarea } from "../components/AutoTextarea.tsx";
 import { localeDate, localeTime } from "../lib/localeFormat.ts";
+import { ConversationFindSlot } from "../components/ConversationFind.tsx";
+import { FIND_SCOPE } from "../search/conversationFind.ts";
 
 const STARTERS = [
   { label: "问用法", text: "任务显示失败，但智能体说已经做完了，该怎么排查？" },
@@ -101,9 +103,10 @@ export function AssistantView({ project, projects, onTask, onSettings, onExit }:
   return <section className="chat-shell assistant-shell" aria-label="Navi 助手">
     <AssistantSidebar rooms={chat.rooms} selectedId={chat.room?.id} ready={chat.ready} sending={chat.sending} projectName={project?.name} onExit={onExit}
       agent={chat.room?.members[0]?.agentType} agentLocked={chat.busy || chat.sending} onConfigure={() => setEditing(true)} onSelect={(id) => { chat.select(id); setEditing(false); setArchiveId(null); }} onNew={() => { setEditing(false); setArchiveId(null); void chat.newConversation(); }} />
-    <div className="chat-main assistant-main">
+    <div className="chat-main assistant-main" {...FIND_SCOPE}>
     {!configure && <header className="chat-header assistant-header"><div className="assistant-heading">{chat.room ? <AssistantConversationTitle key={chat.room.id} name={chat.room.name} onRename={chat.renameConversation}><span className={`chat-connection${chat.connected ? " is-connected" : ""}`} tabIndex={0} role="status" aria-label={chat.connected ? "实时连接" : "连接中，状态可能延迟"} {...connectionTip.anchorProps} /></AssistantConversationTitle> : <h1><AssistantIcon size={23} />Navi 助手</h1>}</div>
       {chat.room && <button type="button" className="chat-member-count assistant-delete" aria-label={`删除对话：${chat.room.name}`} onClick={() => { setDeleteError(""); setDeleteTarget({ id: chat.room!.id, name: chat.room!.name }); }}><Trash size={17} /></button>}
+      <ConversationFindSlot />
       <HoverTip at={connectionTip.at}>{chat.connected ? "实时连接" : "连接中，状态可能延迟"}</HoverTip>
     </header>}
     {deleteTarget && <ConfirmDialog title={`删除对话「${deleteTarget.name}」`} danger busy={deleting} confirmLabel="删除对话"

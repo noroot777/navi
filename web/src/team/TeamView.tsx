@@ -36,6 +36,7 @@ import { activeTeamHaltMarker, leadTurns, teamFeedRows } from "./teamModel.ts";
 import { useWorkerLiveLines } from "./workerLiveLines.ts";
 import { localeDateTime } from "../lib/localeFormat.ts";
 import { useViewingTask } from "../lib/taskViewing.ts";
+import { FIND_SCOPE } from "../search/conversationFind.ts";
 
 
 function WorkerDrawer({
@@ -309,7 +310,7 @@ export function TeamView({
         tabPolicy={inspectorPolicy}
         reveal={fileViewReveal}
       >
-        {({ toggleButton, openTab }) => <div className="team-view">
+        {({ toggleButton, openTab }) => <div className="team-view" {...FIND_SCOPE}>
         <OriginTaskBar task={task} allTasks={allTasks} onOpen={openTaskById} />
         <TeamHeader
           task={task}

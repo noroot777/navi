@@ -51,6 +51,8 @@ import { isOpenDuetGate, runCreatedHandoffFollowUps } from "./handoffPolicy.ts";
 import { latestActiveDuetTurn, type DuetTurn } from "./duetState.ts";
 import { useDuet } from "./useDuet.ts";
 import { useViewingTask } from "../lib/taskViewing.ts";
+import { ConversationFindSlot } from "../components/ConversationFind.tsx";
+import { FIND_SCOPE } from "../search/conversationFind.ts";
 
 function timeMs(value?: string | null): number {
   const parsed = value ? Date.parse(value) : NaN;
@@ -324,7 +326,7 @@ export function DuetView({
   };
 
   return (
-    <div className="duet-view">
+    <div className="duet-view" {...FIND_SCOPE}>
       <OriginTaskBar task={task} allTasks={allTasks} onOpen={(taskId) => {
         const target = allTasks.find((item) => item.id === taskId);
         if (target) onSelectTask(target);
@@ -339,6 +341,7 @@ export function DuetView({
           notify={notify}
         />
         <input value={title} aria-label="讨论标题" onChange={(event) => setTitle(event.target.value)} onBlur={() => void commitTitle()} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); if (event.key === "Escape") { setTitle(task.title); event.currentTarget.blur(); } }} />
+        <ConversationFindSlot />
         <span className="duet-status">
           {indicator && <TaskStatusDot indicator={indicator} surface="team" />}
           {display.label}

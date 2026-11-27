@@ -12,6 +12,8 @@ import { ConfirmDialog } from "../task-detail/ConfirmDialog.tsx";
 import { ConversationFeed } from "../task-detail/ConversationFeed.tsx";
 import { buildConversationItems, type TimelineEntry } from "../task-detail/conversationModel.ts";
 import { QuestionDock, useQuestionTakeover } from "../task-detail/QuestionSlot.tsx";
+import { ConversationFindSlot } from "../components/ConversationFind.tsx";
+import { FIND_SCOPE } from "../search/conversationFind.ts";
 
 const POLL_MS = 2_000;
 
@@ -172,11 +174,12 @@ export function RemoteTaskDetail({
 
   return (
     <LeftDrawerProvider value={leftDrawer.api}>
-    <div className="task-detail remote-task-detail">
+    <div className="task-detail remote-task-detail" {...FIND_SCOPE}>
       <header className="task-detail-header remote-task-header">
         <span className="task-detail-kind">远程任务</span>
         <strong className="task-detail-title is-readonly">{task.title || "未命名任务"}</strong>
         <span className="task-detail-status">{task.question ? "等答复" : TASK_STATUS_LABELS[task.status]}</span>
+        <ConversationFindSlot />
         <button type="button" className="remote-task-refresh" onClick={() => void refresh()} disabled={loading} aria-label="刷新远程会话">
           <ArrowCounterClockwise size={14} className={loading ? "is-spinning" : ""} aria-hidden="true" />
         </button>

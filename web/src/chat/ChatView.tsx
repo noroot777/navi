@@ -14,6 +14,8 @@ import { isSendKeyEvent } from "../lib/sendKey.ts";
 import { useSendKeyLabels } from "../lib/useComposerSendKey.ts";
 import "./chat.css";
 import { AutoTextarea } from "../components/AutoTextarea.tsx";
+import { ConversationFindSlot } from "../components/ConversationFind.tsx";
+import { FIND_SCOPE } from "../search/conversationFind.ts";
 
 export function ChatView({ project, onTask, onExit }: {
   project: ProjectView; onTask: (task: TaskListItem) => void; onExit: () => void;
@@ -147,7 +149,7 @@ export function ChatView({ project, onTask, onExit }: {
       <div className="chat-channels">{rooms.map((item) => <button type="button" key={item.id} className={item.id === roomId && editor !== "create" ? "is-selected" : ""} onClick={() => selectRoom(item.id)}><Hash size={17} /><span>{item.name}</span><small>{item.members.length}</small></button>)}</div>
       <div className="chat-rail-note"><At size={22} /><strong>有需要，再叫上它。</strong><p>没有 @ 的普通消息只保存在群里。@all 唤醒全部成员；单独发送 /clear 重新开始上下文。</p></div>
     </nav>
-    <div className="chat-main">
+    <div className="chat-main" {...FIND_SCOPE}>
       {editor ? <ChatMembers key={`${editor}-${roomId}`} creating={editor === "create"} initial={editor === "members" ? room?.members ?? [] : []} initialName={editor === "members" ? room?.name : undefined} onCancel={() => setEditor(null)} onDelete={editor === "members" && roomId ? () => removeRoom(roomId) : undefined} onSave={async (members, name) => {
         if (editor === "create") { const created = await chatApi.create(project.id, name, members); setRooms((current) => [...current, created]); selectRoom(created.id); }
         else if (roomId) {
@@ -159,7 +161,7 @@ export function ChatView({ project, onTask, onExit }: {
       }} /> : <>
         <header className="chat-header"><h1>{room
           ? <button type="button" className="chat-room-name" aria-label={`群聊设置：${room.name}`} onClick={() => setEditor("members")}><Hash size={23} />{room.name}<PencilSimple size={14} /></button>
-          : <><Hash size={23} />聊天空间</>}{roomId && <span className={`chat-connection ${connected ? "is-connected" : ""}`} tabIndex={0} role="status" aria-label={connected ? "实时连接" : "连接中，状态可能延迟"} {...connectionTip.anchorProps} />}</h1>{room && <button type="button" className="chat-member-count" onClick={() => setEditor("members")}><UsersThree size={19} />{room.members.length} 位成员</button>}<HoverTip at={connectionTip.at}>{connected ? "实时连接" : "连接中，状态可能延迟"}</HoverTip></header>
+          : <><Hash size={23} />聊天空间</>}{roomId && <span className={`chat-connection ${connected ? "is-connected" : ""}`} tabIndex={0} role="status" aria-label={connected ? "实时连接" : "连接中，状态可能延迟"} {...connectionTip.anchorProps} />}</h1>{room && <button type="button" className="chat-member-count" onClick={() => setEditor("members")}><UsersThree size={19} />{room.members.length} 位成员</button>}<ConversationFindSlot /><HoverTip at={connectionTip.at}>{connected ? "实时连接" : "连接中，状态可能延迟"}</HoverTip></header>
         {snapshot ? <ChatMessages snapshot={snapshot} onTask={onTask} onMention={mention} />
           : <div className="chat-empty"><ChatCircleDots size={48} weight="duotone" /><h2>{roomId ? `正在载入 #${room?.name ?? "群聊"}…` : ready ? "把想法变成对话" : "正在载入聊天…"}</h2><p>{roomId ? "消息马上就到，这个群的历史只属于这里。" : "建立一个空间，和你的智能体一起聊。"}</p>{ready && !roomId && <button type="button" className="chat-primary" onClick={() => setEditor("create")}>新建群聊</button>}</div>}
         {room && <div className="chat-composer-area"><div className="chat-live-line">{active.length || snapshot?.context?.status === "compacting" ? <><span className="chat-live-dot" />{active.length ? `${active.map((message) => message.author).filter((name, index, all) => all.indexOf(name) === index).join("、")} 正在回复` : "正在整理群聊历史"}<button type="button" onClick={() => void chatApi.stop(room.id).then((result) => { if (selected.current === room.id) setSnapshot(result); }).catch((reason) => setError(String(reason)))}><Stop size={12} weight="fill" />停止回复</button></> : <span>所有成员安静待命</span>}</div>
