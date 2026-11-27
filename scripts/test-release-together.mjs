@@ -1,6 +1,6 @@
 // 合并发布（desktop/shared/release-together.mjs、release-publish.mjs 的 stage / finish、.github/workflows/release.yml）：
 //   · 一个版本一个 Release：tag v<版本>，三个文件 Navi-<v>.dmg、Navi-<v>-intel.dmg、Navi-<v>-x64-setup.exe；mac 与 Windows 配置对不上就拒
-//   · 单平台入口（single）同一道门：v<版本> 三个包没齐只进草稿、不公开，发不出只有一个包的版本
+//   · 单平台入口（single）不碰 v<版本>：上传前就拒，只有合并发布（握着三份同源原包）能公开它
 //   · stage 只进草稿并下回核对、不公开；已公开的 Release 不往里补没核对过的包；finish 只认已公开的
 //   · 三个包都在草稿里核对过才公开，少一个不公开、不推任何更新源；重跑接着补，不重复建草稿
 //   · 公开之后各平台推自己的更新源：一个失败不挡另一个，最后一并报；tag 没打在构建提交上就一个都不推
@@ -91,33 +91,45 @@ try {
     console.log("✓ stage 只进草稿并核对、不公开、重跑不重传；finish 只认已公开的；已公开的 Release 不补没核对过的包");
   }
 
-  // ── 单平台入口（single）发不出只有一个包的版本 ──────────────────────────
+  // ── 单平台入口（single）不碰 v<版本>：只有合并发布握着三份同源原包 ───────
   {
     const github = fakeGithub({ commit: COMMIT });
-    const put = (name) => {
+    const put = (name, mode) => {
       const path = file(name, `${name} bytes`);
-      return putOnRelease(github, config, { tag: "v0.3.6", commit: COMMIT, file: path, length: statSync(path).size, name: "n", body: "b" });
+      return putOnRelease(github, config, { tag: "v0.3.6", commit: COMMIT, file: path, length: statSync(path).size, name: "n", body: "b", mode });
     };
-    await assert.rejects(put("Navi-0.3.6.dmg"), /Navi-0\.3\.6\.dmg 已在草稿 v0\.3\.6 里核对过，但还缺 Navi-0\.3\.6-intel\.dmg、Navi-0\.3\.6-x64-setup\.exe：没有公开/);
-    await assert.rejects(put("Navi-0.3.6-intel.dmg"), /还缺 Navi-0\.3\.6-x64-setup\.exe：没有公开/);
-    assert.equal(github.state.releases[0].draft, true, "没齐：留在草稿里");
-    assert.ok(!github.state.calls.some((call) => call.startsWith("publish")));
-    assert.equal((await put("Navi-0.3.6-x64-setup.exe")).url, "https://dl/v0.3.6/Navi-0.3.6-x64-setup.exe", "最后一个包进来、齐了才公开");
-    assert.deepEqual(github.state.calls, ["draft v0.3.6", "upload Navi-0.3.6.dmg", "upload Navi-0.3.6-intel.dmg", "upload Navi-0.3.6-x64-setup.exe", "publish v0.3.6"]);
+    for (const name of releasePlan("0.3.6").assets) {
+      await assert.rejects(put(name), /Release v0\.3\.6 是这一版 3 个包共用的，只由合并发布公开[\s\S]*什么都还没传/);
+    }
+    assert.deepEqual(github.state.calls, [], "上传前就拒：不建草稿、不传包、不公开");
+    // 草稿里已经有合并发布 stage 过的包：single 照样不碰
+    await put("Navi-0.3.6.dmg", "stage");
+    await assert.rejects(put("Navi-0.3.6-intel.dmg"), /只由合并发布公开/);
+    assert.deepEqual(github.state.calls, ["draft v0.3.6", "upload Navi-0.3.6.dmg"]);
 
-    // 先前（修之前）被单平台公开、只有一个包的版本：合并发布与单平台都不往上补
+    // 草稿里留着别处（坏的、别的提交的）同名包：合并发布 stage 时逐个下回比对本次原包，对不上就停、不公开
+    const stale = fakeGithub({ commit: COMMIT });
+    const mine = file("Navi-0.3.8.dmg", "good bytes");
+    stale.state.releases.push({ id: 7, tag_name: "v0.3.8", draft: true, assets: [
+      { name: "Navi-0.3.8.dmg", size: statSync(mine).size, bytes: Buffer.from("evil bytes") }] });
+    await assert.rejects(putOnRelease(stale, config, { tag: "v0.3.8", commit: COMMIT, file: mine, length: statSync(mine).size, mode: "stage" }), /和本地这份不一样/);
+    stale.state.releases[0].assets[0].size = 3;
+    await assert.rejects(putOnRelease(stale, config, { tag: "v0.3.8", commit: COMMIT, file: mine, length: statSync(mine).size, mode: "stage" }), /不覆盖/);
+    assert.equal(stale.state.releases[0].draft, true);
+
+    // 先前（修之前）被单平台公开、只有一个包的版本：合并发布不往上补
     const early = fakeGithub({ commit: COMMIT });
     early.state.releases.push({ id: 9, tag_name: "v0.3.7", draft: false, assets: [] });
     early.state.tags["v0.3.7"] = COMMIT;
     const exe = file("Navi-0.3.7-x64-setup.exe", "exe");
-    await assert.rejects(putOnRelease(early, config, { tag: "v0.3.7", commit: COMMIT, file: exe, length: statSync(exe).size }), /已经公开，上面却没有 Navi-0\.3\.7-x64-setup\.exe/);
+    await assert.rejects(putOnRelease(early, config, { tag: "v0.3.7", commit: COMMIT, file: exe, length: statSync(exe).size, mode: "stage" }), /已经公开，上面却没有 Navi-0\.3\.7-x64-setup\.exe/);
 
     // 老的单平台 tag（navi-mac-v…）照旧一个包就公开
     const legacy = fakeGithub({ commit: COMMIT });
     const old = file("Navi-0.3.4.dmg", "old");
     assert.ok((await putOnRelease(legacy, config, { tag: "navi-mac-v0.3.4", commit: COMMIT, file: old, length: statSync(old).size })).url);
     assert.equal(legacy.state.releases[0].draft, false);
-    console.log("✓ 单平台入口：v<版本> 的三个包没齐只进草稿、不公开，最后一个进来才公开；已公开的不补；老 tag 照旧");
+    console.log("✓ 单平台入口：v<版本> 一律上传前就拒（齐不齐都不碰）；已公开的不补；老 tag 照旧一个包就公开");
   }
 
   // ── 这一版的 Release：tag 与三个文件名 ─────────────────────────────────

@@ -6,7 +6,7 @@
 // 都有写权限。改名前装的 Ash.app 看的是另一份 appcast（legacyAppcastPath），也装不了包标识不同的 Navi：
 // 那一份里只放一条「仅通知」的条目，点开是下载页（见 publishLegacyFeed）。
 //
-//   npm run release:mac:local                         # 正式发版（要先 --keys 做过一次）
+//   npm run release:mac:local                         # 正式发版（要先 --keys 做过一次）；只认老的单平台 tag，v<版本> 由合并发布公开
 //   npm run release:mac:local -- --keys               # 生成 / 读出正式 EdDSA 密钥，公钥写进 release.json
 //   npm run release:mac:local -- --init-repo          # release.json 里的仓库还不存在时建它们（公开）
 //   npm run release:mac:local -- --local <目录> --app <Navi.app> --ed-key-file <私钥文件>

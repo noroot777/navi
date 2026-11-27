@@ -1,5 +1,5 @@
-// 一个版本一个 Release（tag v<版本>）：里面必须有的三个包。合并发布（release-together.mjs）和
-// 各平台单独发包（putOnRelease 的 single）都按这一份判「齐了没有」，齐了才公开。
+// 一个版本一个 Release（tag v<版本>）：里面必须有的三个包。合并发布（release-together.mjs）按它判齐了没有；
+// putOnRelease 按它认出「这是共用的 Release」，单平台入口（single）不碰。
 import { distributionName } from "../macos/scripts/architecture.mjs";
 import { installerName } from "../windows/scripts/release-state.mjs";
 

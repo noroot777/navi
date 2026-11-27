@@ -15,14 +15,20 @@ const sha256 = (buffer) => createHash("sha256").update(buffer).digest("hex");
  * 经 API 下回来核对，任何一步失败都不留公开的东西。公开之后（包括公开请求发出去、却没收到答复）出的错
  * 都只能重跑往前补：重跑会认出已公开的 Release、沿用上面的附件。
  *
- * 一个版本一个 Release（tag v<版本>，release-assets.mjs）：三个包都在草稿里核对过才公开，不论从哪个入口来；
- * 公开之后也不往上补没在草稿里核对过的包。mode（合并发布用法见 desktop/shared/release-together.mjs）：
- *   single  缺省（本机备用发版）：这一个包传进草稿、核对；Release 要的包这时都在了就公开，没齐就停在草稿里、不往下推更新源
+ * 一个版本一个 Release（tag v<版本>，release-assets.mjs）只由合并发布（desktop/shared/release-together.mjs）公开：
+ * 只有它同一次运行里握着三份同源原包、逐个在草稿里下回核对过 —— 远端附件「在」不等于「是这次核对过的那份」。
+ * 公开之后也不往上补没在草稿里核对过的包。mode：
+ *   single  缺省（本机备用发版）：只用于老的单平台 tag（navi-mac-v… 等），这一个包自己建草稿、传、核对、公开；
+ *           碰到 v<版本> 在动任何东西之前就拒
  *   stage   只传进草稿并下回核对，不公开；Release 已经公开时，包必须已经在上面（不往公开的 Release 里补没核对过的包）
  *   finish  Release 必须已经由那边公开、包已经在上面：只核对 tag、给出下载地址
  */
 export async function putOnRelease(github, config, { tag, commit, file, length, name, body, feed = "appcast", mode = "single", say = () => {} }) {
   const repo = config.releaseRepo;
+  const required = requiredAssets(tag, basename(file));
+  if (mode === "single" && required.length > 1) {
+    die(`Release ${tag} 是这一版 ${required.length} 个包共用的，只由合并发布公开（npm run release -- <版本>）：单平台入口不往里传包（什么都还没传）。`);
+  }
   const target = await tagTarget(github, repo, commit, tag);
   let release = await github.findRelease(repo, tag);
   if (mode === "finish" && (!release || release.draft)) die(`Release ${tag} 还没公开：${feed} 没有推（公开由合并发布那一步做，重跑它）。`);
@@ -33,8 +39,7 @@ export async function putOnRelease(github, config, { tag, commit, file, length, 
     say(`▶ 沿用 ${repo} 里已有的${release.draft ? "草稿 " : " "}Release ${tag}`);
   }
   const existing = (release.assets || []).find((a) => a.name === basename(file));
-  const required = requiredAssets(tag, basename(file));
-  if (!release.draft && !existing && (mode !== "single" || required.length > 1)) {
+  if (!release.draft && !existing && mode !== "single") {
     die(`Release ${tag} 已经公开，上面却没有 ${basename(file)}：不往公开的 Release 里补没在草稿里核对过的包。改用新版本发布。`);
   }
   if (existing && existing.size !== length) die(`Release ${tag} 里已经有一份 ${existing.name}，大小 ${existing.size}，和这次的 ${length} 不一样：不覆盖。`);
@@ -48,8 +53,7 @@ export async function putOnRelease(github, config, { tag, commit, file, length, 
       say(`▶ ${asset.name} 已在草稿 ${tag} 里核对过，等其它包齐了一起公开`);
       return { staged: true, asset };
     }
-    release = await publishComplete(github, repo, { tag, target, assets: required, feed, say,
-      missing: (names) => `${asset.name} 已在草稿 ${tag} 里核对过，但还缺 ${names}：没有公开，${feed} 没有推。一个版本的包要一起发（npm run release -- <版本>）。` });
+    release = await publishComplete(github, repo, { tag, target, assets: required, feed, say });
   }
   const tagged = await github.tagCommit(repo, tag);
   if (tagged !== target) {
@@ -62,12 +66,13 @@ export async function putOnRelease(github, config, { tag, commit, file, length, 
 }
 
 /**
- * 公开草稿 Release 的唯一一道门：assets 都在上面了才公开（已经公开的原样返回）；缺的时候按 missing(缺的名字) 停下。
+ * 公开草稿 Release：assets 都在上面了才公开（已经公开的原样返回），缺了就停。它只看名字，所以调用方要自己先把
+ * 每个包在这次运行里下回核对过：single 是它自己那一个，合并发布是它刚 stage 过的三个。
  */
-export async function publishComplete(github, repo, { tag, target, assets, feed = "更新源", say = () => {}, missing }) {
+export async function publishComplete(github, repo, { tag, target, assets, feed = "更新源", say = () => {} }) {
   const release = await github.findRelease(repo, tag);
   const absent = assets.filter((name) => !(release?.assets ?? []).some((asset) => asset.name === name));
-  if (absent.length) die(missing ? missing(absent.join("、")) : `Release ${tag} 里还缺 ${absent.join("、")}：没有公开，重跑会接着补。`);
+  if (absent.length) die(`Release ${tag} 里还缺 ${absent.join("、")}：没有公开，重跑会接着补。`);
   if (!release.draft) return release;
   say(`▶ ${assets.length > 1 ? `${assets.length} 个包都在草稿里核对过了，` : ""}公开 Release ${tag}`);
   try {
