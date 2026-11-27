@@ -6,8 +6,8 @@ import { NODE_VERSION } from "../../shared/runtime-bundle.mjs";
 // node 版本两个平台共用（desktop/shared/runtime-bundle.mjs）；这里是各架构 darwin 包的 sha256。
 export { NODE_VERSION };
 export const ARCHITECTURES = {
-  arm64: { label: "Apple 芯片", swift: "arm64", checksum: "af6202f5370a3a5209e85dc543758dfd9f44c8726626a236730cd603a67a8559" },
-  x64: { label: "Intel", swift: "x86_64", checksum: "2693310b2820f9350d29524f21344e1c623875bab773457d55b2aceb9670716f" },
+  arm64: { swift: "arm64", checksum: "af6202f5370a3a5209e85dc543758dfd9f44c8726626a236730cd603a67a8559" },
+  x64: { swift: "x86_64", checksum: "2693310b2820f9350d29524f21344e1c623875bab773457d55b2aceb9670716f" },
 };
 
 export function assertArchitecture(architecture) {
@@ -57,7 +57,7 @@ export function publishedNames(config, details) {
       if (details.url?.endsWith(`/${names.tag}/${names.name}`)) return names;
     }
   }
-  throw new Error("更新源的下载地址与版本或架构不符，未改下载页");
+  throw new Error("更新源的下载地址与版本或架构不符");
 }
 
 export const recoveryName = (runId, architecture) => `mac-release-${runId}-${assertArchitecture(architecture)}`;

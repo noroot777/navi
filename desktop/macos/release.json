@@ -7,7 +7,6 @@
   "appcastPath": "navi/mac/appcast.xml",
   "legacyAppcastPath": "ash/mac/appcast.xml",
   "tagPrefix": "v",
-  "downloadTag": "navi-mac-latest",
   "architectures": {
     "x64": {
       "appcastPath": "navi/mac/appcast-intel.xml",

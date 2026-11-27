@@ -36,7 +36,7 @@
     "smoke:win-runtime:remote": "node desktop/windows/scripts/remote-smoke.mjs",
     "smoke:win-installer": "node desktop/windows/scripts/smoke-installer.mjs",
     "test:release:win": "node scripts/test-windows-release.mjs && node scripts/test-windows-cloud-workflow.mjs",
-    "test:release:mac": "node scripts/test-runtime-bundle-deps.mjs && node scripts/test-macos-architecture.mjs && node scripts/test-macos-public-feed.mjs && node scripts/test-macos-download-page.mjs && node scripts/test-macos-copy-app.mjs && node scripts/test-macos-cloud-workflow.mjs && node scripts/test-macos-release.mjs && node scripts/test-macos-version-display.mjs",
+    "test:release:mac": "node scripts/test-runtime-bundle-deps.mjs && node scripts/test-macos-architecture.mjs && node scripts/test-macos-public-feed.mjs && node scripts/test-macos-copy-app.mjs && node scripts/test-macos-cloud-workflow.mjs && node scripts/test-macos-release.mjs && node scripts/test-macos-version-display.mjs",
     "restart": "node scripts/restart.mjs",
     "stop": "node scripts/stop.mjs",
     "upgrade": "node scripts/upgrade.mjs",

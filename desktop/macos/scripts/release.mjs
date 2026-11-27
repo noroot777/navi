@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // 发一版 mac app：构建独立 app → 封 dmg → EdDSA 签名 → 在装包仓库（release.json 的 releaseRepo）建
-// GitHub Release、传 dmg → 更新 appcast.xml（整份也签过）→ 经 GitHub API 提交进清单仓库（feedRepo）→
-// 更新 Mac 固定下载页。已装的 app 定时拉那份 appcast，看到新版就提示
+// GitHub Release、传 dmg → 更新 appcast.xml（整份也签过）→ 经 GitHub API 提交进清单仓库（feedRepo）。
+// 已装的 app 定时拉那份 appcast，看到新版就提示
 // 安装；同一个 dmg 也是新用户下载安装的那个。读写 GitHub 全程只用一张凭证，开传之前先确认它对两个仓库
 // 都有写权限。改名前装的 Ash.app 看的是另一份 appcast（legacyAppcastPath），也装不了包标识不同的 Navi：
-// 那一份里只放一条「仅通知」的条目，点开是下载页（见 publishLegacyFeed）。
+// 那一份里只放一条「仅通知」的条目，点开是对应版本的 Release（见 publishLegacyFeed）。
 //
 //   npm run release:mac:local                         # 正式发版（要先 --keys 做过一次）；只认老的单平台 tag，v<版本> 由合并发布公开
 //   npm run release:mac:local -- --keys               # 生成 / 读出正式 EdDSA 密钥，公钥写进 release.json
@@ -14,7 +14,7 @@
 //
 // 其它选项：--app <Navi.app> 用现成的构建（不重新 build）；--notes <文字> 换掉自动生成的更新说明。
 // --stage / --finish 给合并发布用（desktop/shared/release-together.mjs，几个平台的包在同一个 Release 里）：
-// --stage 只把 dmg 传进草稿并核对，不公开、不碰 appcast；--finish 在 Release 公开之后核对它、再推 appcast 和下载页。
+// --stage 只把 dmg 传进草稿并核对，不公开、不碰 appcast；--finish 在 Release 公开之后核对它、再推 appcast。
 //
 // 几条不变量（README「发版」里有为什么）：
 //  · 发出去的 app 里的公钥必须就是签这一版的私钥对应的那把 —— 对不上直接拒，发出去谁都装不上。
@@ -27,7 +27,7 @@
 //    没有哪份 appcast 引用它，而读和撤之间别的发版进程可能刚提交了 appcast），只靠重跑往前补完。
 //  · 没发完重跑时，同一版沿用上次封好的 dmg（重封出来的字节不同，签名就和已传上去的那份对不上了）
 //    —— 但只在这次给的 app 和封那个 dmg 的是同一份时（旁边记着 app 的内容摘要），不是就拒发。
-//    appcast 里已经是这个包（签名一样）时只补后面没做完的：公开 Release、Mac 固定下载页。
+//    appcast 里已经是这个包（签名一样）时只补还没做完的步骤。
 //  · Release 的 tag 打在构建这份 app 的那个提交上：那个提交要先推到装包仓库；同名 tag 已经在、
 //    却指着别的提交，就拒发（GitHub 会沿用已有的 tag，Release 就对不上源码）。公开那一下连目标提交
 //    一起写（沿用的旧草稿可能记着别的提交），公开后再核对一遍 tag。
@@ -40,7 +40,6 @@ import { parseArgs } from "node:util";
 import { readEnv } from "../../../scripts/env.mjs";
 import { compareVersions, latestVersion, parseItems, previousCommit, renderAppcast, renderInformationalItem, renderItem } from "./appcast.mjs";
 import { appInfo, packApp } from "./release-artifacts.mjs";
-import { updateDownloadChannel } from "./release-channel.mjs";
 import { itemDetails, LINK_COMMIT_PREFIX, readConfig as loadConfig } from "./release-state.mjs";
 import { GitHub, NO_TOKEN_HINT, resolveToken } from "./github.mjs";
 import { ensureSparkle } from "./sparkle.mjs";
@@ -243,16 +242,11 @@ async function main() {
     const page = local ? url : `https://github.com/${config.releaseRepo}/releases/tag/${tag}`;
     await publishLegacyFeed({ github, config, local, keyArgs, tool, notes, info, page });
   }
-  const channel = local ? null : await updateDownloadChannel(github, config, {
-    url, shortVersion, version, commit,
-    page: `https://github.com/${config.releaseRepo}/releases/tag/${tag}`,
-  });
   say(`✓ 已发 ${shortVersion}`);
   say(`  包：${url}`);
   say(`  appcast：${local ? appcastPath : feedOf(config)}`);
   if (!local) {
     say("  （raw.githubusercontent 有几分钟缓存，已装的 app 下一次定时检查或点「检查更新…」时就能看到）");
-    say(`  ${channel}`);
   }
 }
 

@@ -6,7 +6,7 @@
 //   publish   ① 没有这一版的 Release 就建草稿（标题、说明是三个平台合起来的）
 //             ② 三个包各自签名、传进草稿、经 API 下回核对（各平台 release.mjs --stage）
 //             ③ 三个都在草稿里了才公开，核对 tag 打在构建提交上
-//             ④ 各平台推自己的更新源（两份 appcast + Mac 下载页、Windows latest.json；release.mjs --finish），一个没推成不挡另一个
+//             ④ 各平台推自己的更新源（两份 Mac appcast、Windows latest.json；release.mjs --finish），一个没推成不挡另一个
 //
 // 不变量：Release 公开之前三个包都在草稿里核对过；公开之后不撤回、不往里补没核对过的包，哪一步失败都只靠重跑往前补
 // （重跑沿用这次运行存下的原包，签名、上传、公开、更新源每一步都认得出做过了）。

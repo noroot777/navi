@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { WORKFLOW, assertVersion, runName } from "../../shared/release-version.mjs";
 import { compareVersions, latestVersion, parseItems } from "./appcast.mjs";
 
-export const DOWNLOAD_TAG = "navi-mac-latest";
 export const LINK_COMMIT_PREFIX = "docs(README): mac 版下载指向";
 
 export { WORKFLOW, assertVersion, runName };
@@ -13,7 +12,7 @@ export function readConfig(path) {
   for (const field of ["releaseRepo", "feedRepo"]) {
     if (!/^[\w.-]+\/[\w.-]+$/.test(config[field] ?? "")) throw new Error(`${path} 里缺少有效的 ${field}`);
   }
-  return { feedBranch: "main", appcastPath: "appcast.xml", tagPrefix: "v", downloadTag: DOWNLOAD_TAG, ...config };
+  return { feedBranch: "main", appcastPath: "appcast.xml", tagPrefix: "v", ...config };
 }
 
 export function sourceVersion(text) {
@@ -45,5 +44,3 @@ export function nextBuildNumber(latest, clock = new Date()) {
   const [date, serial] = latest.split(".");
   return `${date}.${String(Number(serial) + 1).padStart(6, "0")}`;
 }
-
-export const downloadPage = (config) => `https://github.com/${config.releaseRepo}/releases/tag/${config.downloadTag}`;

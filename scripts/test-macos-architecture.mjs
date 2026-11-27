@@ -14,7 +14,6 @@ assert.equal(arm.legacyTagPrefix, "navi-mac-v", "合并之前各架构自己的 
 assert.equal(intel.legacyTagPrefix, "navi-mac-intel-v");
 assert.equal(intel.legacyAppcastPath, null);
 assert.equal(arm.publicKey, intel.publicKey);
-assert.equal(arm.downloadTag, intel.downloadTag);
 assert.equal(architectureConfig(intel, "arm64").appcastPath, arm.appcastPath);
 assert.equal(distributionName("0.3.3", "arm64"), "Navi-0.3.3.dmg");
 assert.equal(distributionName("0.3.3", "x64"), "Navi-0.3.3-intel.dmg");

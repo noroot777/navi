@@ -216,6 +216,5 @@ WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs --install deskt
 - 导入旧数据（mac 首启那一屏的「从旧数据导入」）、ComputerPreview：第一版不做，首启只有「全新开始」；
 - 新版起不来时的自动回退（mac 的恢复点、`.mac-runtime-paused.json`）：第一版只留库的底，回退靠手动（见「更新前的库备份」）；
 - 不再用的旧运行时目录不自动回收；
-- 固定下载页（mac 的 `navi-mac-latest`）：下载先指 Releases 列表；
 - Authenticode 签名（也是上面 Defender 误判的根治办法）；登录项现在仍是装好后第一次打开默认勾上（② 定的），要不要改成用户自己勾待定；
 - 窗口位置记忆。
