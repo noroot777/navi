@@ -206,6 +206,66 @@ try {
   }
   console.log("✓ 等分项时换了回合：不截断新回合，插话照收，新回合结尾再收台");
 
+  // ⑦ 收台的授权与收台同一步：消费方拿到分项后去写库（慢），那时 stdin 已经关了，不会是先交分项、
+  //    等写库的空档里再凭旧核对收台。
+  {
+    let closed = false;
+    const fake = {
+      sessionId: "slow-consumer", commandLine: "x", launchCompact: null,
+      events: (async function* () { yield { kind: "turnEnd", epoch: 0 } as AgentEvent; })(),
+      epoch: () => 0, turnActive: () => false,
+      contextBreakdown: async () => contextBreakdownFromClaude(USAGE, "t"),
+      send: () => true, close: () => { closed = true; }, kill: () => {}, interrupt: () => {},
+      cleanup: async () => ({ kind: "empty" }),
+    } as unknown as ResidentHandle;
+    const seen: [string, boolean][] = [];
+    for await (const event of singleRunFromResident(fake).events) {
+      seen.push([event.kind, closed]);
+      if (event.kind === "contextBreakdown") await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.deepEqual(seen, [["contextBreakdown", true], ["done", true]], "先关 stdin，再交分项和结束");
+  }
+
+  // ⑧ 插话已经收下、还在准备正文时分项先回来了：等它送完（开了新回合），不收台、不让它送进一个关掉的 stdin。
+  {
+    let epoch = 0;
+    let active = false;
+    let closed = false;
+    let sentWhileClosed: boolean | null = null;
+    let steered: Promise<void> | undefined;
+    let release: () => void = () => {};
+    const nextTurn = new Promise<void>((resolve) => { release = resolve; });
+    const fake = {
+      sessionId: "pending-steer", commandLine: "x", launchCompact: null,
+      events: (async function* () {
+        yield { kind: "turnEnd", epoch: 0 } as AgentEvent;
+        await nextTurn;
+        active = false;
+        yield { kind: "turnEnd", epoch: 1 } as AgentEvent;
+      })(),
+      epoch: () => epoch,
+      turnActive: () => active,
+      contextBreakdown: async () => {
+        // 等分项时插话进来，准备正文要 50ms，分项 10ms 就回来了。
+        steered = run.steer!("插一句", () => new Promise((resolve) => setTimeout(resolve, 50)));
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return contextBreakdownFromClaude(USAGE, "t");
+      },
+      send: () => { sentWhileClosed = closed; epoch = 1; active = true; release(); return true; },
+      close: () => { closed = true; },
+      kill: () => {}, interrupt: () => {},
+      cleanup: async () => ({ kind: "empty" }),
+    } as unknown as ResidentHandle;
+    const run = singleRunFromResident(fake);
+    const seen: string[] = [];
+    for await (const event of run.events) seen.push(event.kind);
+    await steered;
+    assert.equal(sentWhileClosed, false, "插话在 stdin 关之前送了进去");
+    assert.deepEqual(seen, ["contextBreakdown", "done"], "旧结尾作废，新回合结尾才收台");
+    assert.equal(closed, true);
+  }
+  console.log("✓ 收台与最后一次核对同一步：先关 stdin 再交分项；在途插话先落地");
+
   // ⑤ 两头的解析：回包缺分项表或窗口就当没取到；落库那份读回来一致，坏的当没有。
   {
     assert.equal(contextBreakdownFromClaude({ categories: [], maxTokens: 1 }, "t"), null);

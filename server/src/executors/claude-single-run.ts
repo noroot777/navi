@@ -62,6 +62,8 @@ export function singleRunFromResident(
   // `epoch` 是开始等的那个结尾的回合身份,之后开了新回合这份等待就作废。
   let hold: { phase: "background" | "wrapup"; epoch: number | undefined; timer: ReturnType<typeof setTimeout> } | null = null;
   let verdict: StallVerdict | null = null;
+  // 已经收下、还没落地的插话(还在准备正文 / 等打断回执 / 写 stdin)。收台前要等它们落地,见收台那段。
+  const steering = new Set<Promise<void>>();
   let stopped = false; // 用户停止:不另外判「后台没跑完」,停止自有它的结算
   const clearHold = () => {
     if (hold) clearTimeout(hold.timer);
@@ -134,15 +136,18 @@ export function singleRunFromResident(
           // MCP 那一项)。最多等 CONTEXT_USAGE_TIMEOUT_MS,拿不到照常收台、不留快照;等的时候被停止,
           // 进程一没回包就作废,同样立刻往下走。
           //
-          // **等完要重新核对回合身份**:解析层不随这里的 await 暂停,这几秒里 CLI 可能自己开了下一回合
-          // (完成通知到了),插话也可能直接送了进去(这段里照收,见 steer 的空档分支)。上面那道 `stale`
-          // 只管得到 await 之前,等完换了回合还收台,就是把正在干活的新回合截断、报成功结束。换了回合:
-          // 这个结尾作废,分项也归不到哪一回合、不要,接着读流,由新回合的结尾再定。
+          // **收台的授权必须跟收台本身在同一个同步段里**:解析层不随这里的 await/yield 暂停,让出执行权的
+          // 每一刻 CLI 都可能自己开下一回合(完成通知到了),插话也可能送进来(等的时候照收,见 steer)。
+          // 所以顺序是:等分项 → 等在途的插话落地(收下了就让它送完,不能收台把它截在半路)→ 同步核对
+          // 回合身份并立刻关 stdin → 之后才把分项和结束交给消费方(消费方要写库,那段 await 已在收台之后,
+          // 关了 stdin 就不会再有我们送进去的回合)。换了回合:这个结尾作废,分项归不到哪一回合、不要,
+          // 接着读流,由新回合的结尾再定。
           const breakdown = await resident.contextBreakdown?.();
+          while (!stopped && steering.size) await Promise.allSettled([...steering]);
           if (!stopped && stale(event.epoch)) continue;
           accepting = false;
-          if (breakdown) yield { kind: "contextBreakdown", breakdown };
           resident.close();
+          if (breakdown) yield { kind: "contextBreakdown", breakdown };
           yield { kind: "done", exitStatus: 0 };
           return;
         }
@@ -171,6 +176,46 @@ export function singleRunFromResident(
       clearHold();
     }
   })();
+  // 插话本体(登记在途见下面的 steer)。
+  const steerNow = async (text: SteerText, beforeSend?: () => void | Promise<void>): Promise<void> => {
+    // 等后台工作的空档:没有回合可打断(打断一个空闲会话不会再吐 result,计数就错位了),
+    // 消息直接送进去自己开一回合;那一回合的结尾照常判要不要接着等。
+    if (resident.turnActive?.() === false) {
+      await beforeSend?.();
+      const body = await resolveSteerText(text);
+      // 准备正文的这段 await 里,完成通知可能已经让 CLI 自己开了一回合:那就照忙碌那条路打断
+      // 再送,而不是排在它后面(beforeSend 已经跑过,不再跑第二遍)。
+      if (resident.turnActive?.() === false) {
+        if (!resident.send(body)) throw new Error("Claude 没收下这条消息（stdin 已关闭，或记不下发送记录）");
+        clearHold();
+        return;
+      }
+      text = body;
+      beforeSend = undefined;
+    }
+    intermediateEnds += 1;
+    let interrupted = false;
+    try {
+      if (resident.steer) await resident.steer(text, () => { interrupted = true; }, beforeSend);
+      else {
+        resident.interrupt();
+        interrupted = true;
+        resident.send(await resolveSteerText(text));
+      }
+    } catch (error) {
+      if (!interrupted) intermediateEnds = Math.max(0, intermediateEnds - 1);
+      else {
+        accepting = false;
+        stopped = true; // 为了带着插话重开而杀,不是后台工作丢了
+        clearHold();
+        resident.kill();
+        throw Object.assign(error instanceof Error ? error : new Error(String(error)), { nativeSteerRestart: true });
+      }
+      throw error;
+    }
+    // 插话开了新的一回合:要不要接着等后台,由那一回合的结尾重新判,旧的等待期限作废。
+    clearHold();
+  };
   return {
     sessionId: resident.sessionId,
     commandLine: resident.commandLine,
@@ -178,45 +223,13 @@ export function singleRunFromResident(
     events,
     detached,
     failure: () => verdict,
-    async steer(text: SteerText, beforeSend) {
-      if (!accepting) throw new Error("Claude 当前回合已经结束");
-      // 等后台工作的空档:没有回合可打断(打断一个空闲会话不会再吐 result,计数就错位了),
-      // 消息直接送进去自己开一回合;那一回合的结尾照常判要不要接着等。
-      if (resident.turnActive?.() === false) {
-        await beforeSend?.();
-        const body = await resolveSteerText(text);
-        // 准备正文的这段 await 里,完成通知可能已经让 CLI 自己开了一回合:那就照忙碌那条路打断
-        // 再送,而不是排在它后面(beforeSend 已经跑过,不再跑第二遍)。
-        if (resident.turnActive?.() === false) {
-          if (!resident.send(body)) throw new Error("Claude 没收下这条消息（stdin 已关闭，或记不下发送记录）");
-          clearHold();
-          return;
-        }
-        text = body;
-        beforeSend = undefined;
-      }
-      intermediateEnds += 1;
-      let interrupted = false;
-      try {
-        if (resident.steer) await resident.steer(text, () => { interrupted = true; }, beforeSend);
-        else {
-          resident.interrupt();
-          interrupted = true;
-          resident.send(await resolveSteerText(text));
-        }
-      } catch (error) {
-        if (!interrupted) intermediateEnds = Math.max(0, intermediateEnds - 1);
-        else {
-          accepting = false;
-          stopped = true; // 为了带着插话重开而杀,不是后台工作丢了
-          clearHold();
-          resident.kill();
-          throw Object.assign(error instanceof Error ? error : new Error(String(error)), { nativeSteerRestart: true });
-        }
-        throw error;
-      }
-      // 插话开了新的一回合:要不要接着等后台,由那一回合的结尾重新判,旧的等待期限作废。
-      clearHold();
+    steer(text: SteerText, beforeSend) {
+      if (!accepting) return Promise.reject(new Error("Claude 当前回合已经结束"));
+      // 收下的那一刻(同一个同步段里)就登记为在途,收台据此等它落地。
+      const work = steerNow(text, beforeSend);
+      steering.add(work);
+      void work.then(() => steering.delete(work), () => steering.delete(work));
+      return work;
     },
     kill() {
       accepting = false;
