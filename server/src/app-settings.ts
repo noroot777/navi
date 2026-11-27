@@ -58,6 +58,13 @@ const SETTING_SPECS = {
     ok: (v: unknown) => typeof v === "string" && (COLOR_THEMES as readonly string[]).includes(v),
     hint: `必须是 ${COLOR_THEMES.join(" / ")} 之一（跟随系统 / 浅色 / 深色）`,
   },
+  // 项目切换下拉里的先后。个人面的键。上限远高于实际项目数，只防一条请求塞爆一行。
+  projectOrder: {
+    ok: (v: unknown) => Array.isArray(v) && v.length <= 2000
+      && v.every((id) => typeof id === "string" && id.length > 0 && id.length <= 64)
+      && new Set(v).size === v.length,
+    hint: "必须是不重复的项目 id 数组（最多 2000 个）",
+  },
   handoffRequireApproval: { ok: (v: unknown) => typeof v === "boolean", hint: "必须是 boolean" },
   handoffEncrypt: { ok: (v: unknown) => typeof v === "boolean", hint: "必须是 boolean" },
   handoffMaxBodyMb: {

@@ -11,7 +11,7 @@ import { useCatchUp, useCatchUpLink } from "../lib/useCatchUp.ts";
 // 改了门禁基准，后发先至的新读数被丢掉、旧的首次读数随后落地，页面就停在改之前（第 2 轮审查
 // F4）；事件触发的那一发失败一次也没人再读（F3）。
 //
-// 本页自己写项目（保存设置、新建、删除）走 `apply`：照写，然后补排一趟读取。写入那一刻还在途的
+// 本页自己写项目（保存设置、新建、删除）走 `apply`（排序走 `commit`，见那里）：照写，然后补排一趟读取。写入那一刻还在途的
 // 那一发不再作数（它可能早于这次写入），由补排的那一趟接上。`setLocal` 只给不该触发重读的
 // 派生字段（项目体检）用。
 export function useProjects(onFirstLoad: (rows: ProjectView[]) => void) {
@@ -51,7 +51,9 @@ export function useProjects(onFirstLoad: (rows: ProjectView[]) => void) {
   }, []);
   const catchUp = useCatchUp(read);
   useEffect(() => { void catchUp.run(); }, [catchUp]);
-  const connected = useServerEvents((event) => { if (event.type === "project.updated") void catchUp.run(); });
+  const connected = useServerEvents((event) => {
+    if (event.type === "project.updated" || event.type === "projects.reordered") void catchUp.run();
+  });
   useCatchUpLink(catchUp, connected);
 
   const apply = useCallback((update: SetStateAction<ProjectView[]>) => {
@@ -59,5 +61,17 @@ export function useProjects(onFirstLoad: (rows: ProjectView[]) => void) {
     setProjects(update);
     void catchUp.run();
   }, [catchUp]);
-  return { projects, ready, error, lagging, apply, setLocal: setProjects };
+  // 先照写、等请求落地再读：`apply` 那趟读会跟请求赛跑，跑赢了就把旧顺序读回来闪一下。
+  // 请求在途期间起的读在两次计数之间，落地时一律作废，由收尾那一趟接上；请求失败也靠它读回真值。
+  const commit = useCallback(async (update: SetStateAction<ProjectView[]>, request: () => Promise<unknown>) => {
+    writes.current += 1;
+    setProjects(update);
+    try {
+      await request();
+    } finally {
+      writes.current += 1;
+      void catchUp.run();
+    }
+  }, [catchUp]);
+  return { projects, ready, error, lagging, apply, commit, setLocal: setProjects };
 }

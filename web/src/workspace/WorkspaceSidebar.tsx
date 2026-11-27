@@ -59,6 +59,7 @@ export function WorkspaceSidebar({
   assistantOpen,
   onCreate,
   onNewProject,
+  onReorderProjects,
   onSettings,
 }: {
   projects: ProjectView[];
@@ -99,6 +100,7 @@ export function WorkspaceSidebar({
   assistantOpen?: boolean;
   onCreate: () => void;
   onNewProject: () => void;
+  onReorderProjects: (projectIds: string[]) => void;
   onSettings: () => void;
 }) {
   const modifier = workspaceModifierLabel();
@@ -150,6 +152,7 @@ export function WorkspaceSidebar({
             onProject={onProject}
             onTaskMode={onTaskMode}
             onCreate={onNewProject}
+            onReorder={onReorderProjects}
             onSettings={onSettings}
           />
           {/* 顶行最右:常用命令的启动入口。 */}

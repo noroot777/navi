@@ -40,7 +40,7 @@ async function projectIdOf(taskId: string): Promise<string | null> {
   return row.projectId;
 }
 
-/** 事件挂在哪个任务上。除 project.updated、task.reads 外,所有 ServerEvent 变体要么带 taskId,要么带整个 task。 */
+/** 事件挂在哪个任务上。除 project.updated、task.reads、projects.reordered 外,所有 ServerEvent 变体要么带 taskId,要么带整个 task。 */
 function taskIdOf(ev: ServerEvent): string | null {
   if ("taskId" in ev && typeof ev.taskId === "string") return ev.taskId;
   if ("task" in ev && ev.task) {
@@ -87,7 +87,7 @@ export function makeEventFilter(actor: Actor): {
     allow(ev) {
       // 挂在人身上的事件：只推给他本人。排在 unrestricted 之前 —— 实例管理员看得见所有项目，
       // 却不该被别人的已读记录叫去重拉一遍自己那份。
-      if (ev.type === "task.reads") return ev.ownerUserId === ownerIdOf(actor);
+      if (ev.type === "task.reads" || ev.type === "projects.reordered") return ev.ownerUserId === ownerIdOf(actor);
       // 系统通知只弹给任务主人（多人模式），主人也得看得见这个任务（下面按任务照常核）。别人的任务看得见也不弹。
       if (ev.type === "task.notify" && multiUser && ev.ownerUserId !== ownerIdOf(actor)) return false;
       // 设备申请：放谁进来归机主本人（remote-access-routes.ts ownerRefusal 同一个判据），回合凭证不收。多人模式没有配对。
