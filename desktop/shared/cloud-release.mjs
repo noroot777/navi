@@ -68,7 +68,10 @@ export async function releaseCloud(platforms, version, { cwd, github, say = cons
     github = new GitHub(auth.token);
   }
   if ((await github.call("GET", `/repos/${repo}`)).json.default_branch !== "main") throw new Error("发布仓库默认分支不是 main，停止发布。");
-  const workflow = (await github.call("GET", `/repos/${repo}/actions/workflows/${WORKFLOW}`)).json;
+  const { status: found, json: workflow } = await github.call("GET", `/repos/${repo}/actions/workflows/${WORKFLOW}`, { allow: [404] });
+  if (found === 404) {
+    throw new Error(`GitHub 上还没有发布工作流 ${WORKFLOW}：它只在本地 main 里。先 git push origin main 把它推上去，再重新执行同一命令。没有修改版本或推送。`);
+  }
   if (workflow.state !== "active") throw new Error(`发布工作流 ${WORKFLOW} 未启用：先将工作流合入 main 并启用 Actions。`);
   await previousRun(github, repo, runName(version, head));
   for (const job of jobs) job.state = await job.platform.preflight({ github, config: job.config, version });
