@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ANSWER_PREFIX, type Session } from "@navi/shared";
+import { ANSWER_PREFIX, type DraftingEvent, type Session } from "@navi/shared";
 import { api } from "./api.ts";
 import { useServerEvents } from "./events.ts";
 import {
@@ -62,6 +62,9 @@ export function useConversation(
   const [sessions, setSessions] = useState<Session[]>([]);
   const [persisted, setPersisted] = useState<PersistedConversation[]>([]);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  // 每条会话此刻正在生成的那一步（shared events.ts 的 drafting）。每秒来一条、只看最新那条，
+  // 不进 timeline：进了就只增不减，还会每秒把整份会话重拼一遍。那条会话再来别的事件就清掉。
+  const [drafting, setDrafting] = useState<ReadonlyMap<string, DraftingEvent>>(() => new Map());
   const timelineRef = useRef<TimelineEntry[]>([]);
   // 已经读完、且读的就是当前这个任务的正文。切任务时 state 还留着上一个任务的
   // sessions/persisted，重置要等 effect 跑完——那之间渲染出来的会话是**别人的**。
@@ -248,6 +251,7 @@ export function useConversation(
     setLoadedTaskId(null);
     setTranscriptTaskId(null);
     replaceTimeline([]);
+    setDrafting(new Map());
     void load(false);
     // 切走/卸载时把在途那一发掐掉，并把这一代作废：旧链上还排着的那些出门前会自己退，
     // 它们的结果反正会被代号丢弃，却足以把取消句柄抢走。
@@ -279,6 +283,17 @@ export function useConversation(
         refreshSessions();
       }
       if (event.type === "agent.event" && event.taskId === taskId) {
+        const step = event.event;
+        if (step.kind !== "context") {
+          setDrafting((current) => {
+            if (step.kind !== "drafting" && !current.has(event.sessionId)) return current;
+            const next = new Map(current);
+            if (step.kind === "drafting") next.set(event.sessionId, step);
+            else next.delete(event.sessionId);
+            return next;
+          });
+        }
+        if (step.kind === "drafting") return;
         appendTimeline({
           kind: "server",
           id: createClientId(),
@@ -300,6 +315,7 @@ export function useConversation(
         event.taskId === taskId &&
         settledStatuses.has(event.status)
       ) {
+        setDrafting(new Map());
         void load(true);
       }
     }, [appendTimeline, appendUserTurn, load, refreshSessions, taskId]),
@@ -348,5 +364,6 @@ export function useConversation(
     forkBlockedReason: ready ? forkBlockedReason : null,
     refetch,
     addUser,
+    drafting,
   };
 }

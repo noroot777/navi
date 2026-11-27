@@ -224,6 +224,8 @@ async function consume(lead: Lead): Promise<void> {
       if (!lead.retired) trackSessionWaiting(lead.sessId, lead, lead.turnStart, event);
       // 摘牌的台同样不许动手:它的停滞状态归接管的那台(同上面那道闸)。
       if (!lead.retired) trackTurnStall(lead.sessId, lead, lead.turnStart, event, stallActions);
+      // 正在生成的那一步（claude-drafting.ts）调度台的界面不画；放下去会把攒着的正文切成两截落盘。
+      if (event.kind === "drafting") continue;
       if (event.kind === "text") {
         lead.out.write(event.text);
         pendingTraceText += event.text;

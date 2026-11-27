@@ -406,6 +406,8 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
       // 「这一轮还在往前走吗」(turn-stall.ts):同一条事件流、同一个持有者语义,只是它要
       // 回答的不是「此刻在等」而是「等到该动手了没有」。
       trackTurnStall(sessId, a.handle, a.turnStart, event, stallActions);
+      // 正在生成的那一步只直播、不落盘（claude-drafting.ts），也不碰标题窗口。
+      if (event.kind === "drafting") { publishEvent(event); continue; }
       if (goalStartPending && a.handle.goalStarted?.()) { await markCliGoalStarted(taskId, agentType, event.kind === "session" ? event.cliSessionId : cliSessionId); goalStartPending = false; }
       if (event.kind === "session") {
         if (event.cliSessionId !== cliSessionId) {

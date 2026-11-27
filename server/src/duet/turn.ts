@@ -347,6 +347,7 @@ export async function runTurn(args: {
         // 也是攒在内存里的,照落盘产物反推一样会在恢复之后还说正在重试。
         trackSessionWaiting(rowId, handle, turnStart, event);
         trackTurnStall(rowId, handle, turnStart, event, stallActions);
+        if (event.kind === "drafting") continue; // 讨论区不画正在生成的那一步（claude-drafting.ts）
         const sessionNotice = isSessionScopeNotice(event);
         const emittedEvent = event.kind === "usage"
           ? await recordSessionUsageEvent(rowId, event, executor.type, cliId, turnStart)

@@ -8,6 +8,8 @@ import { conversationTailKey } from "./conversationModel.ts";
 import { annotationBatchDisplayText } from "@navi/shared/page-annotation-display";
 import { ConversationScrollControls } from "../components/ConversationScrollControls.tsx";
 import { AgentTurnBody } from "../components/AgentTurnBody.tsx";
+import { draftingLabel } from "../lib/executionWords.ts";
+import type { DraftingEvent } from "@navi/shared";
 import { AgentIcon, hasAgentIcon } from "../components/AgentIcon.tsx";
 import { CopyButton } from "../components/CopyButton.tsx";
 import { ImagePreviewGroup } from "../components/ImagePreview.tsx";
@@ -90,6 +92,7 @@ function AgentMessageView({
   taskActive,
   receipts,
   footnote,
+  drafting,
 }: {
   item: Extract<ConversationItem, { kind: "agent" }>;
   /** 这条发言是在哪个任务的工作目录里说的（正文里的图靠它去那个目录取），见 AgentTurnBody。 */
@@ -110,6 +113,8 @@ function AgentMessageView({
    * 回合尾那排操作上面。`key` 是它的签名：收口的回合只在它变了时重画。
    */
   footnote?: { node: ReactNode; key: string };
+  /** 这一回合此刻正在生成的那一步（见 AgentTurnBody）。 */
+  drafting?: DraftingEvent | null;
 }) {
   const log = useTurnReceipts();
   const duration = durationBetween(item.at, item.endedAt);
@@ -154,7 +159,7 @@ function AgentMessageView({
           </header>
         )}
         {wakeReply && <MonitorWakeReply />}
-        <AgentTurnBody segments={item.segments} running={!item.endedAt} taskId={taskId} since={live ? item.at : undefined} />
+        <AgentTurnBody segments={item.segments} running={!item.endedAt} taskId={taskId} since={live ? item.at : undefined} drafting={live ? drafting : null} />
         {footnote?.node}
         {/* 跑着的这一回合还没说完，尾上的操作等它收口再出（run-5）。「N 条记录」是那一排里的一颗，
             摊开的流水在它下面。 */}
@@ -315,6 +320,7 @@ export function ConversationFeed({
   onDeleteDiscussion,
   onReuseInput,
   asides,
+  drafting,
 }: {
   task: TaskListItem;
   /**
@@ -323,6 +329,8 @@ export function ConversationFeed({
    */
   requirement?: { text: string; at?: string | null; origin?: TaskCreationOrigin | null } | null;
   items: ConversationItem[];
+  /** 每条会话此刻正在生成的那一步（useConversation 的 drafting）。 */
+  drafting?: ReadonlyMap<string, DraftingEvent>;
   sessions?: Session[];
   loading: boolean;
   error: Error | null;
@@ -388,6 +396,9 @@ export function ConversationFeed({
     [items, requirementAt, requirementText],
   );
   const activityPhase = runActivityPhase(task.status, runActivityTail(items));
+  // 还没开口就先生成起一大步来（一上来就写长文件）：进行条那一行直接说它在写什么。
+  const liveActor = liveRunActor(sessions ?? []);
+  const liveDraft = liveActor ? drafting?.get(liveActor.id) : undefined;
   const queuedCopy = task.status === "queued"
     ? runActivityCopy({ status: task.status, mode: task.mode, phase: activityPhase ?? undefined, queuePosition: task.queuePosition })
     : null;
@@ -493,6 +504,7 @@ export function ConversationFeed({
           onAskSideChat={onAskSideChat}
           taskActive={task.status === "running" || task.status === "queued"}
           receipts={receiptsOf(item.id)}
+          drafting={item.endedAt ? null : drafting?.get(item.sessionId) ?? null}
           footnote={footnote?.parts.length
             // 点得过去的那几句也进签名：审查记录晚到一步才认得出驳回是哪一场，那一回合得跟着重画。
             ? { node: renderFootnote(footnote), key: footnoteKey(footnote, `${footnote.parts.some((part) => isRetryable(part, footnote)) ? "retry" : ""}:${footnote.parts.map((part) => part.kind === "event" && noticeLink(part.item, linkTargets) ? 1 : 0).join("")}`) }
@@ -613,7 +625,8 @@ export function ConversationFeed({
           {/* 等它开口的那一段只有一行进行条（run-2）；排着队时字不动，原因指上去看。 */}
           {activityPhase && !loading && !error && !reviewRunning && (task.status === "queued"
             ? <LiveStrip still since={null} text={queuedCopy?.title ?? "排着队"} tip={queuedCopy?.detail} />
-            : <LiveStrip since={task.liveSince} agent={liveRunActor(sessions ?? [])?.agentType} />)}
+            : <LiveStrip since={task.liveSince} agent={liveActor?.agentType}
+                text={liveDraft ? draftingLabel(liveDraft) : undefined} />)}
           {/* 正文一条都没读下来时这里是空的，但那不是「还没开始跑」——`forkBlockedReason`
               在场就说明读挂了，再劝用户点运行是把失败说成了空会话。 */}
           {task.status === "backlog" && (task.prerequisites?.waiting || task.prerequisites?.blocked) && !activityPhase && (
