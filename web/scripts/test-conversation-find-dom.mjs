@@ -9,6 +9,9 @@
 //   · Esc 关掉、标记收掉、焦点还回去；
 //   · 页面上有好几条会话时交给正在用的那一条，同一时间只开一条；
 //   · 一条会话都不在屏幕上（卸下了、被整块盖住）就不拦，浏览器自己的查找照常出来；
+//   · 归属认整块会话：在侧聊回复框里按 ⌘F 查的是侧聊；⌘G 跟 ⌘F 同样判归属，焦点在代码编辑器、
+//     别的会话里时不抢（审查第 1 轮 #1、#2）；
+//   · 手动开合折叠块，标记跟着变；相邻两段拼不出假命中；流式续字时当前那一处不跳回前面；
 //   · 查找条平时不画；按了才停进标题行里留的空位、在右边那排图标的左边（用户 2026-11-27 指的位置），
 //     没留空位的会话（侧聊）就浮在会话右上角。
 // 跑法：npm -w web run test:conversation-find-dom
@@ -131,6 +134,37 @@ try {
   await page.waitForFunction(() => [...(CSS.highlights.get("conversation-find-current") ?? [])][0]?.toString() === "旁路通道", null, { timeout: WAIT_TIMEOUT_MS });
   assert.ok((await marks()).onScreen, "打开后那几个字露在屏幕上");
 
+  // 手动开合折叠块：命中跟着标出来（只改了 open、没动子节点也算）。
+  await fold.evaluate((node) => { node.open = false; });
+  await input.fill("残留进程");
+  await count.filter({ hasText: "/2" }).waitFor({ timeout: WAIT_TIMEOUT_MS });
+  assert.equal((await marks()).item, "leftover", "打字时落在看得见的那一处，不去翻折叠块");
+  assert.equal((await marks()).others, 0, "折叠块关着，里面那一处先不标");
+  await fold.locator("summary").click();
+  await page.waitForFunction(() => CSS.highlights.get("conversation-find")?.size === 1, null, { timeout: WAIT_TIMEOUT_MS });
+
+  // 相邻两段的字不连着：「甲乙」「丙丁」拼不出「乙丙」。
+  await input.fill("甲乙");
+  await count.filter({ hasText: "1/1" }).waitFor({ timeout: WAIT_TIMEOUT_MS });
+  await input.fill("乙丙");
+  await count.filter({ hasText: "0/0" }).waitFor({ timeout: WAIT_TIMEOUT_MS });
+
+  // 流式续字：同一个文本节点被整段改写，当前那一处（第二个「续写词」）不跳回这一段的第一处。
+  await input.fill("续写词");
+  await count.filter({ hasText: "/3" }).waitFor({ timeout: WAIT_TIMEOUT_MS });
+  for (let tries = 0; tries < 3 && !(await count.textContent()).startsWith("2/"); tries += 1) {
+    await input.press("Enter");
+    await afterFrames(page);
+  }
+  assert.equal(await count.textContent(), "2/3");
+  await page.evaluate(() => window.fixture.rewrite("stream", "续写词甲，续写词乙，续写词丙。续写词丁。"));
+  await count.filter({ hasText: "/4" }).waitFor({ timeout: WAIT_TIMEOUT_MS });
+  assert.equal(await count.textContent(), "2/4", "续字之后当前那一处还是第二个");
+  assert.equal(await page.evaluate(() => {
+    const range = [...(CSS.highlights.get("conversation-find-current") ?? [])][0];
+    return range ? range.startContainer.data.slice(0, range.startOffset).split("续写词").length - 1 : -1;
+  }), 1, "标的是这一段里的第二处");
+
   // 找不到时计数写 0/0，跳转键不可点，也没有残留的标记。
   await input.fill("没有这个词");
   await count.filter({ hasText: "0/0" }).waitFor({ timeout: WAIT_TIMEOUT_MS });
@@ -185,6 +219,47 @@ try {
   await sideBar.locator(".conversation-find__count").filter({ hasText: "1/1" }).waitFor({ timeout: WAIT_TIMEOUT_MS });
   await page.keyboard.press("Escape");
   await sideBar.waitFor({ state: "detached", timeout: WAIT_TIMEOUT_MS });
+
+  // 焦点在侧聊回复框里（不在侧聊正文里，是正文的兄弟）：查的是侧聊，不是主会话。
+  await feed.click({ position: { x: 20, y: 20 } });
+  await pressFind();
+  await input.waitFor();
+  await page.getByTestId("side-composer").click();
+  assert.equal(await pressFind(), true);
+  await sideBar.waitFor();
+  await bar.waitFor({ state: "detached", timeout: WAIT_TIMEOUT_MS });
+  await page.keyboard.press("Escape");
+  await sideBar.waitFor({ state: "detached", timeout: WAIT_TIMEOUT_MS });
+
+  // ⌘G 跟 ⌘F 同样判归属：主会话开着查找时，焦点去了代码编辑器 / 侧聊回复框，这对键不归主会话。
+  await page.evaluate(() => {
+    window.editorKeys = 0;
+    document.querySelector('[data-testid="editor"]').addEventListener("keydown", (event) => {
+      if (event.key.toLowerCase() === "g" && !event.defaultPrevented) window.editorKeys += 1;
+    });
+  });
+  await feed.click({ position: { x: 20, y: 20 } });
+  await pressFind();
+  await input.fill("编辑器");
+  await count.filter({ hasText: "/4" }).waitFor({ timeout: WAIT_TIMEOUT_MS });
+  const parked = await count.textContent();
+  await page.getByTestId("editor").click();
+  await page.keyboard.press(`${mod}+g`);
+  await afterFrames(page);
+  assert.equal(await count.textContent(), parked, "焦点在代码编辑器里，⌘G 不挪会话");
+  assert.equal(await page.evaluate(() => window.editorKeys), 1, "⌘G 原样送到编辑器手里");
+  assert.equal(await pressFind(), false, "代码编辑器里的 ⌘F 也归它自己");
+  await page.getByTestId("side-composer").click();
+  await page.keyboard.press(`${mod}+g`);
+  await afterFrames(page);
+  assert.equal(await count.textContent(), parked, "焦点在侧聊里，⌘G 不挪主会话");
+  // 回到主会话里，⌘G 照常往下跳。
+  await feed.click({ position: { x: 20, y: 20 } });
+  await page.keyboard.press(`${mod}+g`);
+  await page.waitForFunction((before) => document.querySelector('[data-testid="main-header"] .conversation-find__count')?.textContent !== before, parked, { timeout: WAIT_TIMEOUT_MS });
+  await input.focus();
+  await page.keyboard.press("Escape");
+  await bar.waitFor({ state: "detached", timeout: WAIT_TIMEOUT_MS });
 
   // 焦点和点击都不在任何一条会话里：给占地方最大的那一条。
   await page.getByTestId("outside").click();

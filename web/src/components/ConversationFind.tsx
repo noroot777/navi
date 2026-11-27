@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Keyboar
 import { createPortal } from "react-dom";
 import { CaretDown, CaretUp, X } from "@phosphor-icons/react";
 import { useDismissable } from "../lib/useDismissable.ts";
-import { FIND_SLOT, clearFind, findSlotFor, paintFind, registerConversationFinder } from "../search/conversationFind.ts";
+import { FIND_SLOT, clearFind, conversationScope, findSlotFor, paintFind, registerConversationFinder } from "../search/conversationFind.ts";
 import { findOccurrences, revealOccurrence, type SearchOccurrence } from "../search/searchReveal.ts";
 
 /** 单字查询在长会话里能有上万处：数到这里为止，计数写成「N+」。 */
@@ -47,7 +47,8 @@ export function ConversationFind({
   const input = useRef<HTMLInputElement>(null);
   const restoreFocus = useRef<Element | null>(null);
   const composing = useRef(false);
-  const found = useRef<SearchOccurrence[]>([]);
+  /** `root`：在第几块正文里（会话流、议题……），配合 `start` 在那一块全文里的位置认出「同一处」。 */
+  const found = useRef<(SearchOccurrence & { root: number })[]>([]);
   const current = useRef(-1);
   const owner = useRef({});
   const extras = useRef(extraRoots);
@@ -76,7 +77,9 @@ export function ConversationFind({
 
   const recount = useCallback(() => {
     const needle = queryRef.current;
-    found.current = needle.trim() ? roots().flatMap((root) => findOccurrences(root, [needle], MAX_FOUND)) : [];
+    found.current = needle.trim()
+      ? roots().flatMap((root, index) => findOccurrences(root, [needle], MAX_FOUND).map((occurrence) => ({ ...occurrence, root: index })))
+      : [];
   }, [roots]);
 
   /** 落到第 index 处：在折叠块里就先打开、等它画完重量一次再落。 */
@@ -130,19 +133,26 @@ export function ConversationFind({
 
   /** 会话自己变了（新回复、折叠开合）：重数，当前那一处尽量不变，视口不动。 */
   const searchKeep = useCallback(() => {
-    const previous = found.current[current.current]?.range;
+    const before = found.current[current.current];
+    const previous = before?.range;
     const previousIndex = current.current;
     recount();
     const list = found.current;
     let index = -1;
-    if (previous && list.length) {
-      index = list.findIndex((occurrence) => {
-        try {
-          return occurrence.range.compareBoundaryPoints(Range.START_TO_START, previous) >= 0;
-        } catch {
-          return false;
-        }
-      });
+    if (before && previous && list.length) {
+      // 旧的 Range 是活的：前面插进来新节点它跟着挪，认它最准。可它所在的文本节点被整段改写
+      // （流式回复往同一个节点里续字，React 直接换 nodeValue）时，它会塌回节点开头 —— 再拿它比，
+      // 当前那一处就会跳回这一段里更早的一处。塌了就改认「同一块正文里、同一个位置往后的第一处」：
+      // 续字只往后长，前面的位置不变。
+      index = previous.collapsed
+        ? list.findIndex((occurrence) => occurrence.root === before.root && occurrence.start >= before.start)
+        : list.findIndex((occurrence) => {
+          try {
+            return occurrence.range.compareBoundaryPoints(Range.START_TO_START, previous) >= 0;
+          } catch {
+            return false;
+          }
+        });
       if (index < 0) index = Math.min(previousIndex, list.length - 1);
     } else if (list.length) {
       index = 0;
@@ -194,7 +204,8 @@ export function ConversationFind({
 
   useEffect(() => registerConversationFinder({
     region: () => scrollRef.current?.parentElement ?? scrollRef.current,
-    owns: (node) => !!bar.current?.contains(node),
+    scope: () => conversationScope(scrollRef.current),
+    owns: (node) => !!bar.current?.contains(node) || !!conversationScope(scrollRef.current)?.contains(node),
     isOpen: () => openRef.current,
     open: show,
     close,
@@ -216,9 +227,16 @@ export function ConversationFind({
       }, RECOUNT_GAP_MS);
     };
     const observer = new MutationObserver(schedule);
-    for (const root of roots()) observer.observe(root, { childList: true, subtree: true, characterData: true });
+    // 手动开合折叠块只改 open，不动子节点：也得重数，那一块里的命中才会跟着标出来 / 收掉。
+    // toggle 不冒泡，在捕获阶段听。
+    const watched = roots();
+    for (const root of watched) {
+      observer.observe(root, { childList: true, subtree: true, characterData: true });
+      root.addEventListener("toggle", schedule, true);
+    }
     return () => {
       observer.disconnect();
+      for (const root of watched) root.removeEventListener("toggle", schedule, true);
       window.clearTimeout(timer);
     };
   }, [open, query, roots, searchKeep]);

@@ -11,10 +11,16 @@ import "../styles/conversation-find.css";
  * 一条都不在屏幕上（设置页、新建面板）就原样放过，浏览器自己的查找照常出来。
  */
 export type ConversationFinder = {
-  /** 会话那一块，用来判断它在不在屏幕上、焦点在不在它里面。 */
+  /** 会话正文那一块：只用来判断它此刻在不在屏幕上。 */
   region: () => HTMLElement | null;
-  /** 查找条自己（停靠在标题行里时不在 region 里面）：焦点在它上面再按 ⌘F 也算这一条。 */
+  /**
+   * 这条会话**归谁**：焦点、点击落在哪里算「正在用这一条」。是整个会话那一块（`FIND_SCOPE`：
+   * 标题行、正文、回复框、duet 顶上的议题），不只是正文 —— 在侧聊回复框里按 ⌘F 查的得是侧聊。
+   * 查找条自己（浮着时）也算。
+   */
   owns: (node: Node) => boolean;
+  /** 归属那一块的外沿，几条会话套在一起（团队里打开执行者抽屉）时用它挑最里面那一条。 */
+  scope: () => Element | null;
   isOpen: () => boolean;
   open: () => void;
   close: () => void;
@@ -28,6 +34,11 @@ export type ConversationFinder = {
  */
 export const FIND_SCOPE = { "data-conversation-find-scope": "" } as const;
 export const FIND_SLOT = { "data-conversation-find-slot": "" } as const;
+
+/** 会话所在的那一块；没标 `FIND_SCOPE` 的（夹具、零散面板）就是正文外面那一层。 */
+export function conversationScope(scroll: Element | null): Element | null {
+  return scroll?.closest("[data-conversation-find-scope]") ?? scroll?.parentElement ?? scroll ?? null;
+}
 
 export function findSlotFor(element: Element | null): HTMLElement | null {
   const scope = element?.closest("[data-conversation-find-scope]");
@@ -61,7 +72,12 @@ function onScreen(region: HTMLElement): boolean {
   });
 }
 
+/**
+ * 这一下查找键归哪条会话。⌘F 和 ⌘G 都走这里 —— 跳下一处也只能交给此刻看得见、正在用的那一条。
+ * 焦点在自带查找的编辑面里（终端、代码编辑器）一律不认，键归它们自己。
+ */
 function pick(target: EventTarget | null): ConversationFinder | null {
+  if (target instanceof Element && target.closest(OWN_FIND)) return null;
   // 模态框盖着时只认框里的会话；框里没有就让给浏览器。
   const modal = document.querySelector<HTMLElement>('[role="dialog"][aria-modal="true"]');
   const candidates = [...finders].flatMap((finder) => {
@@ -72,8 +88,15 @@ function pick(target: EventTarget | null): ConversationFinder | null {
   if (!candidates.length) return null;
   for (const anchor of [target, document.activeElement, lastPointer]) {
     if (!(anchor instanceof Node)) continue;
-    const owner = candidates.find(({ finder, region }) => region.contains(anchor) || finder.owns(anchor));
-    if (owner) return owner.finder;
+    // 套在一起的几条会话都认得这个点时，给最里面那一条（抽屉里的会话，不是抽屉外面那条）。
+    const owner = candidates
+      .filter(({ finder }) => finder.owns(anchor))
+      .reduce<ConversationFinder | null>((inner, { finder }) => {
+        const outer = inner?.scope();
+        const next = finder.scope();
+        return !inner || (outer && next && outer !== next && outer.contains(next)) ? finder : inner;
+      }, null);
+    if (owner) return owner;
   }
   // 焦点和最近一次点击都不在任何一条会话里：给占地方最大的那一条（主会话，而不是旁边的侧聊）。
   const area = (region: HTMLElement) => {
@@ -88,7 +111,6 @@ function onKeyDown(event: KeyboardEvent) {
   if (!modifier || event.altKey || event.isComposing) return;
   const key = event.key.toLowerCase();
   if (key === "f" && !event.shiftKey) {
-    if (event.target instanceof Element && event.target.closest(OWN_FIND)) return;
     const finder = pick(event.target);
     if (!finder) return;
     event.preventDefault();
@@ -98,10 +120,11 @@ function onKeyDown(event: KeyboardEvent) {
     finder.open();
     return;
   }
-  // ⌘G / ⇧⌘G：下一处 / 上一处，查找条开着才认（关着时这对键在浏览器里也是查找的续集）。
+  // ⌘G / ⇧⌘G：下一处 / 上一处。归属照 ⌘F 一样判，判给的那一条开着查找条才认；
+  // 不然就原样放过（编辑器、别的会话、弹窗里的这对键归它们自己）。
   if (key === "g") {
-    const finder = [...finders].find((candidate) => candidate.isOpen());
-    if (!finder) return;
+    const finder = pick(event.target);
+    if (!finder?.isOpen()) return;
     event.preventDefault();
     event.stopPropagation();
     finder.step(event.shiftKey ? -1 : 1);

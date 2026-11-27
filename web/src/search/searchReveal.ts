@@ -73,15 +73,30 @@ type Occurrence = {
 // 缩略副本（duet 顶上那条截断的议题），落点该在完整的那一份上。
 const SKIP = "script, style, textarea, input, button, [aria-hidden='true'], [data-search-skip]";
 
+// 自成一块的元素：两块之间的字在屏幕上不连着，拼全文时中间隔一个换行，「上一段的结尾 + 下一段的
+// 开头」才不会凑出一处并不存在的命中。行内的（加粗、行内代码、链接）照旧连着拼。
+const BLOCK = "p, li, pre, td, th, blockquote, h1, h2, h3, h4, h5, h6, div, article, section, header, footer, summary, details, dt, dd, tr, figcaption";
+
 function textNodes(container: HTMLElement) {
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => node.parentElement?.closest(SKIP) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
   });
   const nodes: { node: Text; start: number }[] = [];
+  const blocks = new Map<Element, Element | null>();
+  const blockOf = (parent: Element | null) => {
+    if (!parent) return null;
+    if (!blocks.has(parent)) blocks.set(parent, parent.closest(BLOCK));
+    return blocks.get(parent)!;
+  };
   let text = "";
+  let block: Element | null | undefined;
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     const data = (node as Text).data;
     if (!data) continue;
+    // 分隔符不属于任何文本节点：查询里没有换行，命中跨不过它；偏移照样一一对得回去。
+    const own = blockOf(node.parentElement);
+    if (block !== undefined && own !== block) text += "\n";
+    block = own;
     nodes.push({ node: node as Text, start: text.length });
     text += data;
   }
