@@ -50,6 +50,7 @@ import { recoverFailedTurnStart } from "./turn-start-failure.js";
 import { freeReviewReminder } from "./free-workflow.js";
 import { NO_REMINDER, assembleTurnPrompt } from "./turn-prompt.js";
 import { withSkillInvocation } from "./skills.js";
+import { nativeSteerBinding } from "./native-steer-binding.js";
 import { prepareCliInvocation, readCliState } from "./task-cli-state.js";
 import { resolvePlanTurn } from "./plan-turn.js";
 import { prepareContinuationEntry } from "./task-continuation-entry.js";
@@ -608,12 +609,7 @@ export async function continueTask(
     await consumeSingleRun({
       taskId, sessId, agentType: agent, ex, cwd,
       handle, out, turnStart, cliSessionId, autoTitle: false, role: sessionRole, turn,
-      nativeSteer: {
-        prepare: (text) => withSkillInvocation({ agentType: agent, cwd, text, userId: runOwner }),
-        record: (text, at) => recordUserConversationTurn({
-          taskId, sessionId: sessId, role: sessionRole, agentType: agent, out, text, at,
-        }),
-      },
+      nativeSteer: nativeSteerBinding({ taskId, sessionId: sessId, role: sessionRole, agentType: agent, cwd, userId: runOwner, out, plan: planning }),
     });
   } catch (err) {
     // **spawn 之后才抛的,输入事实照样要交给调用方**(第 2 轮自由审查 F1):会话持久化、交接提示、

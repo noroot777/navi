@@ -1,6 +1,6 @@
 // 单飞任务的「引导会话」：消息默认 queued，只有用户点托盘末尾的唯一动作后，才受控
 // 结束当前普通执行回合，并把队首原话送进同一 CLI 会话。它不是团队常驻，也不能截断
-// 验证、审查或 CLI 原生命令旁路回合。
+// 验证、审查或 CLI 原生命令旁路回合；计划模式回合例外，但只走原生引导（task-steer-gate.ts）。
 //
 // 两条硬不变量：① 清旧状态前先预约 steering，数据库失败可撤销；② 原话真正落盘前消息
 // 始终 pending，续送失败先把假 running 拉回真实状态，再归还投递租约。
@@ -16,6 +16,7 @@ import {
   isRunning,
   isCanceling,
   isTurnClaimed,
+  planSteerTarget,
   reserveNativeSteerTask,
   reserveSteerTask,
   type NativeSteerReservation,
@@ -26,10 +27,8 @@ import { appendTaskTimeline, alertLine, receiptLine } from "./task-timeline.js";
 import { reconcileTurnBaseline } from "./turn-baseline.js";
 import { attachmentsPrompt, now } from "./util.js";
 import { bindUploadsToTask } from "./uploads.js";
-import { nativeCliCommand } from "./skills.js";
-import { parseCliCommand } from "@navi/shared/cli-commands";
 import { isUserAuthoredMessage } from "@navi/shared/scheduled-message-author";
-import { steerRefusal } from "./task-steer-gate.js";
+import { nativeMessageCanSteer, steerAttachments, steerRefusal } from "./task-steer-gate.js";
 import { DIRECTION_PROTOCOL } from "./run-prompts.js";
 import {
   clearPreviousDirectionState, discardLateDirectionState, restorePreviousCompletionState,
@@ -136,34 +135,6 @@ function deliverSteeredMessage(message: MessageRow): Promise<SteerQueuedMessageR
 }
 
 type NativeReservation = Extract<NativeSteerReservation, { kind: "native" }>;
-
-/**
- * 附件在 navi 里就是一段文本：`attachmentsPrompt` 把绝对路径清单拼进 prompt，agent 自己
- * 去 Read。原生引导送的也是同一条文本通道（claude 写一行 user 消息、codex 走 turn/steer），
- * CLI 一侧看不出「这句话带没带附件」，所以带附件不构成降级成 kill + resume 的理由。
- * 只有 attachments 列本身解析不出路径时才退回硬切 —— 那时原生送过去等于把附件丢了。
- */
-function steerAttachments(message: MessageRow): string[] | null {
-  try {
-    const parsed: unknown = JSON.parse(message.attachments);
-    if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) return null;
-    return parsed as string[];
-  } catch { return null; }
-}
-
-function nativeMessageCanSteer(message: MessageRow, agentType: Parameters<typeof nativeCliCommand>[0]): boolean {
-  // 余下几条是真的做不到，不是保守：换执行器/模型/思考强度都得换进程才生效；审查链的答复
-  // 不归这条会话；CLI 原生命令要由 CLI 在一个新回合里自己解析。
-  return steerAttachments(message) !== null
-    && !message.agent
-    && !message.executorId
-    && !message.model
-    && !message.reasoningEffort
-    && !message.sessionRole
-    && !nativeCliCommand(agentType, message.text)
-    // `/plan …` 要换权限模式或开新回合（plan-turn.ts），插进正在跑的回合里只会变成一句普通话。
-    && parseCliCommand(agentType, message.text)?.name !== "plan";
-}
 
 async function deliverNativeSteer(
   message: MessageRow,
@@ -298,6 +269,8 @@ export async function steerQueuedMessage(messageId: string, options: { nativeOnl
     return { ok: false, status: refused.status, error: refused.error };
   }
   if (!task) return { ok: false, status: 404, error: "任务不存在" };
+  // 判据放行时是计划回合，就只许原生引导（理由见 task-steer-gate.ts 末尾那条）。
+  const planTurn = !!planSteerTarget(task.id);
 
   const native = reserveNativeSteerTask(task.id);
   if (native.kind === "busy") {
@@ -309,6 +282,7 @@ export async function steerQueuedMessage(messageId: string, options: { nativeOnl
   }
 
   if (options.nativeOnly) return { ok: false, status: 409, error: "当前执行器不能实时接收，消息等待本轮结束后发送" };
+  if (planTurn) return { ok: false, status: 409, error: "计划模式这一轮刚好结束，消息会按排队顺序发送" };
 
   let resolveDelivery!: (result: SteerQueuedMessageResult) => void;
   const delivery = new Promise<SteerQueuedMessageResult>((resolve) => { resolveDelivery = resolve; });

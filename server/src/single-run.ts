@@ -90,6 +90,8 @@ export type SingleRunArgs = {
   nativeSteer?: {
     prepare?(text: string): string | Promise<string>;
     record(text: string, at: string): void;
+    /** 计划模式回合：允许原生引导（runs.ts `planSteerTarget`）。 */
+    plan?: boolean;
   };
 };
 
@@ -252,6 +254,7 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
         flushTraceText(Number.isFinite(boundary) ? new Date(boundary - 1).toISOString() : undefined);
       },
       record: a.nativeSteer.record,
+      plan: a.nativeSteer.plan,
     });
   }
 

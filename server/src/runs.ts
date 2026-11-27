@@ -51,6 +51,7 @@ type NativeSteerTarget = {
   prepare(text: string): string | Promise<string>;
   beforeDeliver?(at: string): void | Promise<void>;
   record(text: string, at: string): void;
+  plan: boolean;
 };
 const nativeSteerTargets = new Map<string, NativeSteerTarget>();
 const nativeSteering = new Map<string, symbol>();
@@ -170,6 +171,8 @@ export function bindNativeSteer(
     prepare?(text: string): string | Promise<string>;
     beforeDeliver?(at: string): void | Promise<void>;
     record(text: string, at: string): void;
+    /** 这一轮是计划模式回合（见 `planSteerTarget`）。 */
+    plan?: boolean;
   },
 ): void {
   if (!handle.steer || !handles.get(taskId)?.has(handle)) return;
@@ -179,7 +182,21 @@ export function bindNativeSteer(
     prepare: input.prepare ?? ((text) => text),
     beforeDeliver: input.beforeDeliver,
     record: input.record,
+    plan: !!input.plan,
   });
+}
+
+/**
+ * 此刻在跑的是不是一轮**能原生引导的计划回合**；是就交回它的执行器。
+ *
+ * 计划回合在库里和 `/compact` 一样记 `native_turn`、运行时身份是旁路，为的只是不按任务执行
+ * 结算；可它是同一条常驻会话里的普通对话，原话插进去仍在计划模式里（权限参数在进程上）。
+ * 所以「是不是计划回合」只认这一轮绑上来的引导目标，跟句柄同生同灭，不会漏到下一轮。
+ */
+export function planSteerTarget(taskId: string): { agentType: AgentType } | null {
+  const target = nativeSteerTargets.get(taskId);
+  if (!target?.plan || !handles.get(taskId)?.has(target.handle)) return null;
+  return { agentType: target.agentType };
 }
 
 export type NativeSteerReservation = {
