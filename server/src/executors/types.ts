@@ -74,6 +74,11 @@ export interface RunHandle {
   // 事件交出去之前）：旧方向说到一半的话可能还排在流里，按送达时刻切会把它们算到新方向头上。
   steer?(text: SteerText, beforeSend?: () => void | Promise<void>, onBoundary?: () => void): Promise<void>;
   /**
+   * 引导打断之前等手上的工具调用落地（ClaudeControlBridge.toolBoundary）。`generating`：一次调用的
+   * 入参还没生成完、等到点了 —— 这时打断会把它整个扔掉，调用方别引导。不会打断的执行器不给。
+   */
+  steerBoundary?(): Promise<"clear" | "generating">;
+  /**
    * 这个进程跑的是计划模式回合。只有接管旧进程时由执行器从起跑事实里认回来（目前 claude 的
    * commandLine 带着计划参数），起跑方自己知道、不靠它。
    */
@@ -178,6 +183,8 @@ export interface ResidentHandle {
   close(): void; // 优雅收尾:关 stdin,等它自己退出
   /** 此刻有没有回合在进行(claude 才答得上来,见 ClaudeControlBridge.turnActive)。 */
   turnActive?(): boolean;
+  /** 同 RunHandle.steerBoundary(claude 才有)。 */
+  toolBoundary?(): Promise<"clear" | "generating">;
   /**
    * 此刻是第几个回合:CLI 自己开一回合、我们送进一条消息,都 +1。回合结尾带着它(turnEnd.epoch),
    * 单飞消费到一个结尾时拿它对一下 —— 解析和消费之间隔着队列,消费时可能已经开了新回合,那个

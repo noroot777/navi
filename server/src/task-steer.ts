@@ -143,6 +143,15 @@ async function deliverNativeSteer(
   let previous: PreviousDirectionState | null = null;
   let delivered = false;
   try {
+    // claude 的引导是当场打断：先等手上那一步落地，别把一份生成到一半的长文件扔掉（qfix1xZNymhT
+    // 就是这样三次打掉同一个 Write）。等的时候还没领消息、没动方向，撤回和回合结尾照常。
+    const boundary = await reservation.boundary();
+    if (boundary === "generating") {
+      return { ok: false, status: 409, error: "智能体正在写一步较长的内容，现在打断会把这一步整个丢掉；消息继续排队，这一轮结束后自动发送，也可以稍后再点引导" };
+    }
+    if (boundary === "ended") {
+      return { ok: false, status: 409, error: "等当前这一步落地时这一轮已经结束，消息会按排队顺序发送" };
+    }
     const leased = await beginDelivery(message.id);
     if (!leased) {
       reservation.cancel();

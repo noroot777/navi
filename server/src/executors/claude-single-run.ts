@@ -172,6 +172,11 @@ export function singleRunFromResident(
     events,
     detached,
     failure: () => verdict,
+    async steerBoundary() {
+      // 空档里没有回合可打断，也就没有会被扔掉的那一步。
+      if (!accepting || resident.turnActive?.() === false) return "clear";
+      return resident.toolBoundary?.() ?? "clear";
+    },
     async steer(text: SteerText, beforeSend, onBoundary) {
       if (!accepting) throw new Error("Claude 当前回合已经结束");
       // 等后台工作的空档:没有回合可打断(打断一个空闲会话不会再吐 result,计数就错位了),

@@ -262,6 +262,11 @@ async function* claudeStreamEvents(
     }
     if (ev.type === "stream_event") {
       const se = ev.event;
+      // 工具调用的入参也是一路流出来的：引导要等它生成完再打断（ClaudeControlBridge.toolBoundary）。
+      if (se?.type === "message_start") resident?.noteMessageStart();
+      if (se?.type === "content_block_start" && se.content_block?.type === "tool_use" && typeof se.content_block.id === "string") {
+        resident?.noteToolStart(se.content_block.id);
+      }
       if (!replaying && se?.type === "content_block_delta" && se.delta?.type === "text_delta" && se.delta.text) {
         events.delta("text", se.delta.text);
       }
@@ -388,6 +393,7 @@ async function* claudeStreamEvents(
           if (!replaying) claudeMonitors.toolUse(block.name, block.input, block.id);
           background.toolUse(block.name, block.id, block.input);
           computerImages.call(block);
+          if (typeof block.id === "string") resident?.noteToolCall(block.id);
           // 交计划、提问由权限闸换成计划卡 / 答题卡，这一步本身不再画成一次（被拒的）工具调用。
           if (resident?.planGate && PLAN_HANDOFF_TOOLS.has(block.name)) continue;
           push(nativeWork.call(block.name, block.input, block.id)
@@ -401,6 +407,7 @@ async function* claudeStreamEvents(
       for (const block of ev.message.content) {
         if (block?.type !== "tool_result") continue;
         resident?.planGate?.noteToolResult(block);
+        if (typeof block.tool_use_id === "string") resident?.noteToolResult(block.tool_use_id);
         // 起手回执里那句 `expires in 20m` 是来源侧唯一说出**生效**期限的地方（入参那个
         // timeout_ms 只是请求值，claude 会自己钳）。见 claude-monitors.ts 的 toolResult。
         if (!replaying) claudeMonitors.toolResult(block.tool_use_id, block.content);
@@ -445,6 +452,7 @@ async function* claudeStreamEvents(
       turnSpoke = false;
       // 第几个回合结尾:等后台的起点和打断的认领都按它记,重启接管时认得出是哪一个。
       if (resident) resident.turns += 1;
+      resident?.clearTools();
       // 这一个结尾推出的事件,重放时留着(见 `ending`);下一个回合一开始就作废。
       ending = [];
       capturing = true;
