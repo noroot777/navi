@@ -15,7 +15,6 @@ import type { AgentEvent, AgentType, SessionRole, TurnOutcome } from "@navi/shar
 import { eq, sql } from "drizzle-orm";
 import { db } from "./db/index.js";
 import { tasks, sessions } from "./db/schema.js";
-import { directionSettled, directionSuperseded } from "./task-steer-direction-state.js";
 import { closeSessionTurns, recordTurnSpan } from "./session-turns.js";
 import { scanForTitle } from "./auto-title.js";
 import { applyAutoTitle } from "./auto-title-apply.js";
@@ -135,12 +134,9 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
   // 重启接回)都汇到这儿,由库来答就不会漏标其中一条。验证中途提问、答复回来续跑的那一
   // 回合库里仍挂着轮次号,于是它照样归这一轮验证——跟 orchestrator 的 sideTurn 判据同源。
   const taskRow = (await db.select({ nativeTurn: tasks.nativeTurn, verifyRound: tasks.verifyRound, goalTurn: tasks.goalTurn,
-    activeTurnToken: tasks.activeTurnToken, activeDirectionToken: tasks.activeDirectionToken })
+    activeTurnToken: tasks.activeTurnToken })
     .from(tasks).where(eq(tasks.id, taskId))).at(0);
   const nativeTurn = !!taskRow?.nativeTurn;
-  // 这条流**此刻读到的输出**属于哪个方向。原生引导会在回合中途换方向，换在流里的边界上
-  // （`RunHandle.steer` 的 onBoundary），不是送达那一刻：那时旧方向说到一半的话可能还排在流里。
-  let direction = taskRow?.activeDirectionToken ?? null;
   let goalStartPending = !!taskRow?.goalTurn;
   const verifyRound = taskRow?.verifyRound ?? null;
   const executionEventId = role === "single" && !nativeTurn
@@ -258,7 +254,6 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
         flushTraceText(Number.isFinite(boundary) ? new Date(boundary - 1).toISOString() : undefined);
       },
       record: a.nativeSteer.record,
-      steered: (token) => { direction = token; },
       plan: a.nativeSteer.plan,
     });
   }
@@ -383,23 +378,18 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
     }
     for await (const event of a.handle.events) {
       if (event.kind === "userInput") {
-        const saveQuestion = async () => !!taskRow && await setTaskQuestion({
+        // 只绑回合、不绑方向：原生引导在回合中途换了方向身份，这条流后面问的多半就是新方向的；
+        // 拿起跑时的方向去比，引导之后的提问一律存不进去，codex 那边这一问还顺手打断了回合，
+        // 整轮报错收场（qfix1xZNymhT）。按流里的位置切分新旧方向要跟执行器的输出逐条对齐、还得
+        // 扛重启，用户选了不分：引导前问到一半、晚读到的那一问也可能挂出来，答或不答都行。
+        if (!taskRow || !await setTaskQuestion({
           taskId,
           question: event.questions.length === 1 ? event.questions[0]!.question : "请确认以下问题",
           options: event.questions.length === 1 ? event.questions[0]!.options : undefined,
           items: event.questions.length > 1 ? event.questions : undefined,
-          currentTurn: { token: taskRow.activeTurnToken, directionToken: direction },
-        });
-        if (await saveQuestion()) continue;
-        // 存不进去多半是引导正在换方向（库里已经是新的）。等它落定再判：引导成了，这一问是旧方向
-        // 迟到的，跟被撤下的那些旧状态一样作废，不是这一轮出了故障；没成，旧方向还回来，照常挂上。
-        await directionSettled(taskId);
-        if (await directionSuperseded(taskId, direction)) {
-          console.warn(`[navi] 任务 ${taskId} 的旧方向提问在引导之后才读到，已作废`);
-          continue;
-        }
-        if (await saveQuestion()) continue;
-        throw new Error("执行器的澄清问题未能保存，请重试当前回合");
+          currentTurn: { token: taskRow.activeTurnToken },
+        })) throw new Error("执行器的澄清问题未能保存，请重试当前回合");
+        continue;
       }
       // 「此刻还在等上游」只有这里数得准:正文要到下一条非正文事件才冲进 trace,落盘产物
       // 反推不出「这条提示之后有没有新东西来」(见 session-waiting.ts)。

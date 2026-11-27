@@ -70,9 +70,7 @@ export interface RunHandle {
   kill(): void;
   // 单飞当前回合的原生引导通道。存在时调用方把新 user 消息送进同一个活动回合，
   // 不结束任务、不释放单飞锁；回合自然结束后这根通道随 RunHandle 一起关闭。
-  // `onBoundary` = 事件流读到「此后的输出都归这条新消息」那一处时同步调一次（在那之后的第一条
-  // 事件交出去之前）：旧方向说到一半的话可能还排在流里，按送达时刻切会把它们算到新方向头上。
-  steer?(text: SteerText, beforeSend?: () => void | Promise<void>, onBoundary?: () => void): Promise<void>;
+  steer?(text: SteerText, beforeSend?: () => void | Promise<void>): Promise<void>;
   /**
    * 这个进程跑的是计划模式回合。只有接管旧进程时由执行器从起跑事实里认回来（目前 claude 的
    * commandLine 带着计划参数），起跑方自己知道、不靠它。
@@ -178,8 +176,6 @@ export interface ResidentHandle {
   close(): void; // 优雅收尾:关 stdin,等它自己退出
   /** 此刻有没有回合在进行(claude 才答得上来,见 ClaudeControlBridge.turnActive)。 */
   turnActive?(): boolean;
-  /** 在事件流此刻的位置插一个回调,下游取完它前面的每一条才调(EventQueue.mark)。 */
-  mark?(fn: () => void): void;
   /**
    * 此刻是第几个回合:CLI 自己开一回合、我们送进一条消息,都 +1。回合结尾带着它(turnEnd.epoch),
    * 单飞消费到一个结尾时拿它对一下 —— 解析和消费之间隔着队列,消费时可能已经开了新回合,那个

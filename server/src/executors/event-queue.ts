@@ -58,12 +58,6 @@ export type EventQueue = {
   push(event: AgentEvent): void;
   /** 攒着的增量立刻收口(进程退出、回合收尾时)。 */
   flush(): void;
-  /**
-   * 在流里**此刻**的位置插一个回调:下游把排在它前面的每一条都取走之后才调。原生引导的方向边界
-   * 靠它(claude-single-run.ts 空档直接送、codex-app-server.ts turn/steer):解析层读到哪儿不算数,
-   * 旧方向说到一半的话可能还排在队列里没被消费,当场切方向会把它们算到新方向头上。
-   */
-  mark(fn: () => void): void;
   /** 已经收过尾了吗 —— 终止路径的重入判据,也是 forceFinishOnExit 要问的那一问。 */
   readonly closed: boolean;
   /** 这条流到头了:`drain()` 取完队列就结束。 */
@@ -136,12 +130,6 @@ export function eventQueue(options: EventQueueOptions = {}): EventQueue {
       enqueue(event);
     },
     flush,
-    mark(fn) {
-      flush();
-      for (const event of activity?.drain() ?? []) queue.push(...(images ? images.release(event) : [event]));
-      queue.push(async () => { fn(); });
-      wakeUp();
-    },
     get closed() {
       return closed;
     },

@@ -31,7 +31,7 @@ import { isUserAuthoredMessage } from "@navi/shared/scheduled-message-author";
 import { nativeMessageCanSteer, steerAttachments, steerRefusal } from "./task-steer-gate.js";
 import { DIRECTION_PROTOCOL } from "./run-prompts.js";
 import {
-  clearPreviousDirectionState, discardLateDirectionState, holdDirectionChange, restorePreviousCompletionState,
+  clearPreviousDirectionState, discardLateDirectionState, restorePreviousCompletionState,
   restorePreviousDirectionState, type PreviousDirectionState,
 } from "./task-steer-direction-state.js";
 
@@ -142,7 +142,6 @@ async function deliverNativeSteer(
 ): Promise<SteerQueuedMessageResult> {
   let previous: PreviousDirectionState | null = null;
   let delivered = false;
-  let settleDirection: (() => void) | null = null;
   try {
     const leased = await beginDelivery(message.id);
     if (!leased) {
@@ -158,12 +157,9 @@ async function deliverNativeSteer(
     // 落盘/展示的那一份和送进 CLI 的那一份必须是同一段文本（差别只有方向身份协议），
     // 否则会话里看到的原话跟 agent 实际收到的对不上。
     const turnText = message.text + attachmentsPrompt(attachments);
-    // 从清场到送达/回滚落定之间读到的旧方向提问，消费方等这里落定再判归谁（directionSettled）。
-    settleDirection = holdDirectionChange(message.taskId);
     previous = await clearPreviousDirectionState(message.taskId, false);
     await reservation.deliver(turnText, now(), {
       promptText: turnText + DIRECTION_PROTOCOL(previous.clearedDirectionToken),
-      directionToken: previous.clearedDirectionToken,
       beforeSend: reservation.agentType === "claude"
         ? () => discardLateDirectionState(
             message.taskId,
@@ -203,7 +199,6 @@ async function deliverNativeSteer(
     };
   } finally {
     reservation.cancel();
-    settleDirection?.();
   }
 }
 

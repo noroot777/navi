@@ -116,7 +116,6 @@ async function* claudeStreamEvents(
     else if (capturing) ending?.push(event);
   };
   const flushText = () => events.flush();
-  if (resident) resident.mark = (fn) => events.mark(fn);
   const drafting = claudeDrafting();
 
   // 上下文水位。**只有 `assistant` 事件里的 `message.usage` 是单次 API 调用的快照**

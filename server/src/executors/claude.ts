@@ -407,7 +407,6 @@ export class ClaudeExecutor implements AgentExecutor {
         return true;
       },
       turnActive: () => resident.turnActive,
-      mark: (fn) => { if (resident.mark) resident.mark(fn); else fn(); },
       epoch: () => resident.epoch,
       backgroundPending: () => resident.backgroundPending(),
       interrupt: () => {

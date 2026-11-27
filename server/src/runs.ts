@@ -30,7 +30,7 @@ export { continueWhenIdle } from "./turn-idle-delivery.js";
 
 export interface Killable {
   kill(): void;
-  steer?(text: SteerText, beforeSend?: () => void | Promise<void>, onBoundary?: () => void): Promise<void>;
+  steer?(text: SteerText, beforeSend?: () => void | Promise<void>): Promise<void>;
   command?(command: CliCommand): Promise<string>;
   goal?(): CliGoal | null;
   /**
@@ -52,7 +52,6 @@ type NativeSteerTarget = {
   prepare(text: string): string | Promise<string>;
   beforeDeliver?(at: string): void | Promise<void>;
   record(text: string, at: string): void;
-  steered?(directionToken: string): void;
   plan: boolean;
 };
 const nativeSteerTargets = new Map<string, NativeSteerTarget>();
@@ -173,8 +172,6 @@ export function bindNativeSteer(
     prepare?(text: string): string | Promise<string>;
     beforeDeliver?(at: string): void | Promise<void>;
     record(text: string, at: string): void;
-    /** 事件流越过这次引导的边界（`Killable.steer` 的 onBoundary）：此后的输出归这个新方向。 */
-    steered?(directionToken: string): void;
     /** 这一轮是计划模式回合（见 `planSteerTarget`）。 */
     plan?: boolean;
   },
@@ -186,7 +183,6 @@ export function bindNativeSteer(
     prepare: input.prepare ?? ((text) => text),
     beforeDeliver: input.beforeDeliver,
     record: input.record,
-    steered: input.steered,
     plan: !!input.plan,
   });
 }
@@ -221,8 +217,6 @@ export type NativeSteerReservation = {
   deliver(text: string, at: string, opts?: {
     beforeSend?: () => void | Promise<void>;
     promptText?: string;
-    /** 这条消息开的新方向：事件流越过引导边界时交给消费方（`bindNativeSteer` 的 steered）。 */
-    directionToken?: string;
   }): Promise<void>;
   cancel(): void;
 } | { kind: "busy" } | { kind: "unsupported" };
@@ -255,9 +249,7 @@ export function reserveNativeSteerTask(taskId: string): NativeSteerReservation {
         }
         await target.beforeDeliver?.(at);
         // prepare **惰性传进去**:执行器保证它在 ACK 与发送前清理都跑完之后、写 stdin 之前才调用。
-        const direction = opts?.directionToken;
-        await target.handle.steer(() => target.prepare(opts?.promptText ?? text), opts?.beforeSend,
-          direction === undefined ? undefined : () => target.steered?.(direction));
+        await target.handle.steer(() => target.prepare(opts?.promptText ?? text), opts?.beforeSend);
         // provider 已确认收到以后，消息就已经是真实投递；实时广播失败不能把它退回队列
         // 再投一次，否则同一句会进入模型两遍。
         try { target.record(text, at); } catch (error) {

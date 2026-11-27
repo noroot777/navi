@@ -635,7 +635,7 @@ export function openCodexAppServer(opts: CodexAppServerOpts): RunHandle {
     events,
     detached: detachedInfo(child),
     cleanup: () => cleanupAfterRun(child),
-    steer(text: SteerText, _beforeSend, onBoundary) {
+    steer(text: SteerText) {
       const operation = steerTail.then(async () => {
         await ready;
         if (finished || settling || stopRequested) throw new Error("Codex 当前回合已经结束");
@@ -654,9 +654,6 @@ export function openCodexAppServer(opts: CodexAppServerOpts): RunHandle {
           input: textInput(body),
         });
         if (turnStartVersion === startVersion) turnId = result.turnId ?? turnId;
-        // turn/steer 不打断：确认收下之后这一轮接着产出的就是带着新输入的那一段。确认之前已经推进
-        // outbox、还没被消费的那些仍是旧方向的话，边界插在 outbox 此刻的位置。
-        if (onBoundary) outbox.mark(onBoundary);
       });
       steerTail = operation.catch(() => undefined);
       return operation;

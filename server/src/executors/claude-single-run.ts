@@ -57,9 +57,6 @@ export function singleRunFromResident(
   wrapupMs = WRAPUP_START_MS,
 ): RunHandle {
   let intermediateEnds = 0;
-  // 每次打断式插话各占一格，跟 intermediateEnds 一一对应：读到它打断出来的那个结尾，就是这条
-  // 插话的边界（之前的输出归旧方向，之后的归它），在交出下一条事件之前调掉。
-  const boundaries: Array<(() => void) | undefined> = [];
   let accepting = true;
   // 在等什么:`background` = 后台还有没跑完的;`wrapup` = 后台都跑完了,等 CLI 开回合收尾。
   // `epoch` 是开始等的那个结尾的回合身份,之后开了新回合这份等待就作废。
@@ -116,7 +113,6 @@ export function singleRunFromResident(
           // (计数是 0),只能靠这个标记认。
           if (event.interrupted) {
             intermediateEnds = Math.max(0, intermediateEnds - 1);
-            boundaries.shift()?.();
             continue;
           }
           // 消费到它时已经开了新回合(CLI 自己开的,或者插话送进去了):这个结尾过期了,既不收台
@@ -124,7 +120,6 @@ export function singleRunFromResident(
           if (stale(event.epoch)) continue;
           if (intermediateEnds > 0) {
             intermediateEnds -= 1;
-            boundaries.shift()?.();
             continue;
           }
           clearHold();
@@ -172,7 +167,7 @@ export function singleRunFromResident(
     events,
     detached,
     failure: () => verdict,
-    async steer(text: SteerText, beforeSend, onBoundary) {
+    async steer(text: SteerText, beforeSend) {
       if (!accepting) throw new Error("Claude 当前回合已经结束");
       // 等后台工作的空档:没有回合可打断(打断一个空闲会话不会再吐 result,计数就错位了),
       // 消息直接送进去自己开一回合;那一回合的结尾照常判要不要接着等。
@@ -184,19 +179,12 @@ export function singleRunFromResident(
         if (resident.turnActive?.() === false) {
           if (!resident.send(body)) throw new Error("Claude 没收下这条消息（stdin 已关闭，或记不下发送记录）");
           clearHold();
-          // 没有回合可打断，旧方向却可能还有话排在队列里没被消费（解析层空闲不等于下游读完了）：
-          // 边界插在队列此刻的位置，前面那些读完才切。
-          if (onBoundary) {
-            if (resident.mark) resident.mark(onBoundary);
-            else onBoundary();
-          }
           return;
         }
         text = body;
         beforeSend = undefined;
       }
       intermediateEnds += 1;
-      boundaries.push(onBoundary);
       let interrupted = false;
       try {
         if (resident.steer) await resident.steer(text, () => { interrupted = true; }, beforeSend);
@@ -206,10 +194,8 @@ export function singleRunFromResident(
           resident.send(await resolveSteerText(text));
         }
       } catch (error) {
-        if (!interrupted) {
-          intermediateEnds = Math.max(0, intermediateEnds - 1);
-          boundaries.pop();
-        } else {
+        if (!interrupted) intermediateEnds = Math.max(0, intermediateEnds - 1);
+        else {
           accepting = false;
           stopped = true; // 为了带着插话重开而杀,不是后台工作丢了
           clearHold();

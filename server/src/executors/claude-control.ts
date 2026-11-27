@@ -42,8 +42,6 @@ export class ClaudeControlBridge {
    * 解析层接上之前一律按「不知道」答。
    */
   backgroundPending: () => { agent: number; workflow: number; unknown?: true } = () => ({ agent: 0, workflow: 0, unknown: true });
-  /** 在事件流此刻的位置插一个回调(EventQueue.mark),解析层接上之后才有。 */
-  mark?: (fn: () => void) => void;
   /**
    * navi 发出去的打断各认领哪一个回合结尾。**身份在写 stdin 之前就落盘**:打断出来的那条
    * `result` 跟自然结束的长得一样(都可能是 error_during_execution),回执(control_response)和它

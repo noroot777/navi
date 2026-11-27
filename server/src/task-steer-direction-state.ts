@@ -433,34 +433,3 @@ export async function restorePreviousCompletionState(
     .returning({ id: tasks.id });
   if (restored.length && previous.memoryConfirmed) confirmDone(taskId, previous.clearedDirectionEpoch);
 }
-
-// 原生引导换方向的那一段：从清场（库里换成新方向）到送达或回滚为止。这段里读到的旧方向提问
-// 存不进去（库里已经是新方向），但它是不是真作废了要看引导成没成 —— 没成，旧方向还回来，那一问
-// 得照常挂上；当场作废就再也找不回来了（清场的快照比它早）。
-const changing = new Map<string, Promise<void>>();
-
-/** 开始换方向；返回的函数在送达或回滚都办完之后调。 */
-export function holdDirectionChange(taskId: string): () => void {
-  let settle!: () => void;
-  const pending = new Promise<void>((resolve) => { settle = resolve; });
-  changing.set(taskId, pending);
-  return () => {
-    if (changing.get(taskId) === pending) changing.delete(taskId);
-    settle();
-  };
-}
-
-/** 等这个任务正在进行的换方向落定（没有就立刻返回）。 */
-export async function directionSettled(taskId: string): Promise<void> {
-  await changing.get(taskId);
-}
-
-/**
- * 运行中的这一轮已经被引导到了别的方向上，`direction` 是被换下来的那一个。消费方据此认出「这是
- * 旧方向迟到的东西」而作废它，不当成故障；任务不在跑了、或者库里压根没有方向身份，都不算。
- */
-export async function directionSuperseded(taskId: string, direction: string | null): Promise<boolean> {
-  const row = (await db.select({ status: tasks.status, activeDirectionToken: tasks.activeDirectionToken })
-    .from(tasks).where(eq(tasks.id, taskId))).at(0);
-  return row?.status === "running" && row.activeDirectionToken !== null && row.activeDirectionToken !== direction;
-}
