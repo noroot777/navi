@@ -55,7 +55,7 @@ app 注册了 `navi://`（`build.sh` 写进 Info.plist）。`navi://open?project
 
 ## 系统通知
 
-任务跑完等验收、验收落章、验证或验收前置命令没过、跑挂了，或者停下来等人拍板（提问、驳回待裁定、讨论闸口）时，服务端往事件流上推一条 `task.notify`（`server/src/system-notify.ts`，判据与飞书推送同一份），页面经 `naviNotify` 交给原生弹成 macOS 通知（`SystemNotifications.swift`）；点一下就像点 `navi://` 链接那样打开那个任务。WKWebView 里没有网页通知，所以要这一道。授权等头一条要弹时才问；正对着看的那个任务不弹；开关在「设置 › 默认规则 › 通知」，按设备记。关了窗口页面还在，照样弹；退出 app 就没人弹了。
+任务跑完等验收、验收落章、验证或验收前置命令没过、跑挂了，或者停下来等人拍板（提问、驳回待裁定、讨论闸口）时，服务端往事件流上推一条 `task.notify`（`server/src/system-notify.ts`，判据与飞书推送同一份），页面经 `naviNotify` 交给原生弹成 macOS 通知（`SystemNotifications.swift`）；点一下就像点 `navi://` 链接那样打开那个任务。有设备申请连进这台 Navi 时也弹一条（事件流上的 `pair.requests`），点了把窗口拉到前面、在顶条上允许或拒绝；有 Navi 页面在前台时不弹。WKWebView 里没有网页通知，所以要这一道。授权等头一条要弹时才问；正对着看的那个任务不弹；开关在「设置 › 默认规则 › 通知」，按设备记。关了窗口页面还在，照样弹；退出 app 就没人弹了。
 
 ## 自更新
 

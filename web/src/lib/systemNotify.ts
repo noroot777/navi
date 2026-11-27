@@ -1,5 +1,8 @@
-// 系统通知的客户端那一半。什么时候弹、弹什么字由服务端定（server/src/system-notify.ts，SSE 上的 task.notify），
+// 系统通知的客户端那一半。任务那一类什么时候弹、弹什么字由服务端定（server/src/system-notify.ts，SSE 上的 task.notify），
 // 这里只管弹出来、点了回到那个任务。
+//
+// 另一类是新设备申请连进这台 Navi（SSE 上 pair.requests 带着 opened）：顶条（auth/DevicePairingAlert.tsx）只在有人看着
+// 页面时才看得见，人不在跟前时那台设备就一直干等到申请过期。字照着顶条说，点了把窗口拉到前面、允许 / 拒绝在顶条上点。
 //
 // 弹到哪儿：
 //   · mac app、Windows app：交给壳（desktop/macos/Sources/SystemNotifications.swift、desktop/windows/shell/src/notify.rs）。
@@ -7,13 +10,13 @@
 //   · 浏览器：网页通知（Notification），要这台设备上自己打开过、浏览器也给了权限。只在 https 或本机地址下有。
 // 开关记在这台设备上（权限本来就是按设备给的），设置页「通知」那一块改它。
 //
-// 正对着看的那个任务不弹：这台设备上哪个页面在前台挂着它的会话视图（lib/taskViewing.ts，几个页面互相报），弹了只是
+// 正对着看的那个任务不弹（设备申请则是有哪个页面在前台就不弹，顶条就摆在那儿）：这台设备上哪个页面在前台挂着它的会话视图（lib/taskViewing.ts，几个页面互相报），弹了只是
 // 噪音。几个页面各收到一份时靠 key 合成一条（浏览器和 Windows 按 tag、mac 按通知 id 替换）。
 import type { ServerEvent } from "@navi/shared";
 import { subscribeEvents } from "./events.ts";
 import { safeStorage } from "./safeStorage.ts";
 import { batchNotices, WINDOW_MS, type Shown } from "./noticeBatch.ts";
-import { startTaskViewing, viewedSomewhere } from "./taskViewing.ts";
+import { frontSomewhere, startTaskViewing, viewedSomewhere } from "./taskViewing.ts";
 
 type Notice = Extract<ServerEvent, { type: "task.notify" }>;
 interface NativeMessage { title: string; subtitle: string; body: string; key: string; project: string | null; task: string | null }
@@ -121,6 +124,19 @@ export function startSystemNotify(): () => void {
     }
   };
   const unsubscribe = subscribeEvents((event) => {
+    if (event.type === "pair.requests") {
+      const request = event.opened;
+      if (!request || !systemNotifyEnabled() || frontSomewhere()) return;
+      try {
+        show({
+          key: `pair:${request.id}`, title: `「${request.name}」想连接这台 Navi`, subtitle: "",
+          body: `它屏幕上的配对码应为 ${request.code} · 来自 ${request.address}`, projectId: null, taskId: null,
+        });
+      } catch {
+        // 同下：系统那边不收就不弹，顶条照样摆着
+      }
+      return;
+    }
     if (event.type !== "task.notify" || !systemNotifyEnabled() || viewedSomewhere(event.taskId)) return;
     pending.push(event);
     timer ??= window.setTimeout(flush, WINDOW_MS);

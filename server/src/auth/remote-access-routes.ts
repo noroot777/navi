@@ -7,6 +7,7 @@
 //   · `/remote-access*` —— **机主那一侧**,在闸内。
 import type { Context, Hono } from "hono";
 import type { PairClaim, PairCode, PairRequestView, PairTicket, RemoteAccessView, RemoteDeviceView } from "@navi/shared";
+import { bus } from "../bus.js";
 import { actorOf } from "./context.js";
 import { sessionCookieOf } from "./middleware.js";
 import { readOptions } from "../im/meta.js";
@@ -17,7 +18,8 @@ import {
   requestOrigin, rotateRemoteAccessKey,
 } from "./remote-access.js";
 import {
-  claimPairRequest, decidePairRequest, deviceName, mintPairCode, openPairRequest, pendingPairRequests, redeemPairCode,
+  claimPairRequest, decidePairRequest, deviceName, mintPairCode, onPairEvent, openPairRequest, pendingPairRequests,
+  redeemPairCode,
 } from "./remote-pairing.js";
 
 const MULTI_REFUSAL = "多人模式下每个人用自己的 key 登录，没有设备配对";
@@ -38,6 +40,10 @@ function viewFor(c: Context): RemoteAccessView {
   return { local, ...(local ? { key: ensureRemoteAccessKey() } : {}), devices, requests: pendingPairRequests() };
 }
 
+// 申请的动静上事件流：机主开着的页面据此弹系统通知、顶条当场重读（shared ServerEvent "pair.requests"）。
+// 进程里只接一份：路由可能挂不止一次（测试里一个进程起几份 app），申请名单本来就只有一份。
+let pairEventsOnBus = false;
+
 export function mountRemoteAccessRoutes(api: Hono, issueSessionCookie: (c: Context, token: string) => void): void {
   // 本机自用模式下这一整套都不存在:答一句明白话,别让请求掉进「接口不存在、多半是服务端
   // 比前端旧」那条兜底,把人引去查一个不存在的版本问题。
@@ -45,6 +51,10 @@ export function mountRemoteAccessRoutes(api: Hono, issueSessionCookie: (c: Conte
     const off = (c: Context) => c.json({ error: LOCAL_ONLY_REFUSAL }, 403);
     for (const path of ["/auth/pair", "/auth/pair/*", "/remote-access", "/remote-access/*"]) api.all(path, off);
     return;
+  }
+  if (!pairEventsOnBus) {
+    pairEventsOnBus = true;
+    onPairEvent((event) => bus.publish({ type: "pair.requests", opened: event.kind === "opened" ? event.request : null }));
   }
   // ── 设备那一侧 ─────────────────────────────────────────────────────────────
   // 这三条只对「还没进来」的请求有意义。已经进得来的(本机、已配对)来打一律拒:名册里

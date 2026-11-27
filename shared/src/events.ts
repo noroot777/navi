@@ -12,6 +12,7 @@ import type { ContextUsage, TokenUsage, UsageAccountingMark } from "./usage.ts";
 import type { NativeWorkEvent } from "./native-work.ts";
 import type { MonitorWakeData } from "./monitor-wake.ts";
 import type { TimelineNotice } from "./timeline-notice.ts";
+import type { PairRequestView } from "./multiuser.ts";
 import type { SystemResume } from "./system-resume.ts";
 
 // ── HITL gates (§7) ──────────────────────────────────────────────────────────
@@ -208,6 +209,9 @@ export type ServerEvent =
       subtitle: string;
       body: string;
     }
+  // 自用模式：等机主点头的设备申请变了（server/src/auth/remote-pairing.ts）。opened = 刚递上来的那一张，客户端据此弹系统通知；
+  // null = 有一张被处理掉了。只推给机主本人（event-filter）。顶条和设置页按它当场重读名单，不等下一轮轮询。
+  | { type: "pair.requests"; opened: PairRequestView | null }
   | { type: "task.title"; taskId: string; title: string; updatedAt: string }
   // 提问态变化（§Team）：agent 调 ask_question 提问、或答复把它清空。task.status
   // 只带状态字段，question 不跟着走 —— 少了这条事件，卡片要等下次全量拉取才出现/

@@ -16,7 +16,7 @@ export function SystemNotifyCard({ notify }: { notify: (message: string) => void
     ? "这个地址下浏览器不给弹通知，要用 https 或本机地址打开。"
     : blocked
       ? "浏览器拒绝了这个网站的通知，要去浏览器的网站设置里放开。"
-      : "任务跑完、验收落定、没通过、中断，或停下来等你拍板时弹一条；正开着看的那个任务不弹。";
+      : "任务跑完、验收落定、没通过、中断，或停下来等你拍板时弹一条；有设备申请连接时也弹。正开着看的那个任务不弹。";
 
   const toggle = async (next: boolean) => {
     setBusy(true);

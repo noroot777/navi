@@ -15,7 +15,7 @@
 //   ④ 访问密钥:Bearer 与网页登录(cookie)两条路都进得来;密钥只在本机读得到、换得了。
 //   ⑤ 浏览器自动带上的身份(本机直连、cookie)写操作要过跨站判定;Bearer 不用。
 //   ⑥ 配对:申请要机主点了「允许」才领得到凭证(应答丢了凭同一个 secret 再领还是那一份,
-//      设备退出后不再发);一次性码只兑一次;放不放谁、名册里有谁匿名一概碰不到;移除一台
+//      设备退出后不再发);申请递上来、被处理掉都上事件流(机主那边弹系统通知),只推给机主本人;一次性码只兑一次;放不放谁、名册里有谁匿名一概碰不到;移除一台
 //      设备,它的凭证和开着的长连接一起断。
 //   ⑦ 换密钥:旧密钥和凭它进来的设备当场失效,机主亲手放进来的不受牵连。
 //   ⑧ 免登录名单里「路由自己验凭证」的那条(/restart-impact):自用模式的匿名同样要验。
@@ -42,6 +42,9 @@ const { authGate } = await import("../src/auth/middleware.js");
 const { mountAuthRoutes } = await import("../src/auth/routes.js");
 const { isLocalDirectOrigin, isLoopbackHost } = await import("../src/auth/remote-access.js");
 const pairing = await import("../src/auth/remote-pairing.js");
+const { bus } = await import("../src/bus.js");
+const { makeEventFilter } = await import("../src/auth/event-filter.js");
+const { SINGLE_ACTOR, ANONYMOUS_ACTOR } = await import("../src/auth/context.js");
 const { patchOptions: patchImOptions } = await import("../src/im/meta.js");
 
 await ensureSchema();
@@ -271,6 +274,8 @@ try {
     (await call("/api/remote-access", headers ? { ...outsider, headers } : {})).body.devices as Device[];
 
   // 申请 → 允许 → 领凭证。
+  const pairEvents: Extract<import("@navi/shared").ServerEvent, { type: "pair.requests" }>[] = [];
+  const offPairEvents = bus.subscribe((ev) => { if (ev.type === "pair.requests") pairEvents.push(ev); });
   const ticket = await call("/api/auth/pair", { ...phone, method: "POST", body: {} });
   assert.equal(ticket.status, 200, ticket.text);
   assert.match(String(ticket.body.code), /^\d{4}$/, "两边核对用的四位数");
@@ -279,6 +284,19 @@ try {
     asked.map((r) => [r.id, r.name, r.code]), [[ticket.body.id, "iPhone · Safari", ticket.body.code]],
     "机主看到的是认得出的名字和同一个数",
   );
+  // 递上来那一下就上事件流:机主不在页面跟前也能弹系统通知,不等页面下一轮轮询。
+  assert.deepEqual(pairEvents.map((ev) => ev.opened?.id ?? null), [ticket.body.id], "递申请推一条带着这张申请的事件");
+  assert.deepEqual(pairEvents[0]!.opened, asked[0], "事件里的就是机主名单里的那张");
+  {
+    const owner = makeEventFilter(SINGLE_ACTOR);
+    const agent = makeEventFilter({ ...SINGLE_ACTOR, kind: "agent", taskId: "t-agent", name: "agent" });
+    const anonymous = makeEventFilter(ANONYMOUS_ACTOR);
+    await Promise.all([owner.refresh(), agent.refresh(), anonymous.refresh()]);
+    assert.equal(owner.allow(pairEvents[0]!), true, "机主收得到");
+    assert.equal(agent.allow(pairEvents[0]!), false, "放谁进来归人拍板:回合凭证的事件流里没有它");
+    assert.equal(anonymous.allow(pairEvents[0]!), false);
+    for (const filter of [owner, agent, anonymous]) filter.stop();
+  }
   const ticketOf = { id: ticket.body.id, secret: ticket.body.secret };
   const approvePath = `/api/remote-access/requests/${String(ticket.body.id)}/approve`;
   // 申请的人自己批不了,也看不到别人的申请和名册。
@@ -292,6 +310,8 @@ try {
 
   assert.equal((await call(approvePath, { method: "POST" })).status, 200);
   assert.equal((await call(approvePath, { method: "POST" })).status, 404, "一张申请只决定一次");
+  assert.deepEqual(pairEvents.map((ev) => ev.opened?.id ?? null), [ticket.body.id, null], "处理掉也报一声(各处顶条当场收起),决定不了的不报");
+  offPairEvents();
   const thief = await call("/api/auth/pair/claim", { ...phone, method: "POST", body: { ...ticketOf, secret: "guess" } });
   assert.equal(thief.body.status, "gone", "只知道申请号、没有 secret 的领不走别人的批准");
   assert.equal(thief.cookie, null);
