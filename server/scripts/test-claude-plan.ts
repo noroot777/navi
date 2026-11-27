@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AgentEvent } from "@navi/shared";
-import { cliCommandCatalog, isPlanToggle, parseCliCommand, validateCliCommand } from "@navi/shared/cli-commands";
+import { cliCommandCatalog, isPlanToggle, parseCliCommand, PLAN_IMPLEMENT_LABEL, validateCliCommand } from "@navi/shared/cli-commands";
 import { IS_WINDOWS } from "../src/platform.js";
 import { releaseTmpDb } from "./tmp-db.js";
 
@@ -42,7 +42,9 @@ try {
   assert.equal(inputStartsExecution("claude", "/plan implement plan:toolu_1"), true);
   const slash = (text: string) => parseCliCommand("claude", text);
   assert.deepEqual(planTurnInput("claude", slash("/plan 怎么拆"), "/plan 怎么拆"), { question: true, text: "怎么拆" });
-  assert.deepEqual(planTurnInput("claude", slash("/plan implement plan:x"), "/plan implement plan:x"), { question: false, text: PLAN_IMPLEMENT_TEXT });
+  assert.deepEqual(planTurnInput("claude", slash("/plan implement plan:x"), "/plan implement plan:x"), { question: false, text: PLAN_IMPLEMENT_TEXT, shown: PLAN_IMPLEMENT_LABEL });
+  assert.deepEqual(planTurnInput("codex", parseCliCommand("codex", "/plan implement"), "/plan implement"), { question: false, text: "/plan implement", shown: PLAN_IMPLEMENT_LABEL },
+    "两种执行器的会话气泡里都只记用户点的那一下");
   assert.deepEqual(planTurnInput("claude", slash("/plan off"), "/plan off"), { question: false, text: "/plan off" });
   assert.deepEqual(planTurnInput("claude", slash("/plan"), "/plan"), { question: false, text: "/plan" }, "裸 /plan 是开关，不是带问题的计划回合");
   assert.equal(isPlanToggle("claude", slash("/plan")), true);
@@ -352,8 +354,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   assert.equal(implement.question, false);
   assert.equal(implement.text, planImplementText("# 假计划\n\n先读后改"));
   assert.doesNotMatch(implement.text, /偷偷改/);
+  assert.equal(implement.shown, PLAN_IMPLEMENT_LABEL, "卡上原文只交给模型，会话里记「实施此计划」");
   await assert.rejects(resolvePlanTurn("task", "claude", slash("/plan implement plan:older"), "/plan implement plan:older", null, null), /新版本/, "取原文就是实施预检");
-  assert.deepEqual(await resolvePlanTurn("task", "codex", parseCliCommand("codex", "/plan implement"), "/plan implement", null, null), { question: false, text: "/plan implement" }, "codex 那一路照旧原样透传");
+  assert.deepEqual(await resolvePlanTurn("task", "codex", parseCliCommand("codex", "/plan implement"), "/plan implement", null, null), { question: false, text: "/plan implement", shown: PLAN_IMPLEMENT_LABEL }, "codex 那一路照旧原样透传");
   // 记录里最新一条不是完整卡（老版本留下的退回草稿）就不能实施
   appendFileSync(sessionTracePath("task", "session"), JSON.stringify({ at, turnStartedAt: at, event: { kind: "plan", id: "plan:toolu_exit", text: "", status: "streaming", delta: true } }) + "\n");
   await assert.rejects(assertPlanReady("task", "claude", null, null, "plan:toolu_exit"), /没有已完成的计划/);

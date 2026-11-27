@@ -1,4 +1,4 @@
-import { isPlanImplementation, isPlanToggle, type CliCommand } from "@navi/shared/cli-commands";
+import { isPlanImplementation, isPlanToggle, PLAN_IMPLEMENT_LABEL, type CliCommand } from "@navi/shared/cli-commands";
 import { assertPlanReady } from "./task-plan.js";
 
 /** `/plan implement` 换进 prompt 的那句（codex 那一路在 executors/codex-native-commands.ts 里接在原文后面）。 */
@@ -21,11 +21,15 @@ export const planImplementText = (approved: string) =>
  * 原文（调用方经 task-plan.ts `assertPlanReady` 取出；没给只会出现在马上要被拒的起跑里）。
  * 裸 `/plan`、`/plan off` 不起进程（`isPlanToggle`）：回复框里在 task-cli-command.ts 当场改状态，
  * 起智能体的入口（首次运行、重试、队列推进）在 prepareCliInvocation 一律拒掉。
+ * `shown` = 会话气泡里记的那句话，跟交给模型的 `text` 不同时才给（`PLAN_IMPLEMENT_LABEL`，理由在它的定义上）。
  */
-export function planTurnInput(agent: string, slash: CliCommand | null, userText: string, approved?: string): { question: boolean; text: string } {
-  if (agent !== "claude" || slash?.name !== "plan") return { question: false, text: userText };
-  if (isPlanImplementation(slash)) return { question: false, text: approved ? planImplementText(approved) : PLAN_IMPLEMENT_TEXT };
-  if (isPlanToggle(agent, slash)) return { question: false, text: userText };
+export function planTurnInput(agent: string, slash: CliCommand | null, userText: string, approved?: string): { question: boolean; text: string; shown?: string } {
+  if (slash?.name !== "plan") return { question: false, text: userText };
+  if (isPlanImplementation(slash)) {
+    const text = agent !== "claude" ? userText : approved ? planImplementText(approved) : PLAN_IMPLEMENT_TEXT;
+    return { question: false, text, shown: PLAN_IMPLEMENT_LABEL };
+  }
+  if (agent !== "claude" || isPlanToggle(agent, slash)) return { question: false, text: userText };
   return { question: true, text: slash.args };
 }
 
@@ -33,7 +37,7 @@ export function planTurnInput(agent: string, slash: CliCommand | null, userText:
  * 续聊回合用：`/plan implement` 先取出用户批准的那张卡（同时就是「能不能实施」的预检），再按卡上原文
  * 拼实施正文；其余同 `planTurnInput`。
  */
-export async function resolvePlanTurn(taskId: string, agent: string, slash: CliCommand | null, userText: string, profileId: string | null, ownerId: string | null): Promise<{ question: boolean; text: string }> {
+export async function resolvePlanTurn(taskId: string, agent: string, slash: CliCommand | null, userText: string, profileId: string | null, ownerId: string | null): Promise<ReturnType<typeof planTurnInput>> {
   const approved = agent === "claude" && isPlanImplementation(slash)
     ? (await assertPlanReady(taskId, agent, profileId, ownerId, slash!.args.split(/\s+/)[1])).text : undefined;
   return planTurnInput(agent, slash, userText, approved);
