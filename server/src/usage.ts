@@ -7,7 +7,7 @@
 //
 // **这个文件里还住着上下文水位（setSessionContext），它是覆盖式的**——两组列摆在
 // 一起是为了让下一个人一眼看见「有两种账，加法只适用于其中一种」。
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, sql, type SQL } from "drizzle-orm";
 import type { AgentEvent, AgentType, ContextBreakdown, ContextUsage, TokenUsage, UsageAccountingMark } from "@navi/shared";
 import {
   COMPACT_SNAPSHOT_ENV_KEYS,
@@ -253,12 +253,21 @@ export async function setSessionContext(sessId: string, context: ContextUsage): 
 /**
  * 上下文分项落到会话行(shared/src/context-breakdown.ts)。覆盖式,跟水位分开写:水位每次请求都更新,
  * 分项只在回合末更新。同样 best-effort:写不进去只记日志,不影响回合结算。
+ *
+ * `row` 是写哪一行的条件,缺省按会话 id;常驻调度台传它的 `ownRow`(会话 id + 持有者代次),取数
+ * 回来到语句真正执行之间被别的台接管了,这一笔就落空。返回这一行真写进去了没有。
  */
-export async function setSessionContextBreakdown(sessId: string, breakdown: ContextBreakdown): Promise<void> {
+export async function setSessionContextBreakdown(
+  sessId: string,
+  breakdown: ContextBreakdown,
+  row: SQL | undefined = eq(sessions.id, sessId),
+): Promise<boolean> {
   try {
-    await db.update(sessions).set({ contextBreakdown: JSON.stringify(breakdown) }).where(eq(sessions.id, sessId));
+    const written = await db.update(sessions).set({ contextBreakdown: JSON.stringify(breakdown) }).where(row);
+    return Number((written as { rowsAffected?: number | bigint } | null)?.rowsAffected ?? 0) > 0;
   } catch (error) {
     console.warn(`[navi] failed to record context breakdown for session ${sessId}:`, error);
+    return false;
   }
 }
 

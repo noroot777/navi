@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import type { AgentEvent } from "@navi/shared";
 import { ClaudeExecutor } from "../src/executors/claude.js";
 import { ClaudeControlBridge } from "../src/executors/claude-control.js";
@@ -278,6 +279,72 @@ try {
     assert.equal(parseStoredContextBreakdown(JSON.stringify({ at: "x" })), null);
     assert.equal(parseStoredContextBreakdown(null), null);
     console.log("✓ 回包与落库两头的解析");
+  }
+
+  // ⑧ 常驻调度台：取数回来、等数据库空闲的那段里同一行被新台接管，旧台这一笔落空、也不播；
+  // 还是自己那一行就照常写、照常播。用事务占住库，把「过了 retired 检查 → 被接管 → 语句执行」排稳。
+  {
+    const { dbClient, ensureSchema } = await import("../src/db/index.js");
+    const { createSessionConsumer } = await import("../src/team/session-consumer.js");
+    const { bus } = await import("../src/bus.js");
+    await ensureSchema();
+    const at = new Date().toISOString();
+    const snapshot = (n: number) => ({
+      at, turnStartedAt: null, model: "claude", totalTokens: n, maxTokens: 200000, autoCompactThreshold: null,
+      categories: [{ name: "Messages", tokens: n, kind: "used" as const }], mcpServers: [], skills: null, memoryFiles: [],
+    });
+    await dbClient.execute({ sql: "INSERT INTO projects(id,name,repo_path,created_at) VALUES('p','p',?,?)", args: [root, at] });
+    await dbClient.execute({ sql: "INSERT INTO tasks(id,project_id,title,body,status,created_at,updated_at) VALUES('t','p','t','','done',?,?)", args: [at, at] });
+    const storedTokens = async (id: string) => {
+      const row = (await dbClient.execute({ sql: "SELECT context_breakdown FROM sessions WHERE id=?", args: [id] })).rows[0];
+      return row?.context_breakdown ? JSON.parse(String(row.context_breakdown)).totalTokens : null;
+    };
+    const published: string[] = [];
+    const unsubscribe = bus.subscribe((ev) => {
+      const event = (ev as { event?: AgentEvent }).event;
+      if (event?.kind === "contextBreakdown") published.push(`${(ev as { sessionId?: string }).sessionId}:${event.breakdown.totalTokens}`);
+    });
+    const leadFor = (sessId: string, tokens: number, asked: () => void, streamGate: Promise<void>): any => ({
+      taskId: "t", sessId, cliSessionId: "cli", agentType: "claude", ownerUserId: null, executorId: null, model: null,
+      reasoningEffort: null, cwd: root, holder: "old", busy: false, turnStart: null, pending: [], notices: [],
+      pendingCredential: null, wantedStatus: null, statusTimer: null, idleTimer: null, retired: false, closing: null,
+      out: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      handle: {
+        events: (async function* () { yield { kind: "turnEnd" }; await streamGate; })(),
+        contextBreakdown: async () => { asked(); return snapshot(tokens); },
+        kill() {}, close() {},
+      },
+    });
+    const consumer = createSessionConsumer({ leads: new Map(), adoptInbound: async () => {}, flushUnqueued: async () => {}, releasePending: () => {} });
+    try {
+      for (const [sessId, takenOver] of [["s-taken", true], ["s-own", false]] as const) {
+        await dbClient.execute({
+          sql: "INSERT INTO sessions(id,task_id,agent_type,executor,role,started_at,lead_holder) VALUES(?,'t','claude','claude@local','lead',?,'old')",
+          args: [sessId, at],
+        });
+        let releaseStream!: () => void;
+        let asked!: () => void;
+        const askedGate = new Promise<void>((resolve) => { asked = resolve; });
+        const lead = leadFor(sessId, 111, asked, new Promise<void>((resolve) => { releaseStream = resolve; }));
+        const tx = await dbClient.transaction();
+        const consuming = consumer.consume(lead);
+        await askedGate;
+        await new Promise((resolve) => setImmediate(resolve)); // 回调过了 retired 检查，卡在等库
+        if (takenOver) {
+          lead.retired = true;
+          await tx.execute({ sql: "UPDATE sessions SET lead_holder='new', context_breakdown=? WHERE id=?", args: [JSON.stringify(snapshot(222)), sessId] });
+        }
+        await tx.commit();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        releaseStream();
+        await consuming;
+        assert.equal(await storedTokens(sessId), takenOver ? 222 : 111, takenOver ? "被接管的那一行不被旧台盖掉" : "自己那一行照常写");
+      }
+      assert.deepEqual(published, ["s-own:111"], "落空的那一笔不播");
+    } finally {
+      unsubscribe();
+    }
+    console.log("✓ 常驻调度台被接管后，旧台的分项既不落库也不播");
   }
 } finally {
   rmSync(root, { recursive: true, force: true });

@@ -342,8 +342,11 @@ function askContextBreakdown(lead: Lead, turnStartedAt: string | null): void {
   void lead.handle.contextBreakdown().then(async (breakdown) => {
     if (!breakdown || lead.retired || breakdownAsks.get(lead) !== ask) return;
     const stamped = { ...breakdown, turnStartedAt };
-    await setSessionContextBreakdown(lead.sessId, stamped);
-    publish(lead, { kind: "contextBreakdown", breakdown: stamped });
+    // 入口那一眼 retired 只省一次写库:等数据库空闲的那段里同一行可能已被新台接管,闸落在语句里
+    // (ownRow,见 lead-session-writes.ts),没写进去就不播,免得页面重读、以为刷新过了。
+    if (await setSessionContextBreakdown(lead.sessId, stamped, ownRow(lead))) {
+      publish(lead, { kind: "contextBreakdown", breakdown: stamped });
+    }
   }).catch((error) => console.warn(`[navi] team(${lead.taskId}) 记不下上下文分项:`, error));
 }
 
