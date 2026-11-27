@@ -50,6 +50,7 @@ import { recoverFailedTurnStart } from "./turn-start-failure.js";
 import { freeReviewReminder } from "./free-workflow.js";
 import { NO_REMINDER, assembleTurnPrompt } from "./turn-prompt.js";
 import { withSkillInvocation } from "./skills.js";
+import { nativeSteerBinding } from "./native-steer-binding.js";
 import { prepareCliInvocation, readCliState } from "./task-cli-state.js";
 import { resolvePlanTurn } from "./plan-turn.js";
 import { prepareContinuationEntry } from "./task-continuation-entry.js";
@@ -332,6 +333,8 @@ export async function continueTask(
     await recordTurnStart(taskId, cwd);
     const invited = !prev; // first time this agent is pulled into the task
     const userTurnText = (contextLost(opts, cliResume) ? opts.contextFallback! : planInput.text) + attachmentsPrompt(opts.attachments);
+    // 气泡里记用户做的那一下（「实施此计划」），交给模型的仍是上面这一整句（plan-turn.ts `shown`）。
+    const shownTurnText = planInput.shown && !contextLost(opts, cliResume) ? planInput.shown + attachmentsPrompt(opts.attachments) : userTurnText;
     const promptedUserTurnText = withSkillInvocation({ agentType: agent, cwd, text: userTurnText, userId: runOwner });
     const sharedTeamWorker = !task.useWorktree && (await workerPreambleFor(task)).length > 0;
     // 验证回合（旧的独立审查任务，或这个任务自己身上的就地验证轮）：完成协议的
@@ -569,7 +572,7 @@ export async function continueTask(
     } else {
       // 你→@agent reply, persisted as a structured turn so a reloaded thread shows
       // the human/backend turn as its own bubble; the matching event keeps every client live.
-      recordUserConversationTurn({ taskId, sessionId: sessId, role: sessionRole, agentType: agent, out, text: userTurnText, at: turnStart, bySystem: opts.byBackend, monitorWake: opts.monitorWake, eventKey: opts.deliveryKey, answerIds: opts.answerIds, clientKey: opts.clientKey });
+      recordUserConversationTurn({ taskId, sessionId: sessId, role: sessionRole, agentType: agent, out, text: shownTurnText, at: turnStart, bySystem: opts.byBackend, monitorWake: opts.monitorWake, eventKey: opts.deliveryKey, answerIds: opts.answerIds, clientKey: opts.clientKey });
     }
     // 上一回合尚未结算就收到回复时，消息会先排队，真正送达时任务已不再 paused；这条
     // 路径要在落盘后消费旧检查点，避免它继续挡完成与预约派审。若起点本来就是 paused，
@@ -608,12 +611,7 @@ export async function continueTask(
     await consumeSingleRun({
       taskId, sessId, agentType: agent, ex, cwd,
       handle, out, turnStart, cliSessionId, autoTitle: false, role: sessionRole, turn,
-      nativeSteer: {
-        prepare: (text) => withSkillInvocation({ agentType: agent, cwd, text, userId: runOwner }),
-        record: (text, at) => recordUserConversationTurn({
-          taskId, sessionId: sessId, role: sessionRole, agentType: agent, out, text, at,
-        }),
-      },
+      nativeSteer: nativeSteerBinding({ taskId, sessionId: sessId, role: sessionRole, agentType: agent, cwd, userId: runOwner, out, plan: planning }),
     });
   } catch (err) {
     // **spawn 之后才抛的,输入事实照样要交给调用方**(第 2 轮自由审查 F1):会话持久化、交接提示、

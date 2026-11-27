@@ -17,7 +17,7 @@
 // 的完成确认也一起放弃恢复」—— 第 3 轮审查 F1-C 实测到的现场：新工作一个字没送出去，原来的
 // 安排三样同时消失。
 import type { QuestionItem } from "@navi/shared";
-import { and, eq, isNull, ne } from "drizzle-orm";
+import { and, eq, isNull, ne, sql, type Column, type SQL } from "drizzle-orm";
 import { bus } from "./bus.js";
 import { db } from "./db/index.js";
 import { tasks } from "./db/schema.js";
@@ -291,7 +291,9 @@ export async function discardLateDirectionState(
  * 同一笔 UPDATE 里、共用一套 CAS，于是检查点那一侧的代次条件一旦不符，提问和完成确认也跟着
  * 一起放弃恢复 —— 实测到的现场是：新工作一个字都没送出去，而用户原来的问题、agent 的完成确认
  * 和那段待续工作三样同时消失。检查点的归属判据（空槽 + 同一代次）本来就跟回合身份无关，所以
- * 它走存储层那一份口径；身份、提问、完成票留在下面这一笔里按回合身份判。
+ * 它走存储层那一份口径。身份与「提问 + 完成票」也各判资格：身份只认清场时那一代，内容按空槽填
+ * —— 原进程在引导没送进去的那段里新问的一问，不该挡住它的身份回来。两样仍落在同一笔里，结算
+ * 读不到只回来一半的样子。
  *
  * **回合已经结束的那一支另有一道闸**：那时 token 全被 `status.ts` 清空，「这几列还空着」就不再
  * 证明任何归属 —— 一个已经跑完新回合的任务看起来跟「我刚清掉、还没人动过」一模一样。所以备用
@@ -313,16 +315,27 @@ export async function restorePreviousDirectionState(
     auto: previous.resumePromptAuto,
     generation: previous.resumePromptGeneration,
   });
-  // ② 身份 + 提问 + 完成票：**不带检查点的任何条件**（见函数头）。
-  let restored = await db
+  // ② 身份 + 旧提问 + 旧完成票，**同一笔**落：
+  //  · 身份只认「还是我清场时那一代」，不看提问和完成票那几格空不空。原生引导没送进去时原进程
+  //    还活着、只认得旧身份，清场到回滚之间它照样能提问（single-run.ts 只按回合存）—— 拿「提问
+  //    那格还空着」当身份恢复的资格，它一问，身份就回不去了，之后交卷、暂停、再提问全被当成过期
+  //    方向拒掉（xkys1t4xFKdl 第 3 轮自由审查）。
+  //  · 内容那几格还空着才填旧的，期间新问的那一问留着。判空写在 SET 里而不是另起一笔：拆成两笔
+  //    时结算能读到「身份回来了、提问和完成票还没回来」的半成品，把一个等答复/已交卷的回合判成
+  //    未交卷（第 4 轮实测）。
+  const contentEmpty = sql`(${tasks.question} IS NULL AND ${tasks.questionOptions} IS NULL
+    AND ${tasks.questionItems} IS NULL AND ${tasks.completeConfirmedAt} IS NULL)`;
+  const refill = (column: Column, value: string | null): SQL =>
+    sql`CASE WHEN ${contentEmpty} THEN ${value} ELSE ${column} END`;
+  const back = (await db
     .update(tasks)
     .set({
       // 放回旧身份,不是装一个新方向 ⇒ 不推世代（写法收口在 task-direction-epoch.ts）。
       ...directionIdentityRestored(previous, preserveDirectionBarrier),
-      completeConfirmedAt: previous.completeConfirmedAt,
-      question: previous.question,
-      questionOptions: previous.questionOptions,
-      questionItems: previous.questionItems,
+      completeConfirmedAt: refill(tasks.completeConfirmedAt, previous.completeConfirmedAt),
+      question: refill(tasks.question, previous.question),
+      questionOptions: refill(tasks.questionOptions, previous.questionOptions),
+      questionItems: refill(tasks.questionItems, previous.questionItems),
       updatedAt,
     })
     .where(and(
@@ -333,13 +346,18 @@ export async function restorePreviousDirectionState(
       // 跟下面那一支同一口径:每一笔回滚都带世代。这里它是冗余的（方向 token 是现开的随机值,
       // 对得上就说明没人换过方向）—— 但留两种写法迟早会漏,而漏掉的那一处就是 F1-B。
       directionEpochUnchangedSince(previous.clearedDirectionEpoch),
-      isNull(tasks.completeConfirmedAt),
-      isNull(tasks.question),
-      isNull(tasks.questionOptions),
-      isNull(tasks.questionItems),
     ))
-    .returning({ id: tasks.id });
-  if (!restored.length) {
+    .returning({
+      question: tasks.question, questionOptions: tasks.questionOptions,
+      questionItems: tasks.questionItems, completeConfirmedAt: tasks.completeConfirmedAt,
+    })).at(0);
+  const identityBack = back !== undefined;
+  // 落下来的四格跟快照一样 ⇒ 填的是旧的（那几格本来空着）；不一样 ⇒ 期间有新内容，留着它。
+  let contentBack = !!back && back.question === previous.question
+    && back.questionOptions === previous.questionOptions
+    && back.questionItems === previous.questionItems
+    && back.completeConfirmedAt === previous.completeConfirmedAt;
+  if (!identityBack) {
     // 旧回合可能已按停止/自然结束完成结算：setTaskStatus 会把 token 置 null，但清掉的
     // 方向字段仍全是 null。只在任务已离开运行态且这些字段仍未被新写入时恢复，避免
     // 覆盖停止窗口里新产生的提问、检查点或完成票。
@@ -347,7 +365,7 @@ export async function restorePreviousDirectionState(
     // **「现在空着」只够排除并发写入，排除不了「后来又跑完了一轮」**：那一轮结束时这几列同样
     // 被清回空，于是迟到的旧回滚会把旧提问、旧完成确认写到一个早已跑完新工作的任务头上（第 4
     // 轮审查 F1-B 实测 `F1_B_LATE_ROLLBACK_AFTER_NEW_DIRECTION_DONE`）。方向世代补上这条边。
-    restored = await db
+    contentBack = (await db
       .update(tasks)
       .set({
         completeConfirmedAt: previous.completeConfirmedAt,
@@ -367,10 +385,10 @@ export async function restorePreviousDirectionState(
         isNull(tasks.questionOptions),
         isNull(tasks.questionItems),
       ))
-      .returning({ id: tasks.id });
+      .returning({ id: tasks.id })).length > 0;
   }
-  // 检查点填回去了也算「恢复过东西」：那两件事各判资格，任何一件成了都不该报「什么都没恢复」。
-  if (!restored.length) return checkpointBack;
+  // 检查点填回去了也算「恢复过东西」：那几件事各判资格，任何一件成了都不该报「什么都没恢复」。
+  if (!contentBack) return identityBack || checkpointBack;
   // **内存那张票也得带着世代回去**（runs.ts）。还的是「这条改派离开时任务停在的那一代」：
   //  · 同一轮内正常失败 ⇒ 当下就是那一代，本回合结算照样认；
   //  · SQL 刚落、新回合紧接着开跑（报告实测的那条 TOCTOU）⇒ 当下已经是下一代，这张票对新

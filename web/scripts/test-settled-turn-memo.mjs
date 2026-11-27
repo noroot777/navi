@@ -3,7 +3,7 @@
 // （第 1 轮审查）。记录里那几轮审查晚到的身份、报告同理（第 2 轮审查）。
 // 跑:npm -w web run test:settled-turn-memo
 import assert from "node:assert/strict";
-import { sameSettledTurn } from "../src/task-detail/ConversationFeed.tsx";
+import { sameSettledTurn } from "../src/task-detail/settledTurnMemo.ts";
 
 const turn = (patch = {}) => ({
   kind: "agent", id: "a1", markdown: "改好了。", label: "claude", at: "2026-11-12T10:00:00.000Z", endedAt: "2026-11-12T10:05:00.000Z",
@@ -23,6 +23,16 @@ assert.equal(sameSettledTurn(props(turn()), props(turn({ segments: segment({ att
 assert.equal(sameSettledTurn(props(turn()), props(turn({ sources: [{ sessionId: "s", index: 0, fingerprint: "f2" }] }))), false, "来源换了要重画");
 assert.equal(sameSettledTurn(props(turn()), props(turn({ usage: { input: 10, output: 6 } }))), false, "用量换了要重画");
 assert.equal(sameSettledTurn(props(turn({ endedAt: null })), { ...props(turn({ endedAt: null })), taskActive: true }), false, "还在说的回合跟着变");
+
+// 正在生成的那一步单独来，条目对象不变（useConversation 不为它重拼会话）：出现、更新、撤下都要重画。
+const live = turn({ endedAt: null });
+const running = (drafting) => ({ ...props(live), taskActive: true, drafting });
+const draft = (chars) => ({ kind: "drafting", tool: "Write", target: "方案.md", chars, since: "2026-11-12T10:00:00.000Z" });
+const first = draft(8240);
+assert.equal(sameSettledTurn(running(null), running(first)), false, "同一个条目，「正在写」出现要重画");
+assert.equal(sameSettledTurn(running(first), running(draft(9100))), false, "字数涨了要重画");
+assert.equal(sameSettledTurn(running(first), running(null)), false, "撤下要重画");
+assert.equal(sameSettledTurn(running(first), running(first)), true, "同一份进度不重画");
 
 // 记在这一回合上的记录：条数、最后一条都没变，里面那一轮审查晚到一步补上了哪一场、报告、附言，
 // 照样要重画——不然记录里那一条点了还拿着旧的那一轮，去不了审查格、也没有报告入口（第 2 轮审查）。
@@ -47,4 +57,4 @@ assert.equal(
 );
 assert.equal(sameSettledTurn(withReceipts(receipts()), withReceipts(receipts({ note: "重点看并发" }))), false, "补上了附言要重画");
 assert.equal(sameSettledTurn(withReceipts(receipts()), withReceipts(receipts({}, { text: "第 1 轮审查通过（重审）" }))), false, "记录里那一句的字变了要重画");
-console.log("settled turn memo ok: 收口的回合内容不变不重画，工具详情 / 附件 / 拷贝 / 来源 / 用量 / 记录里的审查换了都重画");
+console.log("settled turn memo ok: 收口的回合内容不变不重画，工具详情 / 附件 / 拷贝 / 来源 / 用量 / 记录里的审查 / 正在生成的那一步换了都重画");

@@ -27,7 +27,7 @@ import { recordSessionUsageEvent, setSessionContext } from "../usage.js";
 import { consumeInbound } from "./inbound-queue.js";
 import { sendToLead } from "./lead-delivery.js";
 // 会话行的写入口(摘牌闸、失败只上报)住在 lead-session-writes.ts,见那份顶部。
-import { closeOwnSessionWithTurn, flushPendingCredential, ownRow, persistOrReport, updateOwnSession, type SessionPatch } from "./lead-session-writes.js";
+import { closeOwnSessionWithTurn, flushPendingCredential, noteContextBreakdown, ownRow, persistOrReport, updateOwnSession, type SessionPatch } from "./lead-session-writes.js";
 import type { PendingInbound } from "./inbound-queue.js";
 import {
   idleRotation,
@@ -176,6 +176,9 @@ async function consume(lead: Lead): Promise<void> {
         clearSessionWaiting(lead.sessId, lead);
         clearTurnStall(lead.sessId, lead); // 同理:回合收口是常驻台唯一的「这一轮结束了」边界
         flushTraceText();
+        // 回合末问一份上下文分项(../executors/claude-context-breakdown.ts)。不等它:进程跨回合活着,
+        // 回执晚到也收得到;请求排在 endTurn 投递攒着的消息之前写进 stdin,量的就是这一回合末。
+        if (!event.interrupted) noteContextBreakdown(lead, heldTurns(lead)[0] ?? null);
         await endTurn(lead);
         // 上一回合欠着的新会话凭据在这儿补:补上了,轮换事宜这才算真翻篇。
         if (await flushPendingCredential(lead, leads)) rotation = onFreshSession(rotation);
@@ -224,6 +227,8 @@ async function consume(lead: Lead): Promise<void> {
       if (!lead.retired) trackSessionWaiting(lead.sessId, lead, lead.turnStart, event);
       // 摘牌的台同样不许动手:它的停滞状态归接管的那台(同上面那道闸)。
       if (!lead.retired) trackTurnStall(lead.sessId, lead, lead.turnStart, event, stallActions);
+      // 正在生成的那一步（claude-drafting.ts）调度台的界面不画；放下去会把攒着的正文切成两截落盘。
+      if (event.kind === "drafting") continue;
       if (event.kind === "text") {
         lead.out.write(event.text);
         pendingTraceText += event.text;

@@ -30,6 +30,7 @@ import { claudeNaviMcpProblem } from "./navi-mcp-confirm.js";
 import type { ClaudeNaviMcpInjection } from "./navi-mcp-inject.js";
 import { claudeApiStatus, modelFailureOf } from "./model-failure.js";
 import { PLAN_HANDOFF_TOOLS } from "./claude-plan-gate.js";
+import { claudeDrafting } from "./claude-drafting.js";
 
 // resident 非空 = 常驻模式:`result` 行只代表「一个回合说完了」(→ turnEnd),
 // 流要一直开着;只有进程真的没了才 done。
@@ -115,6 +116,7 @@ async function* claudeStreamEvents(
     else if (capturing) ending?.push(event);
   };
   const flushText = () => events.flush();
+  const drafting = claudeDrafting();
 
   // 上下文水位。**只有 `assistant` 事件里的 `message.usage` 是单次 API 调用的快照**
   // —— 收尾的 `result` 行是整回合累加(几十次调用相加,长会话能到千万级),拿它当水位
@@ -262,6 +264,10 @@ async function* claudeStreamEvents(
     }
     if (ev.type === "stream_event") {
       const se = ev.event;
+      // 重放时也要喂：接管落在一次调用生成到一半时，开头那条 content_block_start 在旧水位之前，
+      // 不喂就认不出后面那些入参是谁的，这一步剩下的几分钟都不报进度。只是不往外发。
+      const progress = drafting.event(se);
+      if (progress && !replaying) push(progress);
       if (!replaying && se?.type === "content_block_delta" && se.delta?.type === "text_delta" && se.delta.text) {
         events.delta("text", se.delta.text);
       }

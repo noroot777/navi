@@ -48,7 +48,7 @@ import { clearSessionStalled, markSessionStalled } from "./session-stall-flag.js
 import { createExecutionCloser, recordFreeTaskExecutionStartIfFree } from "./free-workflow-events.js";
 import { clearTurnStart } from "./turn-output.js";
 import { turnInterruptionOf } from "./turn-interruption.js";
-import { recordSessionUsageEvent, setSessionContext } from "./usage.js";
+import { recordSessionUsageEvent, setSessionContext, setSessionContextBreakdown } from "./usage.js";
 import { markCliGoalStarted } from "./task-cli-state.js";
 import { settleSingleRunTurn } from "./single-run-settle.js";
 import { windDownStep } from "./turn-wind-down.js";
@@ -90,6 +90,8 @@ export type SingleRunArgs = {
   nativeSteer?: {
     prepare?(text: string): string | Promise<string>;
     record(text: string, at: string): void;
+    /** 计划模式回合：允许原生引导（runs.ts `planSteerTarget`）。 */
+    plan?: boolean;
   };
 };
 
@@ -132,7 +134,7 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
   // 重启接回)都汇到这儿,由库来答就不会漏标其中一条。验证中途提问、答复回来续跑的那一
   // 回合库里仍挂着轮次号,于是它照样归这一轮验证——跟 orchestrator 的 sideTurn 判据同源。
   const taskRow = (await db.select({ nativeTurn: tasks.nativeTurn, verifyRound: tasks.verifyRound, goalTurn: tasks.goalTurn,
-    activeTurnToken: tasks.activeTurnToken, activeDirectionToken: tasks.activeDirectionToken })
+    activeTurnToken: tasks.activeTurnToken })
     .from(tasks).where(eq(tasks.id, taskId))).at(0);
   const nativeTurn = !!taskRow?.nativeTurn;
   let goalStartPending = !!taskRow?.goalTurn;
@@ -252,6 +254,7 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
         flushTraceText(Number.isFinite(boundary) ? new Date(boundary - 1).toISOString() : undefined);
       },
       record: a.nativeSteer.record,
+      plan: a.nativeSteer.plan,
     });
   }
 
@@ -375,12 +378,16 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
     }
     for await (const event of a.handle.events) {
       if (event.kind === "userInput") {
+        // 只绑回合、不绑方向：原生引导在回合中途换了方向身份，这条流后面问的多半就是新方向的；
+        // 拿起跑时的方向去比，引导之后的提问一律存不进去，codex 那边这一问还顺手打断了回合，
+        // 整轮报错收场（qfix1xZNymhT）。按流里的位置切分新旧方向要跟执行器的输出逐条对齐、还得
+        // 扛重启，用户选了不分：引导前问到一半、晚读到的那一问也可能挂出来，答或不答都行。
         if (!taskRow || !await setTaskQuestion({
           taskId,
           question: event.questions.length === 1 ? event.questions[0]!.question : "请确认以下问题",
           options: event.questions.length === 1 ? event.questions[0]!.options : undefined,
           items: event.questions.length > 1 ? event.questions : undefined,
-          currentTurn: { token: taskRow.activeTurnToken, directionToken: taskRow.activeDirectionToken },
+          currentTurn: { token: taskRow.activeTurnToken },
         })) throw new Error("执行器的澄清问题未能保存，请重试当前回合");
         continue;
       }
@@ -390,6 +397,8 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
       // 「这一轮还在往前走吗」(turn-stall.ts):同一条事件流、同一个持有者语义,只是它要
       // 回答的不是「此刻在等」而是「等到该动手了没有」。
       trackTurnStall(sessId, a.handle, a.turnStart, event, stallActions);
+      // 正在生成的那一步只直播、不落盘（claude-drafting.ts），也不碰标题窗口。
+      if (event.kind === "drafting") { publishEvent(event); continue; }
       if (goalStartPending && a.handle.goalStarted?.()) { await markCliGoalStarted(taskId, agentType, event.kind === "session" ? event.cliSessionId : cliSessionId); goalStartPending = false; }
       if (event.kind === "session") {
         if (event.cliSessionId !== cliSessionId) {
@@ -458,6 +467,11 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
         }
         // 水位相反：**覆盖**。它属于整条会话的此刻，不属于某一个回合，所以也不进 trace。
         if (emittedEvent.kind === "context") await setSessionContext(sessId, emittedEvent.context);
+        // 分项同样覆盖式;库里已经有更新的那份就不写,也不广播(判据在 setSessionContextBreakdown)。
+        if (emittedEvent.kind === "contextBreakdown") {
+          if (await setSessionContextBreakdown(sessId, emittedEvent.breakdown, a.turnStart)) publishEvent(emittedEvent, record);
+          continue;
+        }
         publishEvent(emittedEvent, record);
       }
     }

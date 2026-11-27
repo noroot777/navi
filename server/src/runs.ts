@@ -5,6 +5,7 @@ import type { CliCommand, CliGoal } from "@navi/shared/cli-commands";
 import { RECONCILE_TURN_ROLE, claimNonTurn, claimOwnTurnWhenReady, releaseTurn, whenTurnIdle } from "./turn-lock.js";
 import { acknowledgeStartReceipt, registerStartReceipt } from "./task-start-receipt.js";
 import { markTaskActionsDirty } from "./task-actions-dirty.js";
+import { bus } from "./bus.js";
 
 // 回合占位锁那一半(单飞锁、几种不是回合的预占、起跑冻结、等这一轮跑完再续跑)住在
 // turn-lock.ts —— 两摊各自的使用方几乎不重叠,挤在一个文件里已经过了 700 行上限
@@ -46,11 +47,12 @@ export type StopSettle = "canceled" | "paused";
 const handles = new Map<string, Set<Killable>>();
 const stopping = new Map<string, StopSettle>();
 type NativeSteerTarget = {
-  handle: Killable & { steer(text: SteerText, beforeSend?: () => void | Promise<void>): Promise<void> };
+  handle: Killable & Required<Pick<Killable, "steer">>;
   agentType: AgentType;
   prepare(text: string): string | Promise<string>;
   beforeDeliver?(at: string): void | Promise<void>;
   record(text: string, at: string): void;
+  plan: boolean;
 };
 const nativeSteerTargets = new Map<string, NativeSteerTarget>();
 const nativeSteering = new Map<string, symbol>();
@@ -79,7 +81,7 @@ export function nativeCommandRun(taskId: string): Killable | null {
 }
 
 export function untrackRun(taskId: string, h: Killable): void {
-  if (nativeSteerTargets.get(taskId)?.handle === h) nativeSteerTargets.delete(taskId);
+  if (nativeSteerTargets.get(taskId)?.handle === h) setNativeSteerTarget(taskId, null);
   const set = handles.get(taskId);
   if (!set) return;
   set.delete(h);
@@ -170,16 +172,43 @@ export function bindNativeSteer(
     prepare?(text: string): string | Promise<string>;
     beforeDeliver?(at: string): void | Promise<void>;
     record(text: string, at: string): void;
+    /** 这一轮是计划模式回合（见 `planSteerTarget`）。 */
+    plan?: boolean;
   },
 ): void {
   if (!handle.steer || !handles.get(taskId)?.has(handle)) return;
-  nativeSteerTargets.set(taskId, {
-    handle: handle as Killable & { steer(text: SteerText, beforeSend?: () => void | Promise<void>): Promise<void> },
+  setNativeSteerTarget(taskId, {
+    handle: handle as NativeSteerTarget["handle"],
     agentType: input.agentType,
     prepare: input.prepare ?? ((text) => text),
     beforeDeliver: input.beforeDeliver,
     record: input.record,
+    plan: !!input.plan,
   });
+}
+
+/**
+ * 换掉 / 撤掉引导目标的唯一入口。计划回合能不能引导只认这张表（`planSteerTarget`），库里没有
+ * 一行跟着变 —— 所以这里一变就让托盘重拉一次，否则绑定前读到的「不能引导」会一直挂着。
+ */
+function setNativeSteerTarget(taskId: string, target: NativeSteerTarget | null): void {
+  const wasPlan = !!nativeSteerTargets.get(taskId)?.plan;
+  if (target) nativeSteerTargets.set(taskId, target);
+  else nativeSteerTargets.delete(taskId);
+  if (wasPlan !== !!target?.plan) bus.publish({ type: "task.pendingMessages", taskId });
+}
+
+/**
+ * 此刻在跑的是不是一轮**能原生引导的计划回合**；是就交回它的执行器。
+ *
+ * 计划回合在库里和 `/compact` 一样记 `native_turn`、运行时身份是旁路，为的只是不按任务执行
+ * 结算；可它是同一条常驻会话里的普通对话，原话插进去仍在计划模式里（权限参数在进程上）。
+ * 所以「是不是计划回合」只认这一轮绑上来的引导目标，跟句柄同生同灭，不会漏到下一轮。
+ */
+export function planSteerTarget(taskId: string): { agentType: AgentType } | null {
+  const target = nativeSteerTargets.get(taskId);
+  if (!target?.plan || !handles.get(taskId)?.has(target.handle)) return null;
+  return { agentType: target.agentType };
 }
 
 export type NativeSteerReservation = {
