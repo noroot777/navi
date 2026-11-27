@@ -294,7 +294,7 @@ export function ConversationFind({
   return slot ? createPortal(node, slot) : node;
 }
 
-/** 标题行里给查找条留的空位，见 search/conversationFind.ts 的 FIND_SLOT。 */
-export function ConversationFindSlot() {
-  return <span className="conversation-find-slot" {...FIND_SLOT} />;
+/** 给查找条留的空位（多半在标题行里），见 search/conversationFind.ts 的 FIND_SLOT。`className` 给宿主自己摆位置。 */
+export function ConversationFindSlot({ className }: { className?: string }) {
+  return <span className={`conversation-find-slot${className ? ` ${className}` : ""}`} {...FIND_SLOT} />;
 }

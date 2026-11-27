@@ -13,7 +13,7 @@
 //     别的会话里时不抢（审查第 1 轮 #1、#2）；
 //   · 手动开合折叠块，标记跟着变；相邻两段拼不出假命中；流式续字时当前那一处不跳回前面；
 //   · 查找条平时不画；按了才停进标题行里留的空位、在右边那排图标的左边（用户 2026-11-27 指的位置），
-//     没留空位的会话（侧聊）就浮在会话右上角。
+//     侧聊的停在侧聊自己顶上那一行；只有焦点 / 最近一次点击在侧聊里时 ⌘F 才查侧聊。
 // 跑法：npm -w web run test:conversation-find-dom
 import assert from "node:assert/strict";
 import { launchChrome, startWebServer } from "./dom-stage.mjs";
@@ -34,7 +34,7 @@ try {
   const feed = page.getByTestId("feed");
   const header = page.getByTestId("main-header");
   const bar = header.locator(".conversation-find");
-  const sideBar = page.getByTestId("side-region").locator(".conversation-find");
+  const sideBar = page.getByTestId("side-pane").locator(".conversation-find");
   const input = bar.getByRole("textbox", { name: "在会话中查找" });
   const count = bar.locator(".conversation-find__count");
   // 记下最近一次 ⌘F 有没有被拦下（拦下 = 浏览器自己的查找不会出来）。查找挂在 window 的捕获阶段、
@@ -212,7 +212,17 @@ try {
   await page.getByTestId("side").click({ position: { x: 20, y: 20 } });
   assert.equal(await pressFind(), true);
   await sideBar.waitFor();
-  assert.equal(await sideBar.evaluate((node) => getComputedStyle(node).position), "absolute", "没留空位的会话里查找条浮着");
+  // 侧聊的查找条在侧聊自己顶上单独一行：不浮在消息上，也不跑去主会话的标题行（用户 2026-11-27）。
+  const sidePlaced = await page.evaluate(() => {
+    const bar = document.querySelector('[data-testid="side-pane"] .conversation-find').getBoundingClientRect();
+    const body = document.querySelector('[data-testid="side"]').getBoundingClientRect();
+    const pane = document.querySelector('[data-testid="side-pane"]').getBoundingClientRect();
+    return { above: bar.bottom <= body.top + 1, wide: bar.width >= pane.width - 24, position: getComputedStyle(document.querySelector('[data-testid="side-pane"] .conversation-find')).position };
+  });
+  assert.equal(sidePlaced.position, "static", "侧聊的查找条不浮着");
+  assert.ok(sidePlaced.above, "侧聊的查找条在侧聊消息上方");
+  assert.ok(sidePlaced.wide, "铺满侧聊的宽度");
+  assert.equal(await header.locator(".conversation-find").count(), 0, "主会话标题行里没有它");
   await bar.waitFor({ state: "detached", timeout: WAIT_TIMEOUT_MS });
   // 紧跟着 ⌘F 就打字，不等：字得落进刚开的查找条，而不是别处。
   await page.keyboard.type("编辑器");

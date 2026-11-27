@@ -6,7 +6,7 @@ import { InspNone } from "../inspector/parts.tsx";
 import { useStickToBottom } from "../lib/useStickToBottom.ts";
 import { chatTailKey } from "../lib/chatTailKey.ts";
 import { useScrollEdges } from "../lib/useScrollEdges.ts";
-import { ConversationFind } from "../components/ConversationFind.tsx";
+import { ConversationFind, ConversationFindSlot } from "../components/ConversationFind.tsx";
 import { formatInstant } from "../task-detail/utils.ts";
 import { SideChatComposer } from "./SideChatComposer.tsx";
 import { SideChatHeadControls } from "./SideChatHeadControls.tsx";
@@ -35,9 +35,11 @@ export function SideChatPane({ task }: { task: Task }) {
   const { resume, noteUserScrollIntent } = useStickToBottom(scroll, chat.room?.id ?? task.id, chatTailKey(chat.snapshot?.messages));
   const { atBottom } = useScrollEdges(scroll, chat.room?.id ?? task.id);
   const messages = chat.snapshot?.messages ?? [];
-  // 自成一块、不留空位：窄面板里查找条浮在会话右上角，也不会跑去外面那个任务的标题行。
+  // 自成一块：查找条停在侧聊自己顶上那一行（按了 ⌘F 才有），不跑去外面那个任务的标题行；
+  // 焦点或最近一次点击在侧聊里（回复框也算）时 ⌘F 才查侧聊，跟主会话的查找各是各的。
   return <section className="side-chat-pane" {...FIND_SCOPE} aria-label="任务侧聊" data-room-id={chat.room?.id ?? ""}>
     <SideChatHeadControls chat={chat} />
+    <ConversationFindSlot className="side-chat-find" />
     <div className="side-chat-scroll-wrap">
       <div className="side-chat-scroll" ref={scroll}>
         {!chat.ready && <p className="side-chat-note" role="status">正在读取侧聊…</p>}

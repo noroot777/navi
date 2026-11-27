@@ -11,6 +11,7 @@ import { ConversationScrollControls } from "../../src/components/ConversationScr
 import { contentVersion } from "../../src/lib/useStickToBottom.ts";
 import { FIND_SCOPE } from "../../src/search/conversationFind.ts";
 import "../../src/styles/global.css";
+import "../../src/side-chat/side-chat.css";
 
 type Item = { id: string; text: string; fold?: string; next?: string };
 
@@ -72,11 +73,12 @@ function Feed({ items }: { items: Item[] }) {
   );
 }
 
-// 照 SideChatPane 摆：自成一块、不留空位，正文和查找条在一层包装里，回复框是那层包装的兄弟。
+// 照 SideChatPane 摆：自成一块，顶上一行留着查找条的空位，正文在一层包装里，回复框是那层包装的兄弟。
 function Side() {
   const scroll = useRef<HTMLDivElement>(null);
   return (
-    <section {...FIND_SCOPE} style={{ display: "flex", width: 240, minHeight: 0, flexDirection: "column" }}>
+    <section {...FIND_SCOPE} data-testid="side-pane" style={{ display: "flex", width: 240, minHeight: 0, flexDirection: "column" }}>
+      <ConversationFindSlot className="side-chat-find" />
       <div data-testid="side-region" style={{ position: "relative", minHeight: 0, flex: 1 }}>
         <div ref={scroll} data-testid="side" style={{ height: "100%", overflow: "auto", padding: 12 }}>
           <p>侧聊：编辑器这个词这里也有。</p>

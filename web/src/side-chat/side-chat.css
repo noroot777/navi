@@ -11,6 +11,10 @@
 .side-chat-rooms__at { flex: 0 0 auto; color: var(--muted); font-size: var(--t-xs); font-variant-numeric: tabular-nums; }
 
 .side-chat-scroll-wrap { flex: 1; min-height: 0; position: relative; }
+/* ⌘F 查找条：侧聊顶上单独一行、铺满宽度（平时空位不占地方，见 conversation-find.css）。 */
+.side-chat-find.conversation-find-slot { flex: none; margin: 8px 10px 0; }
+.side-chat-find > .conversation-find { width: 100%; }
+.side-chat-find .conversation-find__input { width: auto; flex: 1; }
 .side-chat-scroll { height: 100%; overflow: auto; overscroll-behavior: contain; padding: 12px 14px 18px; }
 .side-chat-snap { width: fit-content; margin: 0 auto 12px; border-radius: var(--r-sm); color: var(--muted); font-size: var(--t-xs); font-variant-numeric: tabular-nums; }
 .side-chat-log { display: flex; flex-direction: column; gap: 14px; }
