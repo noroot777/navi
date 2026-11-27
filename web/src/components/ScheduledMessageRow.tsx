@@ -34,7 +34,7 @@ export function SteerButton({ message, busy, steering, onSteer }: {
       {steering ? <SpinnerGap size={13} className="is-spinning" aria-hidden="true" /> : <ChatsCircle size={13} weight="duotone" aria-hidden="true" />}
       <span>{steering ? "引导中" : "引导会话"}</span>
     </button>
-    <HoverTip at={tip.at}>不等这一轮结束，把这条直接接进正在进行的对话；手上正在写的那一步会先写完</HoverTip>
+    <HoverTip at={tip.at}>不等这一轮结束，把这条直接接进正在进行的对话</HoverTip>
   </>;
 }
 

@@ -31,8 +31,6 @@ export { continueWhenIdle } from "./turn-idle-delivery.js";
 export interface Killable {
   kill(): void;
   steer?(text: SteerText, beforeSend?: () => void | Promise<void>, onBoundary?: () => void): Promise<void>;
-  /** 同 RunHandle.steerBoundary。 */
-  steerBoundary?(): Promise<"clear" | "generating">;
   command?(command: CliCommand): Promise<string>;
   goal?(): CliGoal | null;
   /**
@@ -226,12 +224,6 @@ export type NativeSteerReservation = {
     /** 这条消息开的新方向：事件流越过引导边界时交给消费方（`bindNativeSteer` 的 steered）。 */
     directionToken?: string;
   }): Promise<void>;
-  /**
-   * 等手上的工具调用落地（RunHandle.steerBoundary）。`generating` = 打断会扔掉一步还没生成完的
-   * 调用，别引导；`ended` = 等的时候这一回合没了。领消息、清方向都要排在它后面：等的这段里
-   * 消息还在托盘上撤得回来，回合要是自己结束了，交给回合结尾的那次送达。
-   */
-  boundary(): Promise<"clear" | "generating" | "ended">;
   cancel(): void;
 } | { kind: "busy" } | { kind: "unsupported" };
 
@@ -274,12 +266,6 @@ export function reserveNativeSteerTask(taskId: string): NativeSteerReservation {
       } finally {
         release();
       }
-    },
-    async boundary() {
-      const live = () => !stopping.has(taskId) && nativeSteerTargets.get(taskId) === target && !!handles.get(taskId)?.has(target.handle);
-      if (!live()) return "ended";
-      const result = await target.handle.steerBoundary?.() ?? "clear";
-      return live() ? result : "ended";
     },
     cancel() {
       if (consumed) return;

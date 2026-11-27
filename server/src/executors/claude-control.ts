@@ -9,12 +9,6 @@ import type { ClaudePlanGate } from "./claude-plan-gate.js";
 export const INTERRUPT_ID_PREFIX = "navi_int_";
 const INTERRUPT_ID_PREFIXES = [INTERRUPT_ID_PREFIX, LEGACY_CLAUDE_INTERRUPT_ID_PREFIX];
 
-/**
- * 引导等手上那一步落地最多等多久（`toolBoundary`）。生成入参的上限对着「点了引导、界面停在引导中」
- * 能忍多久定：一分钟还没写完就别等了，消息留着排队，这一轮结束自动送；执行只等秒级的那种。
- */
-export const STEER_TOOL_BOUNDARY = { generatingMs: 60_000, runningMs: 3_000 };
-
 type PendingControl = {
   resolve(): void;
   reject(error: Error): void;
@@ -154,70 +148,6 @@ export class ClaudeControlBridge {
     return { abandoned: !!entry.inherited && entry.sent === false };
   }
 
-  /**
-   * 本回合主智能体手上的工具调用：id → 入参生成完的时刻（还在生成 = null），出了结果就删。
-   * 打断落在入参生成到一半时，CLI 把这次调用整个扔掉 —— 一份写了几分钟的长文件说没就没，
-   * 智能体回头只会从零再写一遍（qfix1xZNymhT：用户三次引导问进度，三次打掉同一个 Write）。
-   * 引导先等这一步落地（`toolBoundary`），由解析层记账。
-   */
-  private tools = new Map<string, number | null>();
-  private toolWaiters = new Set<() => void>();
-  /** 流里开始生成一次工具调用（`content_block_start`）。 */
-  noteToolStart(id: string): void {
-    if (!this.tools.has(id)) this.tools.set(id, null);
-  }
-  /** 一条新的模型消息开始了：上一条里没生成完的调用不会再完成了（重试、出错）。 */
-  noteMessageStart(): void {
-    for (const [id, generatedAt] of this.tools) if (generatedAt === null) this.tools.delete(id);
-    this.wakeTools();
-  }
-  /** 完整的 `assistant` 消息带着这次调用到了：入参生成完了，接下来是执行。 */
-  noteToolCall(id: string): void {
-    this.tools.set(id, Date.now());
-    this.wakeTools();
-  }
-  noteToolResult(id: string): void {
-    if (this.tools.delete(id)) this.wakeTools();
-  }
-  /** 回合结尾 / 流没了：手上什么都不剩。 */
-  clearTools(): void {
-    this.tools.clear();
-    this.wakeTools();
-  }
-  private wakeTools(): void {
-    for (const wake of [...this.toolWaiters]) wake();
-  }
-
-  /**
-   * 等手上的工具调用落地再打断。正在生成入参的一直等到 `generatingMs`，到点还没生成完就答
-   * `generating`（调用方别打断，消息留着排队）；入参都生成完了就再给执行 `runningMs`，让秒级的
-   * 写文件、读文件把结果落进历史 —— 长跑的命令不等，打断它跟以前一样。
-   */
-  async toolBoundary(opts: { generatingMs: number; runningMs: number }): Promise<"clear" | "generating"> {
-    const started = Date.now();
-    for (;;) {
-      const now = Date.now();
-      const values = [...this.tools.values()];
-      let wait: number;
-      if (values.includes(null)) {
-        wait = started + opts.generatingMs - now;
-        if (wait <= 0) return "generating";
-      } else {
-        wait = values.length ? Math.max(...(values as number[])) + opts.runningMs - now : 0;
-        if (wait <= 0) return "clear";
-      }
-      await new Promise<void>((resolve) => {
-        const done = () => {
-          clearTimeout(timer);
-          this.toolWaiters.delete(done);
-          resolve();
-        };
-        const timer = setTimeout(done, wait);
-        this.toolWaiters.add(done);
-      });
-    }
-  }
-
   private persist(entries: SteerEntry[], sends = this.sends): void {
     if (this.journalPath) saveSteerJournal(this.journalPath, { entries, ...(sends.length ? { sends } : {}) });
   }
@@ -270,7 +200,6 @@ export class ClaudeControlBridge {
   }
 
   failPending(error: Error): void {
-    this.clearTools();
     for (const waiter of this.pending.values()) {
       clearTimeout(waiter.timer);
       waiter.reject(error);

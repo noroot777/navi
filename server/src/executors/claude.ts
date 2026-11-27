@@ -17,7 +17,7 @@ import { cleanupAfterRun, spawnAgent, resumeFor, resumeInner, shq, killChild, re
 import { relayRoot } from "../llm.js";
 import { monitorRedirectHook } from "../claude-monitor-hook.js";
 import { anthropicContext1mBaseUrl, modelUsesContext1m, withContext1mSuffix } from "../anthropic-context-1m.js";
-import { ClaudeControlBridge, STEER_TOOL_BOUNDARY } from "./claude-control.js";
+import { ClaudeControlBridge } from "./claude-control.js";
 import { parseClaudeStream } from "./claude-stream.js";
 import { claudeNaviMcpInjection, type ClaudeNaviMcpInjection } from "./navi-mcp-inject.js";
 import { claudeGoalInvocation, cleanupClaudeGoalContext } from "./claude-goal.js";
@@ -407,7 +407,6 @@ export class ClaudeExecutor implements AgentExecutor {
         return true;
       },
       turnActive: () => resident.turnActive,
-      toolBoundary: () => resident.toolBoundary(STEER_TOOL_BOUNDARY),
       epoch: () => resident.epoch,
       backgroundPending: () => resident.backgroundPending(),
       interrupt: () => {
