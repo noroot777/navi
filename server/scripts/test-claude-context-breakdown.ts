@@ -8,6 +8,8 @@ import { join } from "node:path";
 import type { AgentEvent } from "@navi/shared";
 import { ClaudeExecutor } from "../src/executors/claude.js";
 import { ClaudeControlBridge } from "../src/executors/claude-control.js";
+import { singleRunFromResident } from "../src/executors/claude-single-run.js";
+import type { ResidentHandle } from "../src/executors/types.js";
 import { contextBreakdownFromClaude, parseStoredContextBreakdown } from "../src/context-breakdown.js";
 import { IS_WINDOWS } from "../src/platform.js";
 
@@ -158,6 +160,51 @@ try {
     assert.equal(await pending, null, "进程没了立刻 null，不抛");
     console.log("✓ 不认 / stdin 关了 / 进程没了：都是 null，从不抛");
   }
+
+  // ⑥ 等分项的那几秒里换了回合（CLI 自己开的，或者插话直接送进去）：这个结尾作废，不收台、不报结束、
+  //    分项不要，接着读流，新回合的结尾再收台；等的时候插话照收，不拒。
+  for (const how of ["cli", "steer"] as const) {
+    let epoch = 0;
+    let active = false;
+    let closed = false;
+    let release: () => void = () => {};
+    const nextTurn = new Promise<void>((resolve) => { release = resolve; });
+    const fake = {
+      sessionId: "race", commandLine: "race", launchCompact: null,
+      events: (async function* () {
+        yield { kind: "turnEnd", epoch: 0 } as AgentEvent;
+        await nextTurn;
+        yield { kind: "text", text: "新回合在干活" } as AgentEvent;
+        active = false;
+        yield { kind: "turnEnd", epoch: 1 } as AgentEvent;
+      })(),
+      epoch: () => epoch,
+      turnActive: () => active,
+      contextBreakdown: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        if (how === "cli") { epoch = 1; active = true; }
+        else await run.steer!("插一句");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        release();
+        return contextBreakdownFromClaude(USAGE, "t");
+      },
+      send: () => { epoch = 1; active = true; return true; },
+      close: () => { closed = true; },
+      kill: () => {}, interrupt: () => {},
+      cleanup: async () => ({ kind: "empty" }),
+    } as unknown as ResidentHandle;
+    const run = singleRunFromResident(fake);
+    const seen: string[] = [];
+    let closedBeforeNewTurnEnded = false;
+    for await (const event of run.events) {
+      seen.push(event.kind);
+      if (event.kind === "text") closedBeforeNewTurnEnded = closed;
+    }
+    assert.equal(closedBeforeNewTurnEnded, false, `${how}：新回合在干活时没被收台`);
+    assert.deepEqual(seen, ["text", "contextBreakdown", "done"], `${how}：旧结尾的分项不要，新回合结尾照常问一次再收台`);
+    assert.equal(closed, true);
+  }
+  console.log("✓ 等分项时换了回合：不截断新回合，插话照收，新回合结尾再收台");
 
   // ⑤ 两头的解析：回包缺分项表或窗口就当没取到；落库那份读回来一致，坏的当没有。
   {

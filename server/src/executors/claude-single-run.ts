@@ -130,11 +130,17 @@ export function singleRunFromResident(
             reassess(); // 排队到这里的这段时间里,它们可能已经全跑完了
             continue;
           }
-          accepting = false;
           // 收台之前问一次分项:进程还活着、MCP 都连着,回合刚收口,这一刻的数才准(冷启动再问就缺
           // MCP 那一项)。最多等 CONTEXT_USAGE_TIMEOUT_MS,拿不到照常收台、不留快照;等的时候被停止,
           // 进程一没回包就作废,同样立刻往下走。
+          //
+          // **等完要重新核对回合身份**:解析层不随这里的 await 暂停,这几秒里 CLI 可能自己开了下一回合
+          // (完成通知到了),插话也可能直接送了进去(这段里照收,见 steer 的空档分支)。上面那道 `stale`
+          // 只管得到 await 之前,等完换了回合还收台,就是把正在干活的新回合截断、报成功结束。换了回合:
+          // 这个结尾作废,分项也归不到哪一回合、不要,接着读流,由新回合的结尾再定。
           const breakdown = await resident.contextBreakdown?.();
+          if (!stopped && stale(event.epoch)) continue;
+          accepting = false;
           if (breakdown) yield { kind: "contextBreakdown", breakdown };
           resident.close();
           yield { kind: "done", exitStatus: 0 };

@@ -68,6 +68,7 @@ import { collectGateRuns } from "./handoff-accept-gate.js";
 import { withRunFileLock } from "./run-file-lock.js";
 import { sessionContextCompact } from "./usage.js";
 import { serializeCompactSnapshot } from "@navi/shared/usage";
+import { storedContextBreakdownText } from "./context-breakdown.js";
 
 export async function handoffRemoteUrl(taskId: string): Promise<string> {
   const row = (await db.select({ handoff: tasks.handoff }).from(tasks).where(eq(tasks.id, taskId))).at(0);
@@ -507,6 +508,7 @@ export async function exportHandoff(
           contextUsed: s.contextUsed, contextWindow: s.contextWindow,
           contextWindowEstimated: s.contextWindowEstimated,
           contextCompact: s.contextUsed === null ? null : serializeCompactSnapshot(sessionContextCompact(s)),
+          contextBreakdown: storedContextBreakdownText(s.contextBreakdown),
         })),
         freeWorkflow,
         acceptGateRuns: await collectGateRuns(task.id),

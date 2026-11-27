@@ -327,10 +327,20 @@ async function consume(lead: Lead): Promise<void> {
 }
 
 
-/** 常驻台每回合末的上下文分项(见 ResidentHandle.contextBreakdown):到了才写,摘牌的台不写也不播。 */
+/** 每台调度台最近一次问分项是第几次:回包不等、可能倒着到,只有最近那一次的回包才写。 */
+const breakdownAsks = new WeakMap<Lead, number>();
+
+/**
+ * 常驻台每回合末的上下文分项(见 ResidentHandle.contextBreakdown):到了才写,摘牌的台不写也不播。
+ * 上一回合的回包慢、下一回合的先到时,迟到的那份是旧的,不许盖掉新的 —— 按发问的先后认,只写最近
+ * 那一次的(请求按 stdin 顺序发出,最近一次问的就是最近一个回合末)。
+ */
 function askContextBreakdown(lead: Lead, turnStartedAt: string | null): void {
-  void lead.handle.contextBreakdown?.().then(async (breakdown) => {
-    if (!breakdown || lead.retired) return;
+  if (!lead.handle.contextBreakdown) return;
+  const ask = (breakdownAsks.get(lead) ?? 0) + 1;
+  breakdownAsks.set(lead, ask);
+  void lead.handle.contextBreakdown().then(async (breakdown) => {
+    if (!breakdown || lead.retired || breakdownAsks.get(lead) !== ask) return;
     const stamped = { ...breakdown, turnStartedAt };
     await setSessionContextBreakdown(lead.sessId, stamped);
     publish(lead, { kind: "contextBreakdown", breakdown: stamped });

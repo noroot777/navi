@@ -129,3 +129,9 @@ export function parseStoredContextBreakdown(raw: string | null | undefined): Con
     return null;
   }
 }
+
+/** 存着/收到的那份文本 → 原样可再存的文本;校验不过就是 null(接力两头共用,不把坏的搬过去)。 */
+export function storedContextBreakdownText(raw: string | null | undefined): string | null {
+  const parsed = parseStoredContextBreakdown(raw);
+  return parsed ? JSON.stringify(parsed) : null;
+}

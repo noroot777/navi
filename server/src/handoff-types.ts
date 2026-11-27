@@ -221,6 +221,8 @@ export interface HandoffSessionRow {
   // 接收端没有源机的 resume_args 可推。可选:老版本对端不带、或带了却没有来源标记,接收端读侧
   // 一律按证明不了处理,只剩模型水位。
   contextCompact?: string | null;
+  // 上下文分项(shared ContextBreakdown 的 JSON 文本,源机校验过再给)。可选:老版本对端不带,接收端落 null。
+  contextBreakdown?: string | null;
 }
 
 export interface HandoffManifest {

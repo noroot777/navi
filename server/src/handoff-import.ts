@@ -47,6 +47,7 @@ import { collectGateRuns, replaceGateRuns, returningAcceptanceId } from "./hando
 import { newHumanGate } from "./task-human-gate.js";
 import { checkCarriedPrerequisites, landedSuggestionColumns, returnedSuggestionColumns } from "./handoff-suggestions.js";
 import { questionHistoryWithoutDebt } from "./dispatch-suggestion-settle.js";
+import { storedContextBreakdownText } from "./context-breakdown.js";
 
 export interface HandoffImportResult {
   ok: true;
@@ -465,6 +466,7 @@ async function importValidated(
     contextWindow: s.contextWindow,
     contextWindowEstimated: s.contextWindowEstimated,
     contextCompact: typeof s.contextCompact === "string" ? s.contextCompact : null,
+    contextBreakdown: storedContextBreakdownText(s.contextBreakdown),
     // 逐回合计数**显式钉成「本机零历史」**,别留 NULL（本轮审查第 4 条）。
     //
     // 载荷里不带回合行(下面那条 delete 还会把本机残留的清掉),所以导进来的会话在本机一行
