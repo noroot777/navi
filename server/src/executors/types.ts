@@ -71,6 +71,11 @@ export interface RunHandle {
   // 单飞当前回合的原生引导通道。存在时调用方把新 user 消息送进同一个活动回合，
   // 不结束任务、不释放单飞锁；回合自然结束后这根通道随 RunHandle 一起关闭。
   steer?(text: SteerText, beforeSend?: () => void | Promise<void>): Promise<void>;
+  /**
+   * 这个进程跑的是计划模式回合。只有接管旧进程时由执行器从起跑事实里认回来（目前 claude 的
+   * commandLine 带着计划参数），起跑方自己知道、不靠它。
+   */
+  planTurn?: boolean;
   command?(command: CliCommand): Promise<string>;
   goal?(): CliGoal | null;
   goalStarted?(): boolean;
@@ -184,11 +189,10 @@ export interface ResidentHandle {
    */
   backgroundPending?(): { agent: number; workflow: number; unknown?: true };
   /**
-   * 问 CLI 此刻上下文里各类东西各占多少(shared ContextBreakdown)。只在回合 `result` 之后问才准:
-   * 冷启动的进程 MCP 还没连上,那一项整个缺(实测)。拿不到就 null、从不抛,最多等
-   * CONTEXT_USAGE_TIMEOUT_MS。只有 claude 实现;没有这一项 = 这家给不出分项。
+   * 向这个活着的进程问一份上下文分项(claude 才有,见 claude-context-breakdown.ts)。只在回合 `result`
+   * 之后问才准;stdin 关了、CLI 报错、超时都给 null,**从不抛**,调用方照常往下走。
    */
-  contextBreakdown?(): Promise<ContextBreakdown | null>;
+  contextBreakdown?(timeoutMs?: number): Promise<ContextBreakdown | null>;
   kill(): void; // 硬杀,走 killChild 三层击杀
   /**
    * 覆盖这个句柄**已经启动过的所有回合/后代**的幂等 finalizer。`kill()` 只负责进程本体

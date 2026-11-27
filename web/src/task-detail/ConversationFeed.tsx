@@ -8,6 +8,8 @@ import { conversationTailKey } from "./conversationModel.ts";
 import { annotationBatchDisplayText } from "@navi/shared/page-annotation-display";
 import { ConversationScrollControls } from "../components/ConversationScrollControls.tsx";
 import { AgentTurnBody } from "../components/AgentTurnBody.tsx";
+import { draftingLabel } from "../lib/executionWords.ts";
+import type { DraftingEvent } from "@navi/shared";
 import { AgentIcon, hasAgentIcon } from "../components/AgentIcon.tsx";
 import { CopyButton } from "../components/CopyButton.tsx";
 import { ImagePreviewGroup } from "../components/ImagePreview.tsx";
@@ -35,7 +37,8 @@ import { noticeLink, type NoticeLinkTargets } from "./noticeLinks.ts";
 import { ReviewBubble } from "./ReviewBubble.tsx";
 import { feedRowAt, interleaveAsides, type FeedAside } from "./feedAsides.ts";
 import { reviewProgress } from "./reviewProgress.ts";
-import { footnoteKey, receiptsKey, type FootnotePart, type TurnFootnote } from "./turnFootnote.ts";
+import { footnoteKey, type FootnotePart, type TurnFootnote } from "./turnFootnote.ts";
+import { sameSettledTurn } from "./settledTurnMemo.ts";
 import { crashedTurns } from "./turnFailure.ts";
 import { useJustEnded } from "./useJustEnded.ts";
 import { conversationKeys } from "./conversationKeys.ts";
@@ -90,6 +93,7 @@ function AgentMessageView({
   taskActive,
   receipts,
   footnote,
+  drafting,
 }: {
   item: Extract<ConversationItem, { kind: "agent" }>;
   /** 这条发言是在哪个任务的工作目录里说的（正文里的图靠它去那个目录取），见 AgentTurnBody。 */
@@ -110,6 +114,8 @@ function AgentMessageView({
    * 回合尾那排操作上面。`key` 是它的签名：收口的回合只在它变了时重画。
    */
   footnote?: { node: ReactNode; key: string };
+  /** 这一回合此刻正在生成的那一步（见 AgentTurnBody）。 */
+  drafting?: DraftingEvent | null;
 }) {
   const log = useTurnReceipts();
   const duration = durationBetween(item.at, item.endedAt);
@@ -154,7 +160,7 @@ function AgentMessageView({
           </header>
         )}
         {wakeReply && <MonitorWakeReply />}
-        <AgentTurnBody segments={item.segments} running={!item.endedAt} taskId={taskId} since={live ? item.at : undefined} />
+        <AgentTurnBody segments={item.segments} running={!item.endedAt} taskId={taskId} since={live ? item.at : undefined} drafting={live ? drafting : null} />
         {footnote?.node}
         {/* 跑着的这一回合还没说完，尾上的操作等它收口再出（run-5）。「N 条记录」是那一排里的一颗，
             摊开的流水在它下面。 */}
@@ -166,60 +172,6 @@ function AgentMessageView({
       </div>
     </article>
   );
-}
-
-type AgentMessageProps = Parameters<typeof AgentMessageView>[0];
-
-/**
- * 已经收口的回合不跟着别人的事件重渲。会话每来一条
- * 事件，整份条目都会重新拼一遍、每一条都是新对象；还在说的那一回合要跟着变，说完的那些只在
- * 它自己真的变了时才重画（重读回来补上了执行过程、被删了一截、旁边多了回执）。回调只认有没有：
- * 它们闭包里拿的都是稳定的 setter / 派发函数。
- */
-export function sameSettledTurn(prev: AgentMessageProps, next: AgentMessageProps): boolean {
-  if (prev.item === next.item && prev.taskActive === next.taskActive) return shallowRest(prev, next);
-  const settled = (props: AgentMessageProps) => !!props.item.endedAt || !props.taskActive;
-  if (!settled(prev) || !settled(next)) return false;
-  const a = prev.item;
-  const b = next.item;
-  return a.id === b.id && a.endedAt === b.endedAt && a.markdown === b.markdown && a.label === b.label && a.agentType === b.agentType
-    && sameSegments(a.segments, b.segments)
-    && a.continuation === b.continuation && a.wokenByMonitor === b.wokenByMonitor && a.resumeCause?.reason === b.resumeCause?.reason
-    && a.reviewer?.round === b.reviewer?.round && a.run?.model === b.run?.model && a.run?.reasoningEffort === b.run?.reasoningEffort
-    && sameJson(a.sources, b.sources) && sameJson(a.usage, b.usage) && a.session?.exitStatus === b.session?.exitStatus
-    && shallowRest(prev, next);
-}
-
-/**
- * 段落比内容，不比条数：重读回来的同一回合，工具详情、附件路径、配对的那份拷贝可能换了而条数
- * 不变（第 1 轮审查）。逐项比一遍远比重画这一回合便宜。
- */
-function sameSegments(left: AgentMessageProps["item"]["segments"], right: AgentMessageProps["item"]["segments"]): boolean {
-  if (left === right) return true;
-  if (left.length !== right.length) return false;
-  return left.every((segment, index) => {
-    const other = right[index]!;
-    return segment === other || (segment.id === other.id && segment.markdown === other.markdown && segment.awaiting === other.awaiting
-      && segment.attachments.join("\n") === other.attachments.join("\n")
-      && sameJson(segment.attachmentSources, other.attachmentSources)
-      && segment.events.length === other.events.length
-      && segment.events.every((event, at) => {
-        const twin = other.events[at]!;
-        return event === twin || (event.kind === twin.kind && event.label === twin.label && event.detail === twin.detail
-          && event.at === twin.at && sameJson(event.nativeWork, twin.nativeWork));
-      }));
-  });
-}
-
-const sameJson = (left: unknown, right: unknown) => left === right || JSON.stringify(left) === JSON.stringify(right);
-
-function shallowRest(prev: AgentMessageProps, next: AgentMessageProps): boolean {
-  return prev.taskId === next.taskId && prev.hideTime === next.hideTime && prev.laneRole === next.laneRole
-    && prev.wakeReply === next.wakeReply && prev.taskActive === next.taskActive
-    && !!prev.onFork === !!next.onFork && !!prev.onAskSideChat === !!next.onAskSideChat
-    // 记录与尾注比的是摆出来的全部内容（含记录里那几轮审查晚到的身份、报告、附言），不只条数。
-    && receiptsKey(prev.receipts) === receiptsKey(next.receipts)
-    && prev.footnote?.key === next.footnote?.key;
 }
 
 function UserMessage({
@@ -315,6 +267,7 @@ export function ConversationFeed({
   onDeleteDiscussion,
   onReuseInput,
   asides,
+  drafting,
 }: {
   task: TaskListItem;
   /**
@@ -323,6 +276,8 @@ export function ConversationFeed({
    */
   requirement?: { text: string; at?: string | null; origin?: TaskCreationOrigin | null } | null;
   items: ConversationItem[];
+  /** 每条会话此刻正在生成的那一步（useConversation 的 drafting）。 */
+  drafting?: ReadonlyMap<string, DraftingEvent>;
   sessions?: Session[];
   loading: boolean;
   error: Error | null;
@@ -388,6 +343,9 @@ export function ConversationFeed({
     [items, requirementAt, requirementText],
   );
   const activityPhase = runActivityPhase(task.status, runActivityTail(items));
+  // 还没开口就先生成起一大步来（一上来就写长文件）：进行条那一行直接说它在写什么。
+  const liveActor = liveRunActor(sessions ?? []);
+  const liveDraft = liveActor ? drafting?.get(liveActor.id) : undefined;
   const queuedCopy = task.status === "queued"
     ? runActivityCopy({ status: task.status, mode: task.mode, phase: activityPhase ?? undefined, queuePosition: task.queuePosition })
     : null;
@@ -493,6 +451,7 @@ export function ConversationFeed({
           onAskSideChat={onAskSideChat}
           taskActive={task.status === "running" || task.status === "queued"}
           receipts={receiptsOf(item.id)}
+          drafting={item.endedAt ? null : drafting?.get(item.sessionId) ?? null}
           footnote={footnote?.parts.length
             // 点得过去的那几句也进签名：审查记录晚到一步才认得出驳回是哪一场，那一回合得跟着重画。
             ? { node: renderFootnote(footnote), key: footnoteKey(footnote, `${footnote.parts.some((part) => isRetryable(part, footnote)) ? "retry" : ""}:${footnote.parts.map((part) => part.kind === "event" && noticeLink(part.item, linkTargets) ? 1 : 0).join("")}`) }
@@ -613,7 +572,8 @@ export function ConversationFeed({
           {/* 等它开口的那一段只有一行进行条（run-2）；排着队时字不动，原因指上去看。 */}
           {activityPhase && !loading && !error && !reviewRunning && (task.status === "queued"
             ? <LiveStrip still since={null} text={queuedCopy?.title ?? "排着队"} tip={queuedCopy?.detail} />
-            : <LiveStrip since={task.liveSince} agent={liveRunActor(sessions ?? [])?.agentType} />)}
+            : <LiveStrip since={task.liveSince} agent={liveActor?.agentType}
+                text={liveDraft ? draftingLabel(liveDraft) : undefined} />)}
           {/* 正文一条都没读下来时这里是空的，但那不是「还没开始跑」——`forkBlockedReason`
               在场就说明读挂了，再劝用户点运行是把失败说成了空会话。 */}
           {task.status === "backlog" && (task.prerequisites?.waiting || task.prerequisites?.blocked) && !activityPhase && (

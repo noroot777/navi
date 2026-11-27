@@ -50,7 +50,7 @@ import { planTurnInput } from "./plan-turn.js";
 import { assembleFreshPrompt } from "./turn-prompt.js";
 import { announceBaseFallback, baseFallbackNote } from "./base-fallback-notice.js";
 import { remoteStartNote } from "./remote-start-notice.js";
-import { recordUserConversationTurn } from "./conversation-turn.js";
+import { nativeSteerBinding } from "./native-steer-binding.js";
 import { cliConfigDirColumn, runEnvForOwner } from "./auth/run-env.js";
 import { turnIdentityEnv } from "./turn-identity.js";
 import { launchFields } from "./usage.js";
@@ -357,12 +357,9 @@ async function runHeldTask(
     await consumeSingleRun({
       taskId, sessId, agentType, ex, cwd: ws.path,
       handle, out, turnStart, cliSessionId, autoTitle, turn,
-      nativeSteer: {
-        prepare: (text) => withSkillInvocation({ agentType, cwd: ws.path, text, userId: runOwner }),
-        record: (text, at) => recordUserConversationTurn({
-          taskId, sessionId: sessId, role: "single", agentType, out, text, at,
-        }),
-      },
+      nativeSteer: nativeSteerBinding({
+        taskId, sessionId: sessId, role: "single", agentType, cwd: ws.path, userId: runOwner, out, plan: planInput.question,
+      }),
     });
   } catch (err) {
     // handle 已登记后收到「引导会话」时，kill 可能恰好让 parser 抛而不是正常收流。

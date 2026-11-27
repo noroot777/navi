@@ -47,7 +47,7 @@ import { collectGateRuns, replaceGateRuns, returningAcceptanceId } from "./hando
 import { newHumanGate } from "./task-human-gate.js";
 import { checkCarriedPrerequisites, landedSuggestionColumns, returnedSuggestionColumns } from "./handoff-suggestions.js";
 import { questionHistoryWithoutDebt } from "./dispatch-suggestion-settle.js";
-import { storedContextBreakdownText } from "./context-breakdown.js";
+import { storedContextBreakdownText } from "./executors/claude-context-breakdown.js";
 
 export interface HandoffImportResult {
   ok: true;

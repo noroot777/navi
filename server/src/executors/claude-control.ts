@@ -8,18 +8,11 @@ import type { ClaudePlanGate } from "./claude-plan-gate.js";
  */
 export const INTERRUPT_ID_PREFIX = "navi_int_";
 const INTERRUPT_ID_PREFIXES = [INTERRUPT_ID_PREFIX, LEGACY_CLAUDE_INTERRUPT_ID_PREFIX];
-
-/** 上下文分项请求(`get_context_usage`)的请求号前缀。跟打断那一路分开编号,回执各认各的。 */
-export const CONTEXT_USAGE_ID_PREFIX = "navi_ctx_";
-
-/**
- * 回合结束问分项最多等多久。`detail:"full"` 走真实 token 计数(API 不通时 CLI 自己退回估算),
- * 实测 15 万 token 的会话 2 秒内回;等不到就当这一回合没取到,不拖结算。
- */
-export const CONTEXT_USAGE_TIMEOUT_MS = 5_000;
+/** 只读查询(`query`)的请求号前缀。不落盘:进程一没,问的结果也就没用了。 */
+const QUERY_ID_PREFIX = "navi_q_";
 
 type PendingControl = {
-  resolve(response?: unknown): void;
+  resolve(): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
 };
@@ -46,15 +39,6 @@ export class ClaudeControlBridge {
   ) {}
   /** 第几个回合结尾(孤儿回执不算),由解析层推进。打断认领哪一个结尾按它记。 */
   turns = 0;
-  /**
-   * CLI 在 init 里自报的版本(`claude_code_version`),解析层写,重放里的 init 也算。没自报 = 说不准
-   * 它认不认 `get_context_usage`,就不问:不认的真 claude 会当场回 error,别的东西可能一声不吭,
-   * 那就白等一个超时。
-   */
-  cliVersion: string | null = null;
-  /** 问过一次、CLI 答「不认这个子类型」:这个进程往后不再问。 */
-  private contextUnsupported = false;
-  private contextSequence = 0;
   /**
    * 此刻名下还没了结的后台工作(解析层的实时账本,见 ResidentHandle.backgroundPending)。
    * 解析层接上之前一律按「不知道」答。
@@ -172,6 +156,8 @@ export class ClaudeControlBridge {
 
   private sequence = 0;
   private readonly pending = new Map<string, PendingControl>();
+  private querySequence = 0;
+  private readonly queries = new Map<string, (value: unknown | null) => void>();
 
   request(): { requestId: string; line: string } {
     const requestId = `${INTERRUPT_ID_PREFIX}${++this.sequence}`;
@@ -206,55 +192,52 @@ export class ClaudeControlBridge {
   }
 
   /**
-   * 问一次上下文分项(`get_context_usage`,detail:"full"),返回回包里的 `response`。拿不到 —— 没自报版本、
-   * 写不进 stdin、CLI 回 error、超时、进程没了 —— 一律 null,**从不抛**:调用方在收台/回合收尾的路上,
-   * 分项只是锦上添花。`write` 返回 false = stdin 已经关了。
+   * 向 CLI **问**一件事(`get_context_usage` 这类只读请求):返回要写进 stdin 的那一行,以及等回执的
+   * promise —— 成功给回执里的 `response`,报错、超时、进程没了一律给 null,**从不抛**。请求号另用
+   * 一个前缀,跟打断那一路(要落盘、接管时按前缀认)互不相干;CLI 发来的权限请求走的是 CLI 自己的号。
    */
-  contextUsage(write: (line: string) => boolean, timeoutMs = CONTEXT_USAGE_TIMEOUT_MS): Promise<unknown> {
-    if (!this.cliVersion || this.contextUnsupported) return Promise.resolve(null);
-    const requestId = `${CONTEXT_USAGE_ID_PREFIX}${++this.contextSequence}`;
-    const line = `${JSON.stringify({ type: "control_request", request_id: requestId, request: { subtype: "get_context_usage", detail: "full" } })}\n`;
-    return new Promise((resolve) => {
+  query(subtype: string, body: Record<string, unknown>, timeoutMs: number): { line: string; reply: Promise<unknown | null>; cancel(): void } {
+    const requestId = `${QUERY_ID_PREFIX}${++this.querySequence}`;
+    let settle: (value: unknown | null) => void = () => {};
+    const reply = new Promise<unknown | null>((resolve) => {
       const timer = setTimeout(() => {
-        this.pending.delete(requestId);
+        this.queries.delete(requestId);
         resolve(null);
       }, timeoutMs);
       timer.unref?.();
-      this.pending.set(requestId, {
-        resolve: (response) => resolve((response as { response?: unknown } | undefined)?.response ?? null),
-        reject: (error) => {
-          if (/unsupported control request/i.test(error.message)) this.contextUnsupported = true;
-          resolve(null);
-        },
-        timer,
-      });
-      let written = false;
-      try {
-        written = write(line);
-      } catch {
-        written = false;
-      }
-      if (!written) {
+      settle = (value) => {
+        if (!this.queries.delete(requestId)) return;
         clearTimeout(timer);
-        this.pending.delete(requestId);
-        resolve(null);
-      }
+        resolve(value);
+      };
+      this.queries.set(requestId, settle);
     });
+    return {
+      line: `${JSON.stringify({ type: "control_request", request_id: requestId, request: { subtype, ...body } })}\n`,
+      reply,
+      cancel: () => settle(null),
+    };
   }
 
   handleResponse(message: any): void {
     const response = message?.response ?? message;
     const requestId = response?.request_id ?? message?.request_id;
     if (typeof requestId !== "string") return;
+    const query = this.queries.get(requestId);
+    if (query) {
+      query(response?.subtype === "success" ? response.response ?? null : null);
+      return;
+    }
     const waiter = this.pending.get(requestId);
     if (!waiter) return;
     this.pending.delete(requestId);
     clearTimeout(waiter.timer);
-    if (response?.subtype === "success") waiter.resolve(response);
+    if (response?.subtype === "success") waiter.resolve();
     else waiter.reject(new Error(responseError(response)));
   }
 
   failPending(error: Error): void {
+    for (const query of [...this.queries.values()]) query(null);
     for (const waiter of this.pending.values()) {
       clearTimeout(waiter.timer);
       waiter.reject(error);

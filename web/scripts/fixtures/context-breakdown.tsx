@@ -12,8 +12,8 @@ const breakdown: ContextBreakdown = {
   at,
   turnStartedAt: at,
   model: "claude-opus-5",
-  totalTokens: 82_040,
-  maxTokens: 200_000,
+  total: 82_040,
+  max: 200_000,
   autoCompactThreshold: 167_000,
   categories: [
     { name: "System prompt", tokens: 6_231, kind: "used" },

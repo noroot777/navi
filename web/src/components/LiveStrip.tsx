@@ -17,7 +17,7 @@ export function thinkWord(elapsedMs: number): string {
   return elapsedMs >= 15_000 ? "还在想" : "在想";
 }
 
-export function LiveStrip({ since, agent, text, still = false, tip }: {
+export function LiveStrip({ since, agent, text, still = false, tip, inline = false }: {
   /** 这一轮从哪一刻算起；没有就不写用时。 */
   since: string | null | undefined;
   /** 这一回合在谁手上（agentType）；还没交出去就不给。 */
@@ -27,6 +27,8 @@ export function LiveStrip({ since, agent, text, still = false, tip }: {
   still?: boolean;
   /** 指上去多说的一句（排队时「前面的任务结束后会自动启动」）。 */
   tip?: ReactNode;
+  /** 摆在一颗气泡里面（正在生成的那一步，见 AgentTurnBody）：跟着气泡正文对齐，不再让出头像那一栏。 */
+  inline?: boolean;
 }) {
   const start = since ? Date.parse(since) : Number.NaN;
   const now = useNow(true);
@@ -34,7 +36,7 @@ export function LiveStrip({ since, agent, text, still = false, tip }: {
   const label = text ?? thinkWord(elapsed ?? 0);
   const hover = useHoverTip();
   return (
-    <div className={`live-strip${agent ? " has-agent" : ""}`} role="status" aria-live="polite" {...(tip ? hover.anchorProps : {})}>
+    <div className={`live-strip${agent ? " has-agent" : ""}${inline ? " is-inline" : ""}`} role="status" aria-live="polite" {...(tip ? hover.anchorProps : {})}>
       {agent && <span className="live-strip-agent" aria-hidden="true"><AgentIcon agent={agent} size={16} /></span>}
       <span className={`live-strip-label${still ? "" : " shim"}`}>{label}</span>
       {elapsed !== null && elapsed >= 2000 && <span className="live-strip-time num">{formatDuration(elapsed)}</span>}

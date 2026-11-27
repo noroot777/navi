@@ -21,6 +21,7 @@ import {
 import { db } from "./db/index.js";
 import { sessions, sessionTurns, usageCumulativeSnapshots } from "./db/schema.js";
 import { boundMonitorWake } from "./session-turns.js";
+import { parseStoredContextBreakdown } from "./executors/claude-context-breakdown.js";
 
 type SessionRow = typeof sessions.$inferSelect;
 type UsageEvent = Extract<AgentEvent, { kind: "usage" }>;
@@ -251,24 +252,40 @@ export async function setSessionContext(sessId: string, context: ContextUsage): 
 }
 
 /**
- * 上下文分项落到会话行(shared/src/context-breakdown.ts)。覆盖式,跟水位分开写:水位每次请求都更新,
- * 分项只在回合末更新。同样 best-effort:写不进去只记日志,不影响回合结算。
+ * 上下文分项落库,同样**覆盖**、同样 best-effort。`turnStartedAt` 记它是哪一回合末取的:分项和水位
+ * 不同时刻,界面要说得出「这份是几分钟前、哪一回合的」。
  *
- * `row` 是写哪一行的条件,缺省按会话 id;常驻调度台传它的 `ownRow`(会话 id + 持有者代次),取数
- * 回来到语句真正执行之间被别的台接管了,这一笔就落空。返回这一行真写进去了没有。
+ * **只认更新的那份**:条件落在语句里 —— 库里那份是同一时刻或更晚问的就不写(`at` 是发出请求的时刻,
+ * 见 claude.ts 的 contextBreakdown)。回执可能乱序到,写库还要排队等数据库空闲,入口判过的东西到语句
+ * 真正执行时未必还成立;按回执先后、按入口那一眼判,旧的都能盖掉新的。`owner` 是调用方另加的持有
+ * 条件(团队调度台的 `ownRow`:被接管之后旧台一笔都不许写)。返回写没写进去,没写进去就别广播。
  */
 export async function setSessionContextBreakdown(
   sessId: string,
   breakdown: ContextBreakdown,
-  row: SQL | undefined = eq(sessions.id, sessId),
+  turnStartedAt: string | null | undefined,
+  owner?: SQL,
 ): Promise<boolean> {
   try {
-    const written = await db.update(sessions).set({ contextBreakdown: JSON.stringify(breakdown) }).where(row);
-    return Number((written as { rowsAffected?: number | bigint } | null)?.rowsAffected ?? 0) > 0;
+    const stored = sessions.contextBreakdown;
+    const result = await db
+      .update(sessions)
+      .set({ contextBreakdown: JSON.stringify({ ...breakdown, turnStartedAt: turnStartedAt ?? null }) })
+      .where(and(
+        owner ?? eq(sessions.id, sessId),
+        // 读不出来的老值(坏 JSON、没有 at)不挡路。
+        sql`(CASE WHEN json_valid(${stored}) THEN coalesce(json_extract(${stored}, '$.at') < ${breakdown.at}, 1) ELSE 1 END)`,
+      ));
+    return Number((result as { rowsAffected?: number | bigint } | null)?.rowsAffected ?? 0) > 0;
   } catch (error) {
     console.warn(`[navi] failed to record context breakdown for session ${sessId}:`, error);
     return false;
   }
+}
+
+/** 会话行 → 上下文分项。没有或读不出都是 null,界面照旧只画水位。 */
+export function sessionContextBreakdown(row: Pick<SessionRow, "contextBreakdown">): ContextBreakdown | null {
+  return parseStoredContextBreakdown(row.contextBreakdown);
 }
 
 /**

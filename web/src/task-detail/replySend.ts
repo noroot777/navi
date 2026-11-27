@@ -2,6 +2,7 @@
 // 单独成文件是为了守住 TaskDetail 的 700 行。
 import type { ComponentProps } from "react";
 import type { Task, TaskListItem } from "@navi/shared";
+import { isPlanImplementation, parseCliCommand, PLAN_IMPLEMENT_LABEL } from "@navi/shared/cli-commands";
 import { api } from "../lib/api.ts";
 import { createClientId } from "../lib/clientId.ts";
 import { localeDateTime } from "../lib/localeFormat.ts";
@@ -42,7 +43,9 @@ export function replySend({ task, allTasks, conversation, confirmExecutorSwap, n
       notify(result.recorded ? "原生命令已执行，结果见会话记录" : result.text);
       return result;
     }
-    conversation.addUser(text, attachments, { clientKey });
+    // 先画出来的这一颗跟服务端记下的那句一致（「实施此计划」记的是这一下，不是命令原文）。
+    const shown = isPlanImplementation(parseCliCommand(options.agent ?? task.agentType ?? "claude", text)) ? PLAN_IMPLEMENT_LABEL : text;
+    conversation.addUser(shown, attachments, { clientKey });
     notify(options.agent
       ? `已召唤 @${options.agent}${options.model ? ` · ${options.model}` : ""}${options.reasoningEffort ? ` · ${options.reasoningEffort}` : ""} 继续任务`
       : "回复已发送");

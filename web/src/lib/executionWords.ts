@@ -4,6 +4,7 @@
 // 摘要的说法:「读了 3 个文件，搜了 1 次，
 // 改了 2 个文件，另有 1 步」。读、改按文件去重;只说前三类,其余并成「另有 N 步」;相邻两类
 // 都是「文件」时后一类省掉名词。只有一步时直接说那一步:「读了 ReplyBox.tsx」。
+import type { DraftingEvent } from "@navi/shared";
 import { isVisibleExecutionEvent, type ExecutionEvent } from "./executionTrace.ts";
 import { describeTool, joinVerb, type StepKind, type StepPhrase } from "./toolPhrase.ts";
 import { COMPACTED, COMPACTING, isCompactionEvent } from "./compaction.ts";
@@ -138,4 +139,18 @@ export function pastSummary(events: ExecutionEvent[]): string {
   ].filter(Boolean);
   if (!head.length && !tail.length && compactions.length) return compactions.at(-1)!.detail ?? COMPACTED;
   return [...head, ...tail].join("，") || "执行过程";
+}
+
+/**
+ * 正在生成的那一步（shared events.ts 的 drafting）怎么说:「正在写 方案.md · 已写 8,240 字」。
+ * 字数是入参已经出来的长度,只为让人看得出它在往前走,不是成品的精确字数。
+ */
+export function draftingLabel(drafting: DraftingEvent): string {
+  const { kind } = describeTool({ kind: "tool", label: drafting.tool });
+  const count = `${drafting.chars.toLocaleString("zh-CN")} 字`;
+  if ((kind === "write" || kind === "edit") && drafting.target) {
+    return `${joinVerb(kind === "write" ? "正在写" : "正在改", drafting.target)} · 已写 ${count}`;
+  }
+  if (kind === "run") return `正在写命令 · ${count}`;
+  return `正在准备 ${drafting.tool} · ${count}`;
 }

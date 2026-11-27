@@ -130,20 +130,13 @@ export function singleRunFromResident(
             reassess(); // 排队到这里的这段时间里,它们可能已经全跑完了
             continue;
           }
-          // 收台从这一刻开始:之后的插话按收台后的老规矩拒收(留在队列里,由下一回合送),不跟收台抢。
           accepting = false;
-          // 收台之前问一次分项:进程还活着、MCP 都连着,回合刚收口,这一刻的数才准(冷启动再问就缺
-          // MCP 那一项)。最多等 CONTEXT_USAGE_TIMEOUT_MS,拿不到照常收台、不留快照;等的时候被停止,
-          // 进程一没回包就作废,同样立刻往下走。
-          const breakdown = await resident.contextBreakdown?.();
-          // 等的这几秒里 CLI 可能自己开了下一回合(完成通知到了):这个结尾作废,分项归不到哪一回合、
-          // 不要,重新收插话、接着读流,由新回合的结尾再定。核对与关 stdin 在同一个同步段里;分项和结束
-          // 在关了之后才交给消费方(它要写库,那段 await 不能夹在核对和收台之间)。
-          if (!stopped && stale(event.epoch)) {
-            accepting = true;
-            continue;
-          }
+          // 收台这一刻顺手问一份上下文分项:进程还活着、MCP 都连着,数才准(claude-context-breakdown.ts)。
+          // 请求先写进 stdin、紧跟着关 stdin —— CLI 读到 EOF 之后照样回执(2.1.283 `full` 实测关后 1.4 秒),
+          // 不认这个请求的进程读到 EOF 就退,等待随之了结。有上限、从不抛;取不到就不留快照。
+          const asking = resident.contextBreakdown?.();
           resident.close();
+          const breakdown = await asking;
           if (breakdown) yield { kind: "contextBreakdown", breakdown };
           yield { kind: "done", exitStatus: 0 };
           return;

@@ -23,7 +23,7 @@ export interface BreakdownRow {
   key: string;
   kind: ContextBreakdownCategory["kind"];
   tokens: number;
-  /** 占整个窗口(maxTokens)的比例 0..1。 */
+  /** 占整个窗口(max)的比例 0..1。 */
   share: number;
 }
 
@@ -38,7 +38,7 @@ export function breakdownRows(breakdown: ContextBreakdown): BreakdownRow[] {
       key: known?.key ?? fallbackKey(category.kind),
       kind: category.kind,
       tokens: category.tokens,
-      share: breakdown.maxTokens > 0 ? category.tokens / breakdown.maxTokens : 0,
+      share: breakdown.max > 0 ? category.tokens / breakdown.max : 0,
     };
   });
 }
@@ -56,7 +56,7 @@ export function usedSegments(breakdown: ContextBreakdown): { name: string; key: 
 
 /** 用掉的那一截占窗口多少（水位没有窗口时，细条退回按快照画）。 */
 export function breakdownUsedShare(breakdown: ContextBreakdown): number {
-  return breakdown.maxTokens > 0 ? Math.min(1, breakdown.totalTokens / breakdown.maxTokens) : 0;
+  return breakdown.max > 0 ? Math.min(1, breakdown.total / breakdown.max) : 0;
 }
 
 /** 「26.8%」。不到 0.1% 但不是 0 的写「<0.1%」，免得一项明明占着却显示 0。 */
@@ -71,6 +71,6 @@ export function formatShare(share: number): string {
 export function mcpServerRows(breakdown: ContextBreakdown): (ContextBreakdownMcpServer & { share: number })[] {
   return breakdown.mcpServers.map((server) => ({
     ...server,
-    share: breakdown.maxTokens > 0 ? server.tokens / breakdown.maxTokens : 0,
+    share: breakdown.max > 0 ? server.tokens / breakdown.max : 0,
   }));
 }

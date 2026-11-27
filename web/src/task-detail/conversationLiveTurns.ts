@@ -324,7 +324,8 @@ export function appendLiveEntry(
   }
   // session 是执行器的内部簿记事件(心跳/回合结束都会重发),旧 UI 就不渲染;
   // cliSessionId 已经在会话详情/恢复按钮那里可查,会话流里不展示。
-  if (event.kind === "session") return;
+  // contextBreakdown 同理:会话行上的一份快照,上游(useConversation)已经分流,这里再挡一道。
+  if (event.kind === "session" || event.kind === "contextBreakdown") return;
   const agent = appendAgent(items, entry.event, sessions);
   if (event.kind === "text") appendAgentText(agent, event.text);
   if (event.kind === "attachment") appendAgentAttachment(agent, event);

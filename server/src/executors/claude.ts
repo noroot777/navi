@@ -18,7 +18,7 @@ import { relayRoot } from "../llm.js";
 import { monitorRedirectHook } from "../claude-monitor-hook.js";
 import { anthropicContext1mBaseUrl, modelUsesContext1m, withContext1mSuffix } from "../anthropic-context-1m.js";
 import { ClaudeControlBridge } from "./claude-control.js";
-import { contextBreakdownFromClaude } from "../context-breakdown.js";
+import { CONTEXT_BREAKDOWN_DETAIL, CONTEXT_BREAKDOWN_SUBTYPE, CONTEXT_BREAKDOWN_TIMEOUT_MS, parseClaudeContextUsage } from "./claude-context-breakdown.js";
 import { parseClaudeStream } from "./claude-stream.js";
 import { claudeNaviMcpInjection, type ClaudeNaviMcpInjection } from "./navi-mcp-inject.js";
 import { claudeGoalInvocation, cleanupClaudeGoalContext } from "./claude-goal.js";
@@ -312,10 +312,12 @@ export class ClaudeExecutor implements AgentExecutor {
       // 接回的是计划回合：还没回的权限请求照样要有人回，否则 CLI 一直等着。接管拿不到起跑时的环境
       // 和配置，计划文件目录用起跑时记在 commandLine 上的那个。
       const plansDir = plansDirOfCommandLine(opts.commandLine);
-      return singleRunFromResident(
+      const handle = singleRunFromResident(
         this.residentFromChild(child, opts.sessionId, opts.commandLine, compact, settingsCleanup, opts.cwd, opts.images, true, opts.consumed, undefined, plansDir),
         detached,
       );
+      handle.planTurn = plansDir !== undefined;
+      return handle;
     }
     return {
       sessionId: opts.sessionId,
@@ -373,6 +375,9 @@ export class ClaudeExecutor implements AgentExecutor {
     const planGate = plansDir ? new ClaudePlanGate(plansDir, (line) => { child.stdin?.write(line); }) : undefined;
     // 打断/发送记录只给单飞落:接管(attach)只接单飞,常驻调度台重启是另开一台,不重放。
     const resident = new ClaudeControlBridge(reapsAtTurnEnd, reapsAtTurnEnd ? (child as { naviPaths?: { out?: string } }).naviPaths?.out : undefined, planGate);
+    // 写失败由各自的回调报(writeChecked / send 的 stdin 检查);进程刚退时管道上冒出来的 EPIPE 不能没人接,
+    // 否则它会作为未捕获异常带走整个 navi。回合末问上下文分项那一笔正撞在 CLI 可能已经退出的时刻。
+    child.stdin?.on("error", () => {});
     const writeChecked = (data: string): Promise<void> => new Promise((resolve, reject) => {
       const input = child.stdin;
       if (!input || input.destroyed || input.writableEnded || !input.writable) {
@@ -404,15 +409,6 @@ export class ClaudeExecutor implements AgentExecutor {
         stdin.write(userLine(text));
         resident.beginTurn(true);
         return true;
-      },
-      contextBreakdown: async () => {
-        const response = await resident.contextUsage((line) => {
-          const stdin = child.stdin;
-          if (!stdin || stdin.destroyed || stdin.writableEnded || !stdin.writable) return false;
-          stdin.write(line);
-          return true;
-        });
-        return response ? contextBreakdownFromClaude(response, new Date().toISOString()) : null;
       },
       turnActive: () => resident.turnActive,
       epoch: () => resident.epoch,
@@ -446,6 +442,18 @@ export class ClaudeExecutor implements AgentExecutor {
           if (!interruptWritten) resident.withdraw(request.requestId);
           throw error;
         }
+      },
+      contextBreakdown: async (timeoutMs = CONTEXT_BREAKDOWN_TIMEOUT_MS) => {
+        if (child.exitCode !== null || child.signalCode !== null) return null;
+        // 快照的时刻记**发出请求**这一刻:落库按它判新旧(usage.ts setSessionContextBreakdown),回执先后不算数。
+        const requestedAt = new Date().toISOString();
+        // 期限从这一刻起算、盖住整件事:写进 stdin 要是卡住(管道积压、CLI 不读输入),等的也只是同一个
+        // 期限,不单独等写回调。请求行在这一句同步段里就写出去了(writeChecked 的 write 不等 await),
+        // 调用方紧接着关 stdin 也排在它后面;写失败当场了结。
+        const query = resident.query(CONTEXT_BREAKDOWN_SUBTYPE, { detail: CONTEXT_BREAKDOWN_DETAIL }, timeoutMs);
+        writeChecked(query.line).catch(() => query.cancel());
+        const reply = await query.reply;
+        return reply === null ? null : parseClaudeContextUsage(reply, requestedAt);
       },
       close: () => {
         child.stdin?.end();

@@ -23,11 +23,11 @@ import { isExecutionNotice, isSessionScopeNotice } from "../session-notice.js";
 import { clearSessionWaiting, trackSessionWaiting } from "../session-waiting.js";
 import { clearTurnStall, trackTurnStall, watchTurnSilence } from "../turn-stall.js";
 import { turnProgressFor } from "../turn-progress-mark.js";
-import { recordSessionUsageEvent, setSessionContext, setSessionContextBreakdown } from "../usage.js";
+import { recordSessionUsageEvent, setSessionContext } from "../usage.js";
 import { consumeInbound } from "./inbound-queue.js";
 import { sendToLead } from "./lead-delivery.js";
 // 会话行的写入口(摘牌闸、失败只上报)住在 lead-session-writes.ts,见那份顶部。
-import { closeOwnSessionWithTurn, flushPendingCredential, ownRow, persistOrReport, updateOwnSession, type SessionPatch } from "./lead-session-writes.js";
+import { closeOwnSessionWithTurn, flushPendingCredential, noteContextBreakdown, ownRow, persistOrReport, updateOwnSession, type SessionPatch } from "./lead-session-writes.js";
 import type { PendingInbound } from "./inbound-queue.js";
 import {
   idleRotation,
@@ -176,9 +176,9 @@ async function consume(lead: Lead): Promise<void> {
         clearSessionWaiting(lead.sessId, lead);
         clearTurnStall(lead.sessId, lead); // 同理:回合收口是常驻台唯一的「这一轮结束了」边界
         flushTraceText();
-        // 回合刚收口,问一次上下文分项。请求**此刻**就写进 stdin,排在下面可能紧跟着投进去的汇报
-        // 之前,回的就是这一回合末的数;回包不等(进程跨回合活着,不拖收尾),到了再落库、再播。
-        askContextBreakdown(lead, lead.turnStart);
+        // 回合末问一份上下文分项(../executors/claude-context-breakdown.ts)。不等它:进程跨回合活着,
+        // 回执晚到也收得到;请求排在 endTurn 投递攒着的消息之前写进 stdin,量的就是这一回合末。
+        if (!event.interrupted) noteContextBreakdown(lead, heldTurns(lead)[0] ?? null);
         await endTurn(lead);
         // 上一回合欠着的新会话凭据在这儿补:补上了,轮换事宜这才算真翻篇。
         if (await flushPendingCredential(lead, leads)) rotation = onFreshSession(rotation);
@@ -227,6 +227,8 @@ async function consume(lead: Lead): Promise<void> {
       if (!lead.retired) trackSessionWaiting(lead.sessId, lead, lead.turnStart, event);
       // 摘牌的台同样不许动手:它的停滞状态归接管的那台(同上面那道闸)。
       if (!lead.retired) trackTurnStall(lead.sessId, lead, lead.turnStart, event, stallActions);
+      // 正在生成的那一步（claude-drafting.ts）调度台的界面不画；放下去会把攒着的正文切成两截落盘。
+      if (event.kind === "drafting") continue;
       if (event.kind === "text") {
         lead.out.write(event.text);
         pendingTraceText += event.text;
@@ -326,29 +328,6 @@ async function consume(lead: Lead): Promise<void> {
   await closeLead(lead, exitStatus, rotation, aborted);
 }
 
-
-/** 每台调度台最近一次问分项是第几次:回包不等、可能倒着到,只有最近那一次的回包才写。 */
-const breakdownAsks = new WeakMap<Lead, number>();
-
-/**
- * 常驻台每回合末的上下文分项(见 ResidentHandle.contextBreakdown):到了才写,摘牌的台不写也不播。
- * 上一回合的回包慢、下一回合的先到时,迟到的那份是旧的,不许盖掉新的 —— 按发问的先后认,只写最近
- * 那一次的(请求按 stdin 顺序发出,最近一次问的就是最近一个回合末)。
- */
-function askContextBreakdown(lead: Lead, turnStartedAt: string | null): void {
-  if (!lead.handle.contextBreakdown) return;
-  const ask = (breakdownAsks.get(lead) ?? 0) + 1;
-  breakdownAsks.set(lead, ask);
-  void lead.handle.contextBreakdown().then(async (breakdown) => {
-    if (!breakdown || lead.retired || breakdownAsks.get(lead) !== ask) return;
-    const stamped = { ...breakdown, turnStartedAt };
-    // 入口那一眼 retired 只省一次写库:等数据库空闲的那段里同一行可能已被新台接管,闸落在语句里
-    // (ownRow,见 lead-session-writes.ts),没写进去就不播,免得页面重读、以为刷新过了。
-    if (await setSessionContextBreakdown(lead.sessId, stamped, ownRow(lead))) {
-      publish(lead, { kind: "contextBreakdown", breakdown: stamped });
-    }
-  }).catch((error) => console.warn(`[navi] team(${lead.taskId}) 记不下上下文分项:`, error));
-}
 
 // 一个回合说完了(进程还活着)。有攒下的执行者消息就立刻合并成一条继续跑,
 // 否则落 idle(待命)并起空闲回收计时。

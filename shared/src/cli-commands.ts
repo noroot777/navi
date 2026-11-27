@@ -103,6 +103,11 @@ export function isGoalExecution(command: CliCommand | null): boolean {
 export function isGoalRecovery(command: CliCommand | null): boolean {
   return command?.name === "goal" && command.args === "resume";
 }
+/**
+ * 「实施此计划」：计划卡上那颗键的字，也是会话里记下的那句话（用户做的就是点了这一下）。交给模型的
+ * 正文另算（claude 是卡上原文，上万字），不进气泡 —— 那份计划就在上面的计划卡里。
+ */
+export const PLAN_IMPLEMENT_LABEL = "实施此计划";
 export function isPlanImplementation(command: CliCommand | null | undefined): boolean {
   return command?.name === "plan" && /^implement(?:\s+\S+)?$/.test(command.args);
 }

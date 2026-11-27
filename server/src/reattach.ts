@@ -23,8 +23,7 @@ import { RUNS_DIR } from "./paths.js";
 import { consumeSingleRun } from "./single-run.js";
 import { isSameProcess } from "./proc.js";
 import { findMcpChannelHolders } from "./mcp-holders.js";
-import { recordUserConversationTurn } from "./conversation-turn.js";
-import { withSkillInvocation } from "./skills.js";
+import { nativeSteerBinding } from "./native-steer-binding.js";
 import { sessionCliConfigDir } from "./auth/run-env.js";
 import { closeSessionTurns, markTurnActive } from "./session-turns.js";
 import { reconcileInterruptedTask } from "./task-reconcile.js";
@@ -238,13 +237,11 @@ export async function reattachRunningTasks(): Promise<Set<string>> {
         autoTitle: false, role: sess.role as SessionRole, // 标题在被打断之前那一段就已经解析过了
         adopted: true, // 静默档的参与证明只许本进程开的那一轮落(见 SingleRunArgs.adopted)
         turn: claimedTurn,
-        nativeSteer: {
-          prepare: (text) => withSkillInvocation({ agentType: sess.agentType as AgentType, cwd: sess.cwd ?? "", text, userId: task.ownerUserId }),
-          record: (text, at) => recordUserConversationTurn({
-            taskId: task.id, sessionId: sess.id, role: sess.role as SessionRole,
-            agentType: sess.agentType as AgentType, out, text, at,
-          }),
-        },
+        nativeSteer: nativeSteerBinding({
+          taskId: task.id, sessionId: sess.id, role: sess.role as SessionRole,
+          agentType: sess.agentType as AgentType, cwd: sess.cwd ?? "", userId: task.ownerUserId, out,
+          plan: adoptedHandle.planTurn,
+        }),
       })
         .catch((err) => console.error(`[navi] 接管 ${task.id} 的消费循环出错:`, err))
         .finally(async () => {

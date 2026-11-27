@@ -4,6 +4,7 @@
 import { useRef, useState, type KeyboardEvent } from "react";
 import { ArrowRight, CaretDown, PencilSimple } from "@phosphor-icons/react";
 import type { AgentType, Task } from "@navi/shared";
+import { PLAN_IMPLEMENT_LABEL } from "@navi/shared/cli-commands";
 import { taskInteractionAvailability } from "@navi/shared/task-interaction";
 import type { ConversationItem } from "./conversationModel.ts";
 import type { ProposedPlanData } from "../components/ProposedPlan.tsx";
@@ -129,7 +130,7 @@ export function PlanReadyCard({ takeover, onImplement, onRevise }: {
       <div className="question-card-options">
         <button type="button" ref={goRef} className="question-card-option plan-ready-go" disabled={!!busy} onClick={implement}>
           <span className="question-card-key" aria-hidden="true">1</span>
-          <span>{busy === "implement" ? "正在开始…" : "实施此计划"}</span>
+          <span>{busy === "implement" ? "正在开始…" : PLAN_IMPLEMENT_LABEL}</span>
           <ArrowRight size={14} aria-hidden="true" />
         </button>
       </div>

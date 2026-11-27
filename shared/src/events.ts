@@ -52,6 +52,10 @@ export type AgentEvent =
   | { kind: "userInput"; questions: import("./index.ts").QuestionItem[] }
   | { kind: "text"; text: string }
   | { kind: "tool"; name: string; detail?: string; nativeWork?: NativeWorkEvent }
+  // 一次工具调用的入参还在生成（claude 流里的 input_json_delta）。生成一份上万字的文件要好几分钟，
+  // 这期间流里别的什么都没有，页面看着就像停住了。只直播、不落盘、不算一步：这次调用生成完，
+  // 由那条 `tool` 接替。`target` = 入参里已经出现的文件名，`since` = 开始生成的时刻。
+  | { kind: "drafting"; tool: string; target?: string; chars: number; since: string }
   // 一张图,或者**正文里一处引用的保存结果**。三个字段合起来才是完整的一条交代:
   //   · `source` = 这处引用的目的地(`![](…)` 里那一段,规范化后的;见 @navi/shared/markdown-images)
   //   · `ref`    = 这处引用在这条流里的**身份**(单调递增、不去重、不按回合复位)
@@ -92,8 +96,8 @@ export type AgentEvent =
   // 上下文**水位**(不是流水,区别见 shared/src/usage.ts 的 ContextUsage)。每回合至多
   // 一条,恒在该回合的 turnEnd/done 之前。落库是**覆盖**不是累加。
   | { kind: "context"; context: ContextUsage }
-  // 上下文**分项**(shared/src/context-breakdown.ts):回合结束时问 CLI 要的,至多一条,在那一回合的
-  // turnEnd/done 之前或稍后到。服务端落到会话行上后才播,页面据此重读会话行。不进 trace。
+  // 上下文**分项**(见 shared/src/context-breakdown.ts):回合末向 CLI 问来的那张表,只有 claude 给得出。
+  // 跟水位一样覆盖式落在会话行上、不进 trace;直播里它一到,展示端重读会话行。
   | { kind: "contextBreakdown"; breakdown: ContextBreakdown }
   // 这一步工具调用**写到了哪里**:执行器从原生事件的结构化参数里当场取出(写文件/改文件
   // 工具的目标路径、命令的工作目录),趁它还没被截短。只给服务端记「任务写过的位置」
@@ -146,6 +150,9 @@ export type AgentEvent =
   // `interruption` = 这一回合怎么断的(只在异常结束时带),跟落进 `session_turns.interruption` 的同一份
   // (见 Session.turnInterruptions):直播那一路的失败那句话照它说,刷新以后照会话行说,两路一个样。
   | { kind: "done"; exitStatus: number; unfinished?: { agent: number; workflow: number; unknown?: true }; turnOutcome?: TurnOutcome; interruption?: TurnInterruption; endedAt?: string };
+
+/** 正在生成的那一步（见 AgentEvent 的 drafting）。 */
+export type DraftingEvent = Extract<AgentEvent, { kind: "drafting" }>;
 
 // synthesis = 收敛后的合稿轮(共同方案);impl/review are legacy transcript speakers
 export type DuetSpeaker = "A" | "B" | "synthesis" | "impl" | "review" | "user";

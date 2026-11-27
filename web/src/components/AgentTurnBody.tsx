@@ -9,6 +9,8 @@ import { MarkdownBody } from "./MarkdownBody.tsx";
 import { useSmoothText } from "../lib/useSmoothText.ts";
 import type { MarkdownLayout } from "./markdownLayout.ts";
 import { ProposedPlan } from "./ProposedPlan.tsx";
+import { DraftingStrip } from "./DraftingStrip.tsx";
+import type { DraftingEvent } from "@navi/shared";
 import {
   ExecutionDetails,
   ExecutionEventList,
@@ -62,6 +64,7 @@ export function AgentTurnBody({
   running,
   taskId,
   since,
+  drafting,
 }: {
   segments: AgentContentSegment[];
   /** 这一回合还在飞（会话行还没落 endedAt）。在飞就不折，见 turnDocument。 */
@@ -73,7 +76,14 @@ export function AgentTurnBody({
   taskId?: string;
   /** 在跑时，执行过程那一行后面跟着这一轮从哪一刻算起的用时（run-2）。 */
   since?: string | null;
+  /**
+   * 这一回合此刻正在生成的那一步（一份长文件、一条长命令）。生成的那几分钟流里别的什么都没有，
+   * 尾上就一直挂着这一行；它在的时候执行过程那一行不再闪（同一时刻只有一个「活的」东西）。
+   */
+  drafting?: DraftingEvent | null;
 }) {
+  const draftingNow = running && drafting ? drafting : null;
+  const drafted = !!draftingNow;
   const turn = useMemo(
     () => turnDocument(segments, { live: running, taskId }),
     [segments, running, taskId],
@@ -96,7 +106,7 @@ export function AgentTurnBody({
       ? stops.reduce((last, stop, index) => (stop.events.some(isVisibleExecutionEvent) ? index : last), -1)
       : -1;
     const writing = latest >= 0 && !awaiting && smooth.text.slice(stops[latest]!.offset).trim().length > 0;
-    const pulse = writing ? -1 : latest;
+    const pulse = writing || drafted ? -1 : latest;
     return {
       ...(smooth.marks.length ? { fresh: { marks: smooth.marks, now: performance.now() } } : {}),
       inserts: stops.map((stop, index) => ({
@@ -135,9 +145,14 @@ export function AgentTurnBody({
         }
         : {}),
     };
-  }, [turn, running, awaiting, foldOpen, since, smooth]);
+  }, [turn, running, awaiting, foldOpen, since, smooth, drafted]);
 
-  return <MarkdownBody text={smooth.text} layout={layout} />;
+  return (
+    <>
+      <MarkdownBody text={smooth.text} layout={layout} />
+      {draftingNow && <DraftingStrip drafting={draftingNow} />}
+    </>
+  );
 }
 
 /* `awaiting` = 此刻正卡在上游等回话,只会落在脉冲那一步上(它就是正在发生的这一步):

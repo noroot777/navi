@@ -436,6 +436,7 @@ export function TaskDetail({
                       historyReady={conversation.transcriptReady}
                       bodyReady={conversation.ready}
                       items={conversation.items}
+                      drafting={conversation.drafting}
                       sessions={conversation.sessions}
                       loading={conversation.refreshing}
                       error={conversation.error}
