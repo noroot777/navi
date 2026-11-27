@@ -6,6 +6,7 @@ import { InspNone } from "../inspector/parts.tsx";
 import { useStickToBottom } from "../lib/useStickToBottom.ts";
 import { chatTailKey } from "../lib/chatTailKey.ts";
 import { useScrollEdges } from "../lib/useScrollEdges.ts";
+import { ConversationFind } from "../components/ConversationFind.tsx";
 import { formatInstant } from "../task-detail/utils.ts";
 import { SideChatComposer } from "./SideChatComposer.tsx";
 import { SideChatHeadControls } from "./SideChatHeadControls.tsx";
@@ -30,7 +31,7 @@ function SnapLine({ at }: { at: string }) {
 export function SideChatPane({ task }: { task: Task }) {
   const chat = useSideChat(task.id);
   const scroll = useRef<HTMLDivElement>(null);
-  const { resume } = useStickToBottom(scroll, chat.room?.id ?? task.id, chatTailKey(chat.snapshot?.messages));
+  const { resume, noteUserScrollIntent } = useStickToBottom(scroll, chat.room?.id ?? task.id, chatTailKey(chat.snapshot?.messages));
   const { atBottom } = useScrollEdges(scroll, chat.room?.id ?? task.id);
   const messages = chat.snapshot?.messages ?? [];
   return <section className="side-chat-pane" aria-label="任务侧聊" data-room-id={chat.room?.id ?? ""}>
@@ -48,6 +49,7 @@ export function SideChatPane({ task }: { task: Task }) {
           ))}
         </div>
       </div>
+      <ConversationFind scrollRef={scroll} resetKey={chat.room?.id ?? task.id} onReaderMove={noteUserScrollIntent} />
       {!atBottom && <button type="button" className="side-chat-latest" aria-label="跳到侧聊最新消息" onClick={() => { resume(); scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: "auto" }); }}><ArrowDown size={13} aria-hidden="true" />最新消息</button>}
     </div>
     <SideChatComposer task={task} chat={chat} />

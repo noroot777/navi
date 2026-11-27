@@ -133,15 +133,15 @@ function foldCase(text: string): string {
   return folded.replaceAll("ς", "σ");
 }
 
-/** 一块区域里所有词的所有出现处，按文档顺序。 */
-export function findOccurrences(container: HTMLElement, terms: readonly string[]): SearchOccurrence[] {
+/** 一块区域里所有词的所有出现处，按文档顺序。`limit` 截住单字查询在长会话里成千上万处的命中。 */
+export function findOccurrences(container: HTMLElement, terms: readonly string[], limit = Infinity): SearchOccurrence[] {
   const { nodes, text } = textNodes(container);
   if (!nodes.length) return [];
   const haystack = foldCase(text);
   const needles = terms.map(foldCase);
   const found: Occurrence[] = [];
   let position = 0;
-  while (position < haystack.length) {
+  while (position < haystack.length && found.length < limit) {
     let index = -1;
     let needle = "";
     // 同一处有长有短时取长的（terms 已按长度倒序，相同起点先到的就是长的）。

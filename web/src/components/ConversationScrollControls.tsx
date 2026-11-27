@@ -9,6 +9,7 @@ import { useSearchReveal } from "../search/useSearchReveal.ts";
 import { abandonMessageReveal } from "../search/messageReveal.ts";
 import { useMessageReveal } from "../search/useMessageReveal.ts";
 import type { ConversationInput } from "../task-detail/conversationInputs.ts";
+import { ConversationFind } from "./ConversationFind.tsx";
 import { ConversationInputRail } from "./ConversationInputRail.tsx";
 
 type ResetKey = string | number | null | undefined;
@@ -81,6 +82,8 @@ export function ConversationScrollControls({
 
   return (
     <>
+      {/* ⌘F 查找跟回顶回底一样是「把视口挪到别处」：跳之前同样先跟贴底逻辑打招呼。 */}
+      <ConversationFind scrollRef={scrollRef} resetKey={resetKey} extraRoots={revealRoots} onReaderMove={noteUserScrollIntent} />
       {inputs && inputs.length > 0 && (
         <ConversationInputRail
           // 换任务即换一条导航：悬停、摊开、读到哪一条都不该带过去。

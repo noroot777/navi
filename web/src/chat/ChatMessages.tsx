@@ -8,11 +8,12 @@ import { useStickToBottom } from "../lib/useStickToBottom.ts";
 import { motionReduced } from "../lib/useSwapText.ts";
 import { chatTailKey } from "../lib/chatTailKey.ts";
 import { useScrollEdges } from "../lib/useScrollEdges.ts";
+import { ConversationFind } from "../components/ConversationFind.tsx";
 import { localeDate, localeTime } from "../lib/localeFormat.ts";
 
 export function ChatMessages({ snapshot, onTask, onMention }: { snapshot: ChatSnapshot; onTask: (task: TaskListItem) => void; onMention: (name: string) => void }) {
   const scroll = useRef<HTMLDivElement>(null);
-  const { resume } = useStickToBottom(scroll, snapshot.room.id, chatTailKey(snapshot.messages));
+  const { resume, noteUserScrollIntent } = useStickToBottom(scroll, snapshot.room.id, chatTailKey(snapshot.messages));
   // 已经贴底时没有「跳到最新」可跳，按钮只会挡住最后一条消息。
   const { atBottom } = useScrollEdges(scroll, snapshot.room.id);
   // resume() 只是把贴底意图设回来，真正的滚动要自己发起，否则要等下一条消息进来才跳。
@@ -48,5 +49,5 @@ export function ChatMessages({ snapshot, onTask, onMention }: { snapshot: ChatSn
         </article>
       </div>;
     })}
-  </div><button className={`chat-jump${atBottom ? " is-hidden" : ""}`} type="button" onClick={toBottom} tabIndex={atBottom ? -1 : 0} aria-hidden={atBottom} aria-label="跳到最新消息"><ArrowDown size={13} />最新消息</button></div>;
+  </div><ConversationFind scrollRef={scroll} resetKey={snapshot.room.id} onReaderMove={noteUserScrollIntent} /><button className={`chat-jump${atBottom ? " is-hidden" : ""}`} type="button" onClick={toBottom} tabIndex={atBottom ? -1 : 0} aria-hidden={atBottom} aria-label="跳到最新消息"><ArrowDown size={13} />最新消息</button></div>;
 }

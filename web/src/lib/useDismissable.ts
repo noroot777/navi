@@ -93,7 +93,8 @@ export function useDismissable<
       onCloseRef.current();
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      // 输入法还在拼字时的 Esc 是「取消这次输入」，归输入法，不是关层。
+      if (event.key !== "Escape" || event.isComposing) return;
       // 只有最上面那层吃这一下 Esc：里层还开着时，外层不该跟着一起消失。
       if (layers[layers.length - 1] !== layer) return;
       event.preventDefault();
