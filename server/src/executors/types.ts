@@ -1,6 +1,6 @@
 import type { CleanupResult } from "./kill.js";
 import type { ChildProcess } from "node:child_process";
-import type { AgentEvent, AgentType } from "@navi/shared";
+import type { AgentEvent, AgentType, ContextBreakdown } from "@navi/shared";
 import type { CompactSnapshot } from "@navi/shared/usage";
 import type { ModelEffortMap } from "@navi/shared/cli-presets";
 import type { RunTracePaths } from "./diagnostics.js";
@@ -183,6 +183,11 @@ export interface ResidentHandle {
    * 开下一回合时,不能说成后台没做完。
    */
   backgroundPending?(): { agent: number; workflow: number; unknown?: true };
+  /**
+   * 向这个活着的进程问一份上下文分项(claude 才有,见 claude-context-breakdown.ts)。只在回合 `result`
+   * 之后问才准;stdin 关了、CLI 报错、超时都给 null,**从不抛**,调用方照常往下走。
+   */
+  contextBreakdown?(timeoutMs?: number): Promise<ContextBreakdown | null>;
   kill(): void; // 硬杀,走 killChild 三层击杀
   /**
    * 覆盖这个句柄**已经启动过的所有回合/后代**的幂等 finalizer。`kill()` 只负责进程本体

@@ -9,6 +9,7 @@ export type { Session, SessionNotice, SessionRole, TurnInterruption, TurnOutcome
 // 归一化后的 token 用量。运行时函数(累加/格式化)走 "@navi/shared/usage" 子路径
 // 导出,这里同上只再导出类型。
 export type { ContextUsage, OutputTiming, TokenUsage, UsageAccountingMark } from "./usage.ts";
+export type { ContextBreakdown, ContextBreakdownCategory, ContextBreakdownKind, ContextBreakdownMcpServer } from "./context-breakdown.ts";
 export type {
   ReviewConclusion,
   ReviewDispatchInput,

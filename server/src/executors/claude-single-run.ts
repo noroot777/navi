@@ -131,7 +131,13 @@ export function singleRunFromResident(
             continue;
           }
           accepting = false;
+          // 收台这一刻顺手问一份上下文分项:进程还活着、MCP 都连着,数才准(claude-context-breakdown.ts)。
+          // 请求先写进 stdin、紧跟着关 stdin —— CLI 读到 EOF 之前照样回执(2.1.283 实测几毫秒),
+          // 不认这个请求的进程读到 EOF 就退,等待随之了结。有上限、从不抛;取不到就不留快照。
+          const asking = resident.contextBreakdown?.();
           resident.close();
+          const breakdown = await asking;
+          if (breakdown) yield { kind: "contextBreakdown", breakdown };
           yield { kind: "done", exitStatus: 0 };
           return;
         }

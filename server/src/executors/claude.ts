@@ -18,6 +18,7 @@ import { relayRoot } from "../llm.js";
 import { monitorRedirectHook } from "../claude-monitor-hook.js";
 import { anthropicContext1mBaseUrl, modelUsesContext1m, withContext1mSuffix } from "../anthropic-context-1m.js";
 import { ClaudeControlBridge } from "./claude-control.js";
+import { CONTEXT_BREAKDOWN_SUBTYPE, CONTEXT_BREAKDOWN_TIMEOUT_MS, parseClaudeContextUsage } from "./claude-context-breakdown.js";
 import { parseClaudeStream } from "./claude-stream.js";
 import { claudeNaviMcpInjection, type ClaudeNaviMcpInjection } from "./navi-mcp-inject.js";
 import { claudeGoalInvocation, cleanupClaudeGoalContext } from "./claude-goal.js";
@@ -372,6 +373,9 @@ export class ClaudeExecutor implements AgentExecutor {
     const planGate = plansDir ? new ClaudePlanGate(plansDir, (line) => { child.stdin?.write(line); }) : undefined;
     // 打断/发送记录只给单飞落:接管(attach)只接单飞,常驻调度台重启是另开一台,不重放。
     const resident = new ClaudeControlBridge(reapsAtTurnEnd, reapsAtTurnEnd ? (child as { naviPaths?: { out?: string } }).naviPaths?.out : undefined, planGate);
+    // 写失败由各自的回调报(writeChecked / send 的 stdin 检查);进程刚退时管道上冒出来的 EPIPE 不能没人接,
+    // 否则它会作为未捕获异常带走整个 navi。回合末问上下文分项那一笔正撞在 CLI 可能已经退出的时刻。
+    child.stdin?.on("error", () => {});
     const writeChecked = (data: string): Promise<void> => new Promise((resolve, reject) => {
       const input = child.stdin;
       if (!input || input.destroyed || input.writableEnded || !input.writable) {
@@ -436,6 +440,19 @@ export class ClaudeExecutor implements AgentExecutor {
           if (!interruptWritten) resident.withdraw(request.requestId);
           throw error;
         }
+      },
+      contextBreakdown: async (timeoutMs = CONTEXT_BREAKDOWN_TIMEOUT_MS) => {
+        if (child.exitCode !== null || child.signalCode !== null) return null;
+        // 请求行在这一句同步段里就写进 stdin(writeChecked 的 write 不等 await),调用方紧接着关 stdin 也排在它后面。
+        const query = resident.query(CONTEXT_BREAKDOWN_SUBTYPE, { detail: "summary" }, timeoutMs);
+        try {
+          await writeChecked(query.line);
+        } catch {
+          query.cancel();
+          return null;
+        }
+        const reply = await query.reply;
+        return reply === null ? null : parseClaudeContextUsage(reply, new Date().toISOString());
       },
       close: () => {
         child.stdin?.end();

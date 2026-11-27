@@ -8,6 +8,8 @@ import type { ClaudePlanGate } from "./claude-plan-gate.js";
  */
 export const INTERRUPT_ID_PREFIX = "navi_int_";
 const INTERRUPT_ID_PREFIXES = [INTERRUPT_ID_PREFIX, LEGACY_CLAUDE_INTERRUPT_ID_PREFIX];
+/** 只读查询(`query`)的请求号前缀。不落盘:进程一没,问的结果也就没用了。 */
+const QUERY_ID_PREFIX = "navi_q_";
 
 type PendingControl = {
   resolve(): void;
@@ -154,6 +156,8 @@ export class ClaudeControlBridge {
 
   private sequence = 0;
   private readonly pending = new Map<string, PendingControl>();
+  private querySequence = 0;
+  private readonly queries = new Map<string, (value: unknown | null) => void>();
 
   request(): { requestId: string; line: string } {
     const requestId = `${INTERRUPT_ID_PREFIX}${++this.sequence}`;
@@ -187,10 +191,43 @@ export class ClaudeControlBridge {
     return { promise, cancel };
   }
 
+  /**
+   * 向 CLI **问**一件事(`get_context_usage` 这类只读请求):返回要写进 stdin 的那一行,以及等回执的
+   * promise —— 成功给回执里的 `response`,报错、超时、进程没了一律给 null,**从不抛**。请求号另用
+   * 一个前缀,跟打断那一路(要落盘、接管时按前缀认)互不相干;CLI 发来的权限请求走的是 CLI 自己的号。
+   */
+  query(subtype: string, body: Record<string, unknown>, timeoutMs: number): { line: string; reply: Promise<unknown | null>; cancel(): void } {
+    const requestId = `${QUERY_ID_PREFIX}${++this.querySequence}`;
+    let settle: (value: unknown | null) => void = () => {};
+    const reply = new Promise<unknown | null>((resolve) => {
+      const timer = setTimeout(() => {
+        this.queries.delete(requestId);
+        resolve(null);
+      }, timeoutMs);
+      timer.unref?.();
+      settle = (value) => {
+        if (!this.queries.delete(requestId)) return;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      this.queries.set(requestId, settle);
+    });
+    return {
+      line: `${JSON.stringify({ type: "control_request", request_id: requestId, request: { subtype, ...body } })}\n`,
+      reply,
+      cancel: () => settle(null),
+    };
+  }
+
   handleResponse(message: any): void {
     const response = message?.response ?? message;
     const requestId = response?.request_id ?? message?.request_id;
     if (typeof requestId !== "string") return;
+    const query = this.queries.get(requestId);
+    if (query) {
+      query(response?.subtype === "success" ? response.response ?? null : null);
+      return;
+    }
     const waiter = this.pending.get(requestId);
     if (!waiter) return;
     this.pending.delete(requestId);
@@ -200,6 +237,7 @@ export class ClaudeControlBridge {
   }
 
   failPending(error: Error): void {
+    for (const query of [...this.queries.values()]) query(null);
     for (const waiter of this.pending.values()) {
       clearTimeout(waiter.timer);
       waiter.reject(error);

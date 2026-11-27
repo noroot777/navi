@@ -30,7 +30,7 @@ import {
 import { RUNS_DIR } from "../paths.js";
 import { appendSessionTrace } from "../transcript.js";
 import { noteAgentEventUpload } from "../uploads.js";
-import { launchFields, recordSessionUsageEvent, setSessionContext } from "../usage.js";
+import { launchFields, recordSessionUsageEvent, setSessionContext, setSessionContextBreakdown } from "../usage.js";
 import type { CompactSnapshot } from "@navi/shared/usage";
 import { affectedCodexResumeVersion, announceAffectedSessionReplacement } from "../session-version-guard.js";
 import { isExecutionNotice, isSessionScopeNotice, announceSessionNote, CROSS_OWNER_SESSION_NOTE } from "../session-notice.js";
@@ -409,6 +409,8 @@ export async function runTurn(args: {
           }
         } else if (event.kind === "context") {
           await setSessionContext(rowId, event.context);
+        } else if (event.kind === "contextBreakdown") {
+          await setSessionContextBreakdown(rowId, event.breakdown, turnStart);
         } else if (event.kind === "done") {
           exit = event.exitStatus;
         }

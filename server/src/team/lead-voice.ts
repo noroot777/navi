@@ -8,6 +8,7 @@ import type { Lead } from "./session-types.js";
 import type { StallActions } from "../turn-stall.js";
 import { clearSessionStalled, markSessionStalled } from "../session-stall-flag.js";
 import { noteTurnProgress } from "../turn-progress-mark.js";
+import { setSessionContextBreakdown } from "../usage.js";
 
 // 一台调度台**对外说话的三个出口**：实时 SSE（`publish`）、执行过程面板（`traceLead`）、
 // 以及会话正文 `.md`（`writeTurn` / `writeRunError`）。
@@ -19,6 +20,19 @@ import { noteTurnProgress } from "../turn-progress-mark.js";
 //
 // **一条共同的规矩：摘牌之后一个字都不许再说。**那条 sessionId 现在归接管的那台调度台,
 // 用户正看着它说话；旧进程晚到的事件插进去,看起来就是新会话出了事（见 retireLead）。
+
+/**
+ * 回合末向调度台问一份上下文分项(../executors/claude-context-breakdown.ts),到了就落会话行、广播一声。
+ * 不等、不抛:进程跨回合活着,回执晚到也收得到;取不到就什么都不留。摘牌的台不写(同水位那一笔)。
+ */
+export function noteContextBreakdown(lead: Lead, turnStartedAt: string | null): void {
+  if (!lead.handle.contextBreakdown) return;
+  void lead.handle.contextBreakdown().then(async (breakdown) => {
+    if (!breakdown || lead.retired) return;
+    await setSessionContextBreakdown(lead.sessId, breakdown, turnStartedAt);
+    publish(lead, { kind: "contextBreakdown", breakdown });
+  }).catch((error) => console.warn(`[navi] 调度台 ${lead.sessId} 的上下文分项没记上:`, error));
+}
 
 export function publish(lead: Lead, event: AgentEvent): void {
   // 摘牌后一个字都不再广播:这条 sessionId 现在归接管的那台,用户正看着它说话,

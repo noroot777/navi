@@ -8,7 +8,7 @@
 // **这个文件里还住着上下文水位（setSessionContext），它是覆盖式的**——两组列摆在
 // 一起是为了让下一个人一眼看见「有两种账，加法只适用于其中一种」。
 import { and, eq, sql } from "drizzle-orm";
-import type { AgentEvent, AgentType, ContextUsage, TokenUsage, UsageAccountingMark } from "@navi/shared";
+import type { AgentEvent, AgentType, ContextBreakdown, ContextUsage, TokenUsage, UsageAccountingMark } from "@navi/shared";
 import {
   COMPACT_SNAPSHOT_ENV_KEYS,
   type CompactSnapshot,
@@ -21,6 +21,7 @@ import {
 import { db } from "./db/index.js";
 import { sessions, sessionTurns, usageCumulativeSnapshots } from "./db/schema.js";
 import { boundMonitorWake } from "./session-turns.js";
+import { parseStoredContextBreakdown } from "./executors/claude-context-breakdown.js";
 
 type SessionRow = typeof sessions.$inferSelect;
 type UsageEvent = Extract<AgentEvent, { kind: "usage" }>;
@@ -248,6 +249,30 @@ export async function setSessionContext(sessId: string, context: ContextUsage): 
   } catch (error) {
     console.warn(`[navi] failed to record context usage for session ${sessId}:`, error);
   }
+}
+
+/**
+ * 上下文分项落库,同样**覆盖**、同样 best-effort。`turnStartedAt` 记它是哪一回合末取的:分项和水位
+ * 不同时刻,界面要说得出「这份是几分钟前、哪一回合的」。
+ */
+export async function setSessionContextBreakdown(
+  sessId: string,
+  breakdown: ContextBreakdown,
+  turnStartedAt: string | null | undefined,
+): Promise<void> {
+  try {
+    await db
+      .update(sessions)
+      .set({ contextBreakdown: JSON.stringify({ ...breakdown, turnStartedAt: turnStartedAt ?? null }) })
+      .where(eq(sessions.id, sessId));
+  } catch (error) {
+    console.warn(`[navi] failed to record context breakdown for session ${sessId}:`, error);
+  }
+}
+
+/** 会话行 → 上下文分项。没有或读不出都是 null,界面照旧只画水位。 */
+export function sessionContextBreakdown(row: Pick<SessionRow, "contextBreakdown">): ContextBreakdown | null {
+  return parseStoredContextBreakdown(row.contextBreakdown);
 }
 
 /**

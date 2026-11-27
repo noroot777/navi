@@ -220,6 +220,9 @@ export const sessions = sqliteTable("sessions", {
   // 报出这份水位的那个进程起跑时的压缩配置(JSON,shared 的 CompactSnapshot),跟上面三列
   // 同一笔写。null 或没有来源标记 = 证明不了来源的老行,读侧标「不知道」(usage.ts sessionContextCompact)。
   contextCompact: text("context_compact"),
+  // 上下文**分项**(JSON,shared 的 ContextBreakdown):回合末向 claude 问来的那张表,覆盖式。跟上面
+  // 的水位不同时刻,所以单独一列、自带取到的时刻。null = 没有(codex、老行、那一回合没取到)。
+  contextBreakdown: text("context_breakdown"),
 });
 
 /**
