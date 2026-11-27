@@ -491,8 +491,8 @@ export * from "./schema-task-notice.js";
 // 任务「看过没有」(task_reads,侧栏绿点的已读记录),表定义 + 建表在 `schema-task-reads.ts`。
 export * from "./schema-task-reads.js";
 
-// 项目先后每个页面最后被接受的意图序号(project_order_intents),表定义 + 建表在 `schema-project-order-intents.ts`。
-export * from "./schema-project-order-intents.js";
+// 项目先后每人一个顺序版本号(project_order_revisions),表定义 + 建表在 `schema-project-order-revisions.ts`。
+export * from "./schema-project-order-revisions.js";
 
 // 验收确认层「运行」那一勾上次的样子(accept_memory,按人按项目),表定义 + 建表在 `schema-accept-memory.ts`。
 export * from "./schema-accept-memory.js";

@@ -73,14 +73,14 @@ import { mountLocalOpenRoutes } from "./local-open-routes.js";
 import { directoryPickerSupport, mountDirectoryPickerRoutes } from "./dir-picker.js";
 import { mountProjectCloneRoutes } from "./project-clone.js";
 import { mountProjectRoutes } from "./project-routes.js";
-import { mountProjectOrderRoutes } from "./project-order.js";
+import { mountProjectOrderRoutes, saveProjectOrder } from "./project-order.js";
 import { mountFsBrowseRoutes } from "./fs-browse.js";
 import { mountUploadRoutes } from "./upload-routes.js";
 import { mountAuthRoutes } from "./auth/routes.js";
 import { mountUserRoutes } from "./auth/user-routes.js";
 import { mountPersonalCliRoutes } from "./auth/personal-routes.js";
 import type { Actor } from "./auth/context.js";
-import { actorOf, isAdminActor, ownerIdOf } from "./auth/context.js";
+import { actorOf, isAdminActor } from "./auth/context.js";
 import { patchSettingsFor, settingsForActor } from "./auth/personal-settings.js";
 import { makeEventFilter } from "./auth/event-filter.js";
 import { visibleProjectIds } from "./auth/visibility.js";
@@ -199,11 +199,13 @@ api.get("/settings", async (c) => c.json(await settingsForActor(actorOf(c))));
 
 api.patch("/settings", async (c) => {
   try {
-    const patch = parseAppSettingsPatch(await c.req.json<unknown>());
-    const next = await patchSettingsFor(actorOf(c), patch);
-    // 项目先后也能从这里写（个人键），开着的页面得跟专用的 PUT /project-order 一样收到信号。
-    if (patch.projectOrder !== undefined) bus.publish({ type: "projects.reordered", ownerUserId: ownerIdOf(actorOf(c)) });
-    return c.json(next);
+    const { projectOrder, ...patch } = parseAppSettingsPatch(await c.req.json<unknown>());
+    const actor = actorOf(c);
+    const next = await patchSettingsFor(actor, patch);
+    if (projectOrder === undefined) return c.json(next);
+    // 项目先后也能从这里写（个人键），但跟专用的 PUT /project-order 走同一条路：版本号加一、推信号。
+    await saveProjectOrder(actor, projectOrder, null);
+    return c.json(await settingsForActor(actor));
   } catch (error) {
     // 403(实例面被普通用户改)不能被压成 400:那会让前端把「没权限」显示成「填错了」。
     const status = (error as { status?: number }).status === 403 ? 403 : 400;
