@@ -266,6 +266,38 @@ try {
   }
   console.log("✓ 收台与最后一次核对同一步：先关 stdin 再交分项；在途插话先落地");
 
+  // ⑨ 等在途插话有终点：停止当场放行；准备一直不完就到点收台，那条插话发送失败（投递层退回排队）。
+  for (const how of ["kill", "deadline"] as const) {
+    let closed = false;
+    let releasePrep: () => void = () => {};
+    const prep = new Promise<void>((resolve) => { releasePrep = resolve; });
+    let steered: Promise<void> | undefined;
+    const fake = {
+      sessionId: `stuck-${how}`, commandLine: "x", launchCompact: null,
+      events: (async function* () { yield { kind: "turnEnd", epoch: 0 } as AgentEvent; })(),
+      epoch: () => 0, turnActive: () => false,
+      contextBreakdown: async () => {
+        steered = run.steer!("插一句", () => prep);
+        if (how === "kill") setTimeout(() => run.kill(), 30);
+        return null;
+      },
+      send: () => !closed,
+      close: () => { closed = true; }, kill: () => {}, interrupt: () => {},
+      cleanup: async () => ({ kind: "empty" }),
+    } as unknown as ResidentHandle;
+    const run = singleRunFromResident(fake, undefined, undefined, undefined, 200);
+    const started = Date.now();
+    const seen: string[] = [];
+    for await (const event of run.events) seen.push(event.kind);
+    const ms = Date.now() - started;
+    assert.deepEqual(seen, ["done"]);
+    assert.equal(closed, true);
+    assert.ok(how === "kill" ? ms < 150 : ms >= 190 && ms < 1_000, `${how}：${ms}ms 收台`);
+    releasePrep();
+    await assert.rejects(steered!, /没收下/, `${how}：迟到的插话送不进关掉的 stdin，交回投递层`);
+  }
+  console.log("✓ 等在途插话有终点：停止当场放行，准备不完到点收台、迟到的插话交回投递层");
+
   // ⑤ 两头的解析：回包缺分项表或窗口就当没取到；落库那份读回来一致，坏的当没有。
   {
     assert.equal(contextBreakdownFromClaude({ categories: [], maxTokens: 1 }, "t"), null);

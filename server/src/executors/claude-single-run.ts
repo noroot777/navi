@@ -28,6 +28,13 @@ const BACKGROUND_HOLD_MS = (() => {
 const WRAPUP_START_MS = 10 * 60_000;
 
 /**
+ * 收台前最多等在途插话落地多久。插话的准备(清方向状态要写库、正文可能是惰性的)不归这里管，
+ * 等它不能没有上限：到点照常收台，没送出去的那条在 stdin 关掉后发送失败，由投递层退回排队。
+ * 停止不等这个上限，当场放行。
+ */
+const STEER_LAND_MS = 5_000;
+
+/**
  * 单飞：一个回合 = 一个进程。回合 `result` 一到就关 stdin 收台 —— **除非名下还有后台子代理 /
  * 工作流没跑完**（turnEnd 带 `background`）。它们寄生在这个进程里，收了台就白跑了；而 CLI
  * 自己的口径是「后台的活没完，这一回合就没完」：`claude -p` 会一直压着结果，直到它们跑完、
@@ -55,6 +62,7 @@ export function singleRunFromResident(
   detached?: RunHandle["detached"],
   holdMs = BACKGROUND_HOLD_MS,
   wrapupMs = WRAPUP_START_MS,
+  steerLandMs = STEER_LAND_MS,
 ): RunHandle {
   let intermediateEnds = 0;
   let accepting = true;
@@ -64,6 +72,21 @@ export function singleRunFromResident(
   let verdict: StallVerdict | null = null;
   // 已经收下、还没落地的插话(还在准备正文 / 等打断回执 / 写 stdin)。收台前要等它们落地,见收台那段。
   const steering = new Set<Promise<void>>();
+  // 停止的那一刻兑现:收台前等插话落地的那段 await 靠它当场醒,不陪着一个停不下来的准备干等。
+  let terminate: () => void = () => {};
+  const terminated = new Promise<void>((resolve) => { terminate = resolve; });
+  /** 等在途插话落地:全落地、停止、到点,三者谁先到算谁。从不抛。 */
+  const landSteers = async (): Promise<void> => {
+    if (!steering.size) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => { timer = setTimeout(resolve, steerLandMs); timer.unref?.(); });
+    const drained = (async () => { while (steering.size) await Promise.allSettled([...steering]); })();
+    try {
+      await Promise.race([drained, terminated, deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   let stopped = false; // 用户停止:不另外判「后台没跑完」,停止自有它的结算
   const clearHold = () => {
     if (hold) clearTimeout(hold.timer);
@@ -141,9 +164,10 @@ export function singleRunFromResident(
           // 所以顺序是:等分项 → 等在途的插话落地(收下了就让它送完,不能收台把它截在半路)→ 同步核对
           // 回合身份并立刻关 stdin → 之后才把分项和结束交给消费方(消费方要写库,那段 await 已在收台之后,
           // 关了 stdin 就不会再有我们送进去的回合)。换了回合:这个结尾作废,分项归不到哪一回合、不要,
-          // 接着读流,由新回合的结尾再定。
+          // 接着读流,由新回合的结尾再定。等插话有上限、停止当场放行(landSteers):到点还没送出去的,
+          // 收台后发送失败,投递层把它退回排队。
           const breakdown = await resident.contextBreakdown?.();
-          while (!stopped && steering.size) await Promise.allSettled([...steering]);
+          if (!stopped) await landSteers();
           if (!stopped && stale(event.epoch)) continue;
           accepting = false;
           resident.close();
@@ -207,6 +231,7 @@ export function singleRunFromResident(
       else {
         accepting = false;
         stopped = true; // 为了带着插话重开而杀,不是后台工作丢了
+        terminate();
         clearHold();
         resident.kill();
         throw Object.assign(error instanceof Error ? error : new Error(String(error)), { nativeSteerRestart: true });
@@ -234,6 +259,7 @@ export function singleRunFromResident(
     kill() {
       accepting = false;
       stopped = true;
+      terminate();
       clearHold(); // 停止 = 不再等后台,别让旧期限在进程退出前补报一条超时
       resident.kill();
     },
