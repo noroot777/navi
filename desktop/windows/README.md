@@ -5,6 +5,7 @@
 ```bash
 npm run build:win                    # → desktop/windows/build/{Navi-<版本>-x64-setup.exe, Navi\}（mac 上交叉编译）
 npm run release:win -- 0.1.0         # 发一版：交给 GitHub Actions 构建、冒烟、签名、发布（见「发版」）
+npm run release -- 0.3.5             # mac 和 Windows 一起发同一个版本号
 ```
 
 ## 自带运行时
@@ -166,7 +167,9 @@ Copy-Item backups\<那一份>.db navi.db
 npm run release:win -- 0.1.0
 ```
 
-同 mac（`scripts/cloud-release.mjs`，通用部分在 `desktop/shared/`）：工作区干净、在 `main` 上，先核对版本、工作流和远端是否领先（不自动合并、不强推）；只改 `shell/tauri.conf.json` 的 `version`、单独提交版本号、正常 push，再把完整源码 SHA 和版本交给 GitHub Actions 的 **Release Windows**（`.github/workflows/release-win.yml`）。输出任务地址后就可以关电脑。重复执行不重复提交；同一源码和版本的任务在跑就返回它，失败了就重跑它。
+mac 和 Windows 一起发同一个版本号用 `npm run release -- <版本>`（`desktop/release.mjs`）：两边的预检都过了才动版本号，两个版本文件进同一个提交、推一次，再用同一个 SHA 各触发一条工作流；推上去以后一边没触发成，另一边照样触发，重新执行同一命令只补那一边。流程在 `desktop/shared/cloud-release.mjs`，三个命令共用。
+
+只发 Windows（`scripts/cloud-release.mjs`）口径同 mac：工作区干净、在 `main` 上，先核对版本、工作流和远端是否领先（不自动合并、不强推）；只改 `shell/tauri.conf.json` 的 `version`、单独提交版本号、正常 push，再把完整源码 SHA 和版本交给 GitHub Actions 的 **Release Windows**（`.github/workflows/release-win.yml`）。输出任务地址后就可以关电脑。重复执行不重复提交；同一源码和版本的任务在跑就返回它，失败了就重跑它。
 
 ### 一次性配置
 
