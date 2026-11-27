@@ -1,9 +1,10 @@
 import { useMemo, useRef, useState } from "react";
 import type { ProjectView } from "@navi/shared";
-import { CaretDown, Check, FolderPlus, GearSix, ListChecks, MagnifyingGlass } from "@phosphor-icons/react";
+import { CaretDown, Check, DotsSixVertical, FolderPlus, GearSix, ListChecks, MagnifyingGlass } from "@phosphor-icons/react";
 import { useDismissable } from "../lib/useDismissable.ts";
 import { shortenHomePath, useHostInfo } from "../lib/useHostInfo.ts";
 import { ProjectAvatar } from "./ProjectAvatar.tsx";
+import { useProjectReorder } from "./useProjectReorder.ts";
 import { SETTINGS_SHORTCUT_LABEL } from "./goChord.ts";
 import { TASK_MODE_LABEL, TASK_MODE_SHORTCUT_LABEL, TASK_MODE_SUMMARY } from "./taskScope.ts";
 
@@ -17,6 +18,7 @@ export function ProjectSwitcher({
   onProject,
   onTaskMode,
   onCreate,
+  onReorder,
   onSettings,
 }: {
   projects: ProjectView[];
@@ -25,6 +27,7 @@ export function ProjectSwitcher({
   onProject: (projectId: string) => void;
   onTaskMode: () => void;
   onCreate: () => void;
+  onReorder: (projectIds: string[]) => void;
   onSettings: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -32,15 +35,22 @@ export function ProjectSwitcher({
   const host = useHostInfo();
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const list = useRef<HTMLDivElement>(null);
   const query = search.trim().toLocaleLowerCase();
+  // 只在没搜索时能拖：筛过的列表里挪一格，落到完整列表里是哪一格说不清。
+  const projectIds = useMemo(() => projects.map((project) => project.id), [projects]);
+  const reorder = useProjectReorder({ ids: projectIds, enabled: open && !query && projects.length > 1, listRef: list, onCommit: onReorder });
   const results = useMemo(() => {
-    if (!query) return projects;
+    if (!query) {
+      const byId = new Map(projects.map((project) => [project.id, project]));
+      return reorder.order.flatMap((id) => byId.get(id) ?? []);
+    }
     return projects.filter(
       (project) =>
         project.name.toLocaleLowerCase().includes(query) ||
         project.repoPath.toLocaleLowerCase().includes(query),
     );
-  }, [projects, query]);
+  }, [projects, query, reorder.order]);
   // 搜索框里打字时「任务模式」也得跟着被筛掉，否则它会挂在一堆无关结果上方；
   // 但它本身可搜（打 task 或「任务」都能找到），别让人以为只能靠鼠标够。
   const taskModeMatches = !query || TASK_MODE_LABEL.includes(query) || "tasks".startsWith(query);
@@ -121,7 +131,7 @@ export function ProjectSwitcher({
           </label>
 
           <div className="workspace-project-menu-label">切换到</div>
-          <div className="workspace-project-results">
+          <div className={`workspace-project-results${reorder.dragging ? " is-reordering" : ""}`} ref={list}>
             {taskModeMatches && (
               <button
                 className={`workspace-project-option ui-selectable${taskMode ? " is-selected" : ""}`}
@@ -150,11 +160,13 @@ export function ProjectSwitcher({
               return (
                 <button
                   key={project.id}
-                  className={`workspace-project-option ui-selectable${selected ? " is-selected" : ""}`}
+                  className={`workspace-project-option ui-selectable${selected ? " is-selected" : ""}${reorder.dragging === project.id ? " is-dragging" : ""}`}
                   type="button"
                   role="menuitemradio"
                   aria-checked={selected}
-                  onClick={() => {
+                  {...reorder.rowProps(project.id)}
+                  onClick={(event) => {
+                    if (reorder.shouldSwallowClick(event)) return;
                     setSearch("");
                     setOpen(false);
                     onProject(project.id);
@@ -166,6 +178,7 @@ export function ProjectSwitcher({
                     <small>{shortenHomePath(project.repoPath, host)}</small>
                   </span>
                   {selected && <Check size={13} weight="bold" aria-hidden="true" />}
+                  {!query && projects.length > 1 && <DotsSixVertical className="workspace-project-grip" size={13} weight="bold" aria-hidden="true" />}
                 </button>
               );
             })}

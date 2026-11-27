@@ -37,6 +37,12 @@ export interface AppSettings {
   archiveClean: AcceptClean;
   composerSendKey: ComposerSendKey;
   colorTheme: ColorTheme;
+  /**
+   * 项目切换下拉里的先后（拖动排出来的），项目 id 按顺序排。个人面的键：每个人按自己的习惯排，
+   * 互不影响。没出现在这里的项目（新建的、排序之后才看得见的）接在后面，保持创建先后。
+   * 服务端 `GET /projects` 按它排好再下发（server/src/project-order.ts），各端不再自己排。
+   */
+  projectOrder: string[];
   instanceMode: "" | "single" | "multi";
   rootDir: string;
   sharedHostCli: boolean;
@@ -65,6 +71,7 @@ export const DEFAULT_APP_SETTINGS: Readonly<AppSettings> = Object.freeze({
   archiveClean: "all",
   composerSendKey: "enter",
   colorTheme: "system",
+  projectOrder: [],
   instanceMode: "",
   rootDir: "",
   sharedHostCli: false,

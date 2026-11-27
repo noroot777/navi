@@ -219,3 +219,17 @@ export function browserCdpDomainAllowed(host: string, allowed: readonly string[]
   const h = host.trim().toLowerCase().replace(/\.+$/, "");
   return allowed.some((d) => h === d || h.endsWith(`.${d}`));
 }
+
+/**
+ * 按个人设置 `projectOrder` 排项目：排过的在前、按排出来的先后；没排过的（新建的、后来才看得见的）
+ * 接在后面，保持原来的先后；已经不在的 id 不占位。服务端 `GET /projects` 出门前排一次，页面在
+ * 新顺序还没存进去时也拿它把读回来的列表摆成用户最后排的样子（web/src/workspace/projectOrderSave.ts）。
+ */
+export function orderProjects<T extends { id: string }>(rows: readonly T[], order: readonly string[]): T[] {
+  if (!order.length) return [...rows];
+  const rank = new Map(order.map((projectId, index) => [projectId, index]));
+  return rows
+    .map((row, index) => ({ row, key: rank.get(row.id) ?? order.length + index }))
+    .sort((a, b) => a.key - b.key)
+    .map((entry) => entry.row);
+}

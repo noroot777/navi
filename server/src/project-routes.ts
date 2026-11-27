@@ -42,6 +42,8 @@ import {
   visibleProjectIds,
 } from "./auth/visibility.js";
 import { deleteProjectInvites } from "./auth/user-routes.js";
+import { settingsForActor } from "./auth/personal-settings.js";
+import { orderProjects } from "./project-order.js";
 
 // 项目这张表自己的 CRUD 与体检端点。从 routes.ts 搬出来:那份文件是各模块 mount 的总表
 // 加上零散端点,项目这一段已经长到能自成一块了(建项目、按路径找回、删项目的级联、路径
@@ -98,7 +100,8 @@ export function mountProjectRoutes(api: Hono): void {
     // 角色一次取完:一行查一次成员表的话,项目一多就是 N 次查询。
     const roles = await projectRolesOf(actor);
     const rows = await db.select().from(projects);
-    return c.json(rows
+    const { projectOrder } = await settingsForActor(actor);
+    return c.json(orderProjects(rows, projectOrder)
       .filter((r) => visible === null || visible.has(r.id))
       .map((r) => toProject(r, roles === null ? "admin" : roles.get(r.id) ?? "member")));
   });

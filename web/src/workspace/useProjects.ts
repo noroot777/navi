@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
 import type { ProjectView } from "@navi/shared";
+import { orderProjects } from "@navi/shared/project";
 import { api } from "../lib/api.ts";
 import { catchUpAbortKind } from "../lib/catchUp.ts";
 import { useServerEvents } from "../lib/events.ts";
 import { useCatchUp, useCatchUpLink } from "../lib/useCatchUp.ts";
+import { createOrderSaver } from "./projectOrderSave.ts";
 
 // 工作区壳那一份项目列表：**唯一一个读取者**。首次加载、服务端说「项目改了」（project.updated）、
 // 断线重连后的对账，全走同一个追平实例（lib/useCatchUp.ts：同一时刻至多一发在途、失败按节奏
@@ -11,7 +13,7 @@ import { useCatchUp, useCatchUpLink } from "../lib/useCatchUp.ts";
 // 改了门禁基准，后发先至的新读数被丢掉、旧的首次读数随后落地，页面就停在改之前（第 2 轮审查
 // F4）；事件触发的那一发失败一次也没人再读（F3）。
 //
-// 本页自己写项目（保存设置、新建、删除）走 `apply`：照写，然后补排一趟读取。写入那一刻还在途的
+// 本页自己写项目（保存设置、新建、删除）走 `apply`（排序走 `saveOrder`，见 projectOrderSave.ts）：照写，然后补排一趟读取。写入那一刻还在途的
 // 那一发不再作数（它可能早于这次写入），由补排的那一趟接上。`setLocal` 只给不该触发重读的
 // 派生字段（项目体检）用。
 export function useProjects(onFirstLoad: (rows: ProjectView[]) => void) {
@@ -22,14 +24,20 @@ export function useProjects(onFirstLoad: (rows: ProjectView[]) => void) {
   const [lagging, setLagging] = useState(false);
   const loaded = useRef(false);
   const writes = useRef(0);
+  const orderErrorRef = useRef<(reason: unknown) => void>(() => {});
+  const orderSaver = useRef<ReturnType<typeof createOrderSaver> | null>(null);
+  const catchUpRef = useRef<{ run: () => unknown } | null>(null);
   const onFirstLoadRef = useRef(onFirstLoad);
   onFirstLoadRef.current = onFirstLoad;
 
   const read = useCallback(async (signal: AbortSignal): Promise<boolean> => {
     const writesAtStart = writes.current;
     try {
-      const rows = await api.projects(signal);
+      const fetched = await api.projects(signal);
       if (writes.current !== writesAtStart) return true;
+      // 新顺序还没存进去：照收这份列表，先后按用户最后排的摆（见 projectOrderSave.ts）。
+      const intent = orderSaver.current?.intent();
+      const rows = intent ? orderProjects(fetched, intent) : fetched;
       setProjects(rows);
       setError(null);
       setLagging(false);
@@ -51,7 +59,9 @@ export function useProjects(onFirstLoad: (rows: ProjectView[]) => void) {
   }, []);
   const catchUp = useCatchUp(read);
   useEffect(() => { void catchUp.run(); }, [catchUp]);
-  const connected = useServerEvents((event) => { if (event.type === "project.updated") void catchUp.run(); });
+  const connected = useServerEvents((event) => {
+    if (event.type === "project.updated" || event.type === "projects.reordered") void catchUp.run();
+  });
   useCatchUpLink(catchUp, connected);
 
   const apply = useCallback((update: SetStateAction<ProjectView[]>) => {
@@ -59,5 +69,19 @@ export function useProjects(onFirstLoad: (rows: ProjectView[]) => void) {
     setProjects(update);
     void catchUp.run();
   }, [catchUp]);
-  return { projects, ready, error, lagging, apply, setLocal: setProjects };
+  catchUpRef.current = catchUp;
+  orderSaver.current ??= createOrderSaver({
+    onError: (reason) => orderErrorRef.current(reason),
+    // 队排空：此前在途的读可能早于最后那份保存，一律作废，重读一次按服务端的真值对账。
+    onSettled: () => {
+      writes.current += 1;
+      void catchUpRef.current?.run();
+    },
+  });
+  const saveOrder = useCallback((projectIds: string[], onError: (reason: unknown) => void) => {
+    orderErrorRef.current = onError;
+    setProjects((current) => orderProjects(current, projectIds));
+    orderSaver.current?.save(projectIds);
+  }, []);
+  return { projects, ready, error, lagging, apply, saveOrder, setLocal: setProjects };
 }

@@ -206,6 +206,9 @@ export type ServerEvent =
   // 设备、飞书内置浏览器）按它重拉 `/task-reads`，侧栏那几颗绿点跟着熄。ownerUserId = 那个人
   // （自用模式 null），event-filter 只推给他本人。
   | { type: "task.reads"; ownerUserId: string | null }
+  // 某个人拖动调了项目的先后（PUT /project-order）。顺序是个人面的，只推给他本人（同 task.reads），
+  // 他开着的每个页面按它重拉项目列表。
+  | { type: "projects.reordered"; ownerUserId: string | null }
   // 该弹一条系统通知了（server/src/system-notify.ts 判、措辞也在那里定）：客户端照着弹，不再自己判。
   // ownerUserId = 任务主人，多人模式下 event-filter 只推给他（还要他看得见这个任务）。
   // key 是这件事的身份：同一件事几个页面各收到一份时，系统按它只留一条。

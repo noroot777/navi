@@ -90,7 +90,7 @@ export function WorkspaceShell() {
   const [gitOpen, setGitOpen] = useState(initial.view === "git");
   const [gitLocation, setGitLocation] = useState(readGitLocation);
   const [projectId, setProjectId] = useState<string | null>(initial.projectId);
-  const { projects, ready: projectsReady, error: projectsError, lagging: projectsLagging, apply: setProjects, setLocal: setProjectsLocal } =
+  const { projects, ready: projectsReady, error: projectsError, lagging: projectsLagging, apply: setProjects, saveOrder: saveProjectOrder, setLocal: setProjectsLocal } =
     useProjects((rows) => setProjectId((current) => current && rows.some((project) => project.id === current) ? current : rows[0]?.id ?? null));
   const currentProject = projects.find((project) => project.id === projectId) ?? null;
   const hasCurrentProject = currentProject !== null;
@@ -161,6 +161,9 @@ export function WorkspaceShell() {
   const { toasts, notify, dismiss: dismissToast } = useToast();
   // 底部坞的会话账本：开着哪几个终端、哪个在前台、抽屉展开没有。住在这一层是因为 tab 条摆在
   // 状态栏上（StatusBar），抽屉收起时它照样要说得出还有什么活着。
+  const reorderProjects = useCallback((projectIds: string[]) => {
+    saveProjectOrder(projectIds, (error) => notify(error instanceof Error ? `项目顺序没存上：${error.message}` : "项目顺序没存上"));
+  }, [saveProjectOrder, notify]);
   const terminal = useTerminalDock({ project: currentProject, enabled: canUseTerminal, notify });
   const remoteReturns = useRemoteReturns(notify);
   // 主仓 git 操作落定时那一句话挂在这一层，为的是**盖得住切项目**：分支胶囊跟着当前项目
@@ -434,9 +437,17 @@ export function WorkspaceShell() {
     setNotes(null);
     setPaletteOpen(false);
   };
-  // 设置页的正门：项目下拉里那颗「设置」和快捷键 G S 共用它。分开写迟早漂成两个落点，
+  // 设置页的正门：项目下拉里那颗「设置」、快捷键 G S 和桌面版菜单的「设置…」共用它。分开写迟早漂成两个落点，
   // 而按钮上标着的键位一旦和按钮本身各去各的地方，那行 kbd 就成了句假话。
   const openSettingsHome = () => openSettings();
+  // macOS 桌面版菜单里的「设置…」（⌘,）递来的一声（desktop/macos BrowserWindowController.showSettings）。
+  const openSettingsHomeRef = useRef(openSettingsHome);
+  openSettingsHomeRef.current = openSettingsHome;
+  useEffect(() => {
+    const open = () => openSettingsHomeRef.current();
+    window.addEventListener("navi:open-settings", open);
+    return () => window.removeEventListener("navi:open-settings", open);
+  }, []);
   const openComposer = (draft?: ComposerDraft) => {
     if (!requireProject("新建任务")) return;
     setRemoteSelection(null);
@@ -628,7 +639,7 @@ export function WorkspaceShell() {
 
   return (
     <><div className="workspace-system-layout">{handoffAlert}<div className={`workspace-shell${spread.laidOut ? " is-spread" : ""}${chatOpen ? " is-chat" : ""}${assistantOpen ? " is-assistant" : ""}${narrowPane.pane === "both" ? "" : ` is-narrow-${narrowPane.pane}`}`} style={{ "--workspace-sidebar-width": `${sidebarWidth}px` } as CSSProperties}>
-      <WorkspaceSidebar projects={projects} currentProject={currentProject} scope={scope} tasks={tasks} selectedTaskId={taskId} selectedRemoteTaskId={remoteSelection?.task.id ?? null} collapsed={collapsed && !narrowPane.narrow} spread={spread} width={sidebarWidth} onWidthChange={setSidebarWidth} onProject={selectProject} onTaskMode={selectTaskMode} onTask={toContent(selectTask)} onRemoteTask={toContent(selectRemoteTask)} onHandoffFinished={() => refetchTasks({ silent: true }).then(() => {})} onQueueChanged={() => refetchTasks({ silent: true }).then(() => {})} outbound={outboundBar} onOpenTerminal={currentProject && canUseTerminal ? terminal.reveal : null} commands={commandsWiring} notify={notify} onToggleCollapsed={() => { spread.close(); setCollapsed((value) => !value); }} onSearch={() => setPaletteOpen(true)} onOpenRecall={() => setRecallOpen(true)} onNotes={() => openNotes()} onChat={toContent(openChat)} chatOpen={chatOpen} onAssistant={toContent(openAssistant)} assistantOpen={assistantOpen} onCreate={toContent(() => openComposer())} onNewProject={() => setCreateDialog({ kind: "project", reason: null })} onSettings={openSettingsHome} />
+      <WorkspaceSidebar projects={projects} currentProject={currentProject} scope={scope} tasks={tasks} selectedTaskId={taskId} selectedRemoteTaskId={remoteSelection?.task.id ?? null} collapsed={collapsed && !narrowPane.narrow} spread={spread} width={sidebarWidth} onWidthChange={setSidebarWidth} onProject={selectProject} onTaskMode={selectTaskMode} onTask={toContent(selectTask)} onRemoteTask={toContent(selectRemoteTask)} onHandoffFinished={() => refetchTasks({ silent: true }).then(() => {})} onQueueChanged={() => refetchTasks({ silent: true }).then(() => {})} outbound={outboundBar} onOpenTerminal={currentProject && canUseTerminal ? terminal.reveal : null} commands={commandsWiring} notify={notify} onToggleCollapsed={() => { spread.close(); setCollapsed((value) => !value); }} onSearch={() => setPaletteOpen(true)} onOpenRecall={() => setRecallOpen(true)} onNotes={() => openNotes()} onChat={toContent(openChat)} chatOpen={chatOpen} onAssistant={toContent(openAssistant)} assistantOpen={assistantOpen} onCreate={toContent(() => openComposer())} onNewProject={() => setCreateDialog({ kind: "project", reason: null })} onReorderProjects={reorderProjects} onSettings={openSettingsHome} />
       <TaskContentShown.Provider value={narrowPane.pane !== "list"}><main className="workspace-main">
         {narrowPane.pane === "content" && <button type="button" className="workspace-narrow-back" onClick={narrowPane.showList}><CaretLeft size={14} weight="bold" aria-hidden="true" />列表</button>}
         {loadError && <div className="workspace-load-error">{loadError.message}</div>}

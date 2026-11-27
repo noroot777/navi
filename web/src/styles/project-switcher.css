@@ -278,3 +278,42 @@
   text-align: center;
   font-size: var(--t-xs);
 }
+
+/* 拖动调先后：拖柄只在指到那一行时出现；拖动中被拖那行浮起来，其余行不再跟着指针亮。 */
+.workspace-project-option .workspace-project-grip {
+  flex: none;
+  margin-right: -3px;
+  color: var(--faint);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.workspace-project-option:hover .workspace-project-grip,
+.workspace-project-option:focus-visible .workspace-project-grip {
+  opacity: 1;
+}
+
+.workspace-project-results.is-reordering {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.workspace-project-results.is-reordering .workspace-project-option {
+  cursor: grabbing;
+}
+
+.workspace-project-results.is-reordering .workspace-project-option:not(.is-dragging):not(.is-selected):hover {
+  background: transparent;
+}
+
+.workspace-project-option.is-dragging {
+  position: relative;
+  z-index: 1;
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--menu-shadow);
+}
+
+.workspace-project-option.is-dragging .workspace-project-grip {
+  opacity: 1;
+}

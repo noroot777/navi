@@ -26,7 +26,7 @@ import { forgetRemovedPeerKeys } from "./handoff-scope.js";
 import { isMultiUser } from "./mode.js";
 
 /** 一人一份的那几项。加一项就往这里加,读写两侧同时生效。 */
-export const PERSONAL_SETTING_KEYS = ["defaultWorkflowId", "composerSendKey", "colorTheme", "onboardedAt"] as const;
+export const PERSONAL_SETTING_KEYS = ["defaultWorkflowId", "composerSendKey", "colorTheme", "onboardedAt", "projectOrder"] as const;
 export type PersonalSettingKey = (typeof PERSONAL_SETTING_KEYS)[number];
 
 const isPersonalKey = (key: string): key is PersonalSettingKey =>
@@ -141,6 +141,30 @@ export async function patchSettingsFor(actor: Actor, patch: Partial<AppSettings>
     }
   }
   return settingsFor(owner);
+}
+
+/**
+ * 在调用方的事务里写个人面的键（调用方要把它和别的写入绑成一次提交时用，如项目先后与它的防重放序号，
+ * project-order.ts）。只收个人键、不做实例面的权限与缓存失效 —— 那些归 `patchSettingsFor`。
+ */
+export async function writePersonalSettings(
+  actor: Actor,
+  patch: Partial<Pick<AppSettings, PersonalSettingKey>>,
+  tx: Pick<typeof db, "insert">,
+): Promise<void> {
+  if (!(await isMultiUser())) {
+    await writeAppSettingsPatch(patch, tx);
+    return;
+  }
+  const owner = ownerIdOf(actor);
+  if (!owner) throw forbidden("请先登录");
+  for (const [key, value] of Object.entries(patch)) {
+    const encoded = JSON.stringify(value);
+    await tx
+      .insert(userSettings)
+      .values({ userId: owner, key, value: encoded })
+      .onConflictDoUpdate({ target: [userSettings.userId, userSettings.key], set: { value: encoded } });
+  }
 }
 
 /** 删掉一条起手式后清掉指向它的个人默认。全局那份由调用方另外清。 */
