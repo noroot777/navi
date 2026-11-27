@@ -15,7 +15,7 @@ import type { AgentEvent, AgentType, SessionRole, TurnOutcome } from "@navi/shar
 import { eq, sql } from "drizzle-orm";
 import { db } from "./db/index.js";
 import { tasks, sessions } from "./db/schema.js";
-import { directionSuperseded } from "./task-steer-direction-state.js";
+import { directionSettled, directionSuperseded } from "./task-steer-direction-state.js";
 import { closeSessionTurns, recordTurnSpan } from "./session-turns.js";
 import { scanForTitle } from "./auto-title.js";
 import { applyAutoTitle } from "./auto-title-apply.js";
@@ -383,22 +383,23 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
     }
     for await (const event of a.handle.events) {
       if (event.kind === "userInput") {
-        if (!taskRow || !await setTaskQuestion({
+        const saveQuestion = async () => !!taskRow && await setTaskQuestion({
           taskId,
           question: event.questions.length === 1 ? event.questions[0]!.question : "请确认以下问题",
           options: event.questions.length === 1 ? event.questions[0]!.options : undefined,
           items: event.questions.length > 1 ? event.questions : undefined,
           currentTurn: { token: taskRow.activeTurnToken, directionToken: direction },
-        })) {
-          // 用户已经引导到新方向、这一问还是旧方向在问：它跟被引导撤下的那些旧状态一样作废，
-          // 不是这一轮出了故障。
-          if (await directionSuperseded(taskId, direction)) {
-            console.warn(`[navi] 任务 ${taskId} 的旧方向提问在引导之后才读到，已作废`);
-            continue;
-          }
-          throw new Error("执行器的澄清问题未能保存，请重试当前回合");
+        });
+        if (await saveQuestion()) continue;
+        // 存不进去多半是引导正在换方向（库里已经是新的）。等它落定再判：引导成了，这一问是旧方向
+        // 迟到的，跟被撤下的那些旧状态一样作废，不是这一轮出了故障；没成，旧方向还回来，照常挂上。
+        await directionSettled(taskId);
+        if (await directionSuperseded(taskId, direction)) {
+          console.warn(`[navi] 任务 ${taskId} 的旧方向提问在引导之后才读到，已作废`);
+          continue;
         }
-        continue;
+        if (await saveQuestion()) continue;
+        throw new Error("执行器的澄清问题未能保存，请重试当前回合");
       }
       // 「此刻还在等上游」只有这里数得准:正文要到下一条非正文事件才冲进 trace,落盘产物
       // 反推不出「这条提示之后有没有新东西来」(见 session-waiting.ts)。

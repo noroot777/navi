@@ -116,6 +116,7 @@ async function* claudeStreamEvents(
     else if (capturing) ending?.push(event);
   };
   const flushText = () => events.flush();
+  if (resident) resident.mark = (fn) => events.mark(fn);
   const drafting = claudeDrafting();
 
   // 上下文水位。**只有 `assistant` 事件里的 `message.usage` 是单次 API 调用的快照**
@@ -264,8 +265,10 @@ async function* claudeStreamEvents(
     }
     if (ev.type === "stream_event") {
       const se = ev.event;
-      const progress = replaying ? null : drafting.event(se);
-      if (progress) push(progress);
+      // 重放时也要喂：接管落在一次调用生成到一半时，开头那条 content_block_start 在旧水位之前，
+      // 不喂就认不出后面那些入参是谁的，这一步剩下的几分钟都不报进度。只是不往外发。
+      const progress = drafting.event(se);
+      if (progress && !replaying) push(progress);
       if (!replaying && se?.type === "content_block_delta" && se.delta?.type === "text_delta" && se.delta.text) {
         events.delta("text", se.delta.text);
       }

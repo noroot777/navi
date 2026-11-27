@@ -184,8 +184,12 @@ export function singleRunFromResident(
         if (resident.turnActive?.() === false) {
           if (!resident.send(body)) throw new Error("Claude 没收下这条消息（stdin 已关闭，或记不下发送记录）");
           clearHold();
-          // 没有回合可打断，也就没有旧方向还在说的话：边界就在这里。
-          onBoundary?.();
+          // 没有回合可打断，旧方向却可能还有话排在队列里没被消费（解析层空闲不等于下游读完了）：
+          // 边界插在队列此刻的位置，前面那些读完才切。
+          if (onBoundary) {
+            if (resident.mark) resident.mark(onBoundary);
+            else onBoundary();
+          }
           return;
         }
         text = body;

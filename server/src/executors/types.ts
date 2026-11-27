@@ -178,6 +178,8 @@ export interface ResidentHandle {
   close(): void; // 优雅收尾:关 stdin,等它自己退出
   /** 此刻有没有回合在进行(claude 才答得上来,见 ClaudeControlBridge.turnActive)。 */
   turnActive?(): boolean;
+  /** 在事件流此刻的位置插一个回调,下游取完它前面的每一条才调(EventQueue.mark)。 */
+  mark?(fn: () => void): void;
   /**
    * 此刻是第几个回合:CLI 自己开一回合、我们送进一条消息,都 +1。回合结尾带着它(turnEnd.epoch),
    * 单飞消费到一个结尾时拿它对一下 —— 解析和消费之间隔着队列,消费时可能已经开了新回合,那个

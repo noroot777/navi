@@ -121,7 +121,7 @@ function viewKey(view: NoticeView): string {
   return JSON.stringify([view.text, view.tone, view.tier, view.detail, view.mono, view.meta]);
 }
 
-/** 尾注的签名：已经收口的回合只在它变了的时候重画（见 ConversationFeed 的 sameSettledTurn）。 */
+/** 尾注的签名：已经收口的回合只在它变了的时候重画（见 settledTurnMemo.ts 的 sameSettledTurn）。 */
 export function footnoteKey(footnote: TurnFootnote | undefined, extra = ""): string {
   if (!footnote) return extra;
   return [
