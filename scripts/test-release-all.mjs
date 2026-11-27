@@ -72,7 +72,10 @@ function fakeGithub(state = {}) {
       const path = url.replace(/\?.*$/, "");
       state.calls.push(`${method} ${path}`);
       if (path === "/repos/o/app") return { json: { default_branch: "main" } };
-      if (path === "/repos/o/app/actions/workflows/release.yml") return { json: { state: state.inactive ? "disabled_manually" : "active" } };
+      if (path === "/repos/o/app/actions/workflows/release.yml") {
+        if (state.noWorkflow) return { status: 404, json: null };
+        return { status: 200, json: { state: state.inactive ? "disabled_manually" : "active" } };
+      }
       if (path === "/repos/o/app/actions/workflows/release.yml/runs") {
         if (state.denyRuns) throw new Error("HTTP 403 Resource not accessible");
         const page = Number(new URL(url, "http://x").searchParams.get("page") ?? 1);
@@ -125,6 +128,7 @@ try {
     await run("0.3.6", {}, /本地 main/, "不在 main");
     git(item.dir, "switch", "-q", "main");
     await run("0.3.4", {}, /不能把 Mac 的源码版本从 0\.3\.5 倒退/, "版本倒退");
+    await run("0.3.6", { noWorkflow: true }, /GitHub 上还没有发布工作流 release\.yml：它只在本地 main 里。先 git push origin main/, "工作流还没推上 GitHub");
     await run("0.3.6", { inactive: true }, /release\.yml 未启用/, "工作流没启用");
     await run("0.3.6", { denyRuns: true }, /HTTP 403/, "读不了 Actions");
     await run("0.3.6", { feeds: { [INTEL_FEED]: appcast("0.3.7", before) } }, /Mac 更新源已经是 0\.3\.7/, "Intel 更新源更新");
