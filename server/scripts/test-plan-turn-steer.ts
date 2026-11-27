@@ -2,7 +2,8 @@
 // 任务执行结算，原话照样能原生插进同一条会话（runs.ts `planSteerTarget`）。真正的 CLI 原生命令
 // 回合（`/compact`）仍然不让引导；计划回合里要换执行器/模型的消息也不让（那只能硬切重起）。
 // 连带三件：能不能引导一变就让托盘重拉；引导之后计划回合里的提问照常挂上（不按方向分新旧）；
-// 重启接回的计划回合照样认得出来；引导没送进去时，原会话期间新问的那一问留着，身份照样回来。
+// 重启接回的计划回合照样认得出来；引导没送进去时，原会话期间新问的那一问留着，身份照样回来；
+// 回滚跟回合结算撞在一起时，结算看不到「身份回来了、内容还没回来」的半成品。
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createWriteStream, mkdtempSync, rmSync } from "node:fs";
@@ -17,7 +18,7 @@ const root = mkdtempSync(join(tmpdir(), "navi-plan-turn-steer-"));
 process.env.NAVI_DB = join(root, "navi.db");
 process.env.NAVI_RUNS_DIR = join(root, "runs");
 
-const [{ db, ensureSchema }, schema, runs, steer, gate, pendingWait, { bus }, { consumeSingleRun }, { singleRunFromResident }, { ClaudeExecutor }] = await Promise.all([
+const [{ db, ensureSchema }, schema, runs, steer, gate, pendingWait, { bus }, { consumeSingleRun }, { singleRunFromResident }, { ClaudeExecutor }, directionState, { settleTaskStatus }] = await Promise.all([
   import("../src/db/index.js"),
   import("../src/db/schema.js"),
   import("../src/runs.js"),
@@ -28,6 +29,8 @@ const [{ db, ensureSchema }, schema, runs, steer, gate, pendingWait, { bus }, { 
   import("../src/single-run.js"),
   import("../src/executors/claude-single-run.js"),
   import("../src/executors/claude.js"),
+  import("../src/task-steer-direction-state.js"),
+  import("../src/settle-status.js"),
 ]);
 const { projects, scheduledMessages, tasks } = schema;
 await ensureSchema();
@@ -255,6 +258,52 @@ try {
     await new Promise<void>((resolve) => out.end(resolve));
     console.log("✓ 引导没送进去时，原会话期间的提问留着，身份照样回来");
   }
+
+  // 回滚落库之后、回滚函数拿到结果之前，原会话正好自然结束、进了真结算（生产上这中间隔着一次
+  // 真实的 await）。结算要么看到全没回来、要么全回来了：等答复的那一问、已经交的卷都不许被判成
+  // 未交卷（第 4 轮自由审查：身份和内容分两笔落时，结算读到的是半成品）。
+  for (const mode of ["question", "complete"] as const) {
+    const id = `race-${mode}`;
+    await db.insert(tasks).values({
+      ...task(id), nativeTurn: false,
+      ...(mode === "question" ? { question: "原会话还在等用户回答的问题" } : { completeConfirmedAt: at }),
+    });
+    const previous = await directionState.clearPreviousDirectionState(id, false);
+    const realUpdate = db.update.bind(db);
+    let settled: Awaited<ReturnType<typeof settleTaskStatus>> | null = null;
+    (db as { update: unknown }).update = (table: unknown) => {
+      const builder = realUpdate(table as typeof tasks);
+      const set = builder.set.bind(builder);
+      (builder as { set: unknown }).set = (patch: Record<string, unknown>) => {
+        const query = set(patch as never);
+        if (table !== tasks || patch.activeDirectionToken !== `${id}-direction`) return query;
+        const returning = query.returning.bind(query);
+        (query as { returning: unknown }).returning = (...args: unknown[]) => {
+          const result = returning(...(args as []));
+          return {
+            then: (resolve: (rows: unknown[]) => void, reject: (error: unknown) => void) =>
+              Promise.resolve(result).then(async (rows: unknown[]) => {
+                if (rows.length && !settled) settled = await settleTaskStatus(id, 0, null);
+                return rows;
+              }).then(resolve, reject),
+          };
+        };
+        return query;
+      };
+      return builder;
+    };
+    try {
+      await directionState.restorePreviousDirectionState(id, previous);
+    } finally {
+      (db as { update: unknown }).update = realUpdate;
+    }
+    assert.ok(settled, "台子前提：结算确实插在了回滚落库之后");
+    const outcome = settled as Awaited<ReturnType<typeof settleTaskStatus>>;
+    assert.notEqual(outcome.status, "failed", `${mode}：结算不许把它判成未交卷`);
+    if (mode === "question") assert.equal((await taskRow(id)).question, "原会话还在等用户回答的问题", "那一问还在等答复");
+    else assert.equal(outcome.confirmedDone, true, "已经交的卷照样作数");
+  }
+  console.log("✓ 回滚跟回合结算撞在一起：等答复的那一问、已经交的卷都不会被判成未交卷");
 
   // 重启接回：执行器从起跑命令认回计划回合。
   {
