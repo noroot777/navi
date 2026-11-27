@@ -2,7 +2,7 @@
 
 两件事:**你这边打包**、**他那边执行**。
 
-> **对方是 Windows 10/11(x64)、只想用、不改代码**:直接给安装包,不用走下面这套。`npm run release:win -- <版本>` 发出来的 `Navi-<版本>-x64-setup.exe` 在 [noroot777/navi 的 Releases](https://github.com/noroot777/navi/releases)(tag `navi-win-v<版本>`),本机 `npm run build:win` 也能出一份(`desktop/windows/build/`)。双击安装:per-user、不要管理员,装到 `%LOCALAPPDATA%\Programs\Navi`,自带 node 和服务,不需要系统里有 node 或仓库检出;数据在 `%LOCALAPPDATA%\Navi\data`。没有 Authenticode 签名,SmartScreen 第一次会拦(「更多信息 → 仍要运行」)。之后托盘里「检查更新…」,另外每 6 小时自己查;更新只换窗口那一层,在跑的服务和任务不停。卸载在「设置 → 应用」,默认不删数据。claude / codex 这些 CLI 仍要对方自己装(见下文「0. 前置」)。细节见 [`desktop/windows/README.md`](../desktop/windows/README.md)。
+> **对方是 Windows 10/11(x64)、只想用、不改代码**:直接给安装包,不用走下面这套。`npm run release -- <版本>` 发出来的 `Navi-<版本>-x64-setup.exe` 在 [noroot777/navi 的 Releases](https://github.com/noroot777/navi/releases)(tag `v<版本>`,和 mac 的 dmg 同一个 Release),本机 `npm run build:win` 也能出一份(`desktop/windows/build/`)。双击安装:per-user、不要管理员,装到 `%LOCALAPPDATA%\Programs\Navi`,自带 node 和服务,不需要系统里有 node 或仓库检出;数据在 `%LOCALAPPDATA%\Navi\data`。没有 Authenticode 签名,SmartScreen 第一次会拦(「更多信息 → 仍要运行」)。之后托盘里「检查更新…」,另外每 6 小时自己查;更新只换窗口那一层,在跑的服务和任务不停。卸载在「设置 → 应用」,默认不删数据。claude / codex 这些 CLI 仍要对方自己装(见下文「0. 前置」)。细节见 [`desktop/windows/README.md`](../desktop/windows/README.md)。
 
 ---
 

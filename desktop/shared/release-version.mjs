@@ -1,5 +1,9 @@
 // 版本号的口径，mac 与 Windows 两边的发版共用。
 
+/** 发版的云端工作流只有一条：两个 Mac 架构和 Windows 一起构建，同一个 Release 里一起公开。运行名三个 job 共用。 */
+export const WORKFLOW = "release.yml";
+export const runName = (version, commit, publish = true) => `release ${version} ${commit} ${publish ? "publish" : "build"}`;
+
 /** 给人看的版本号：三个非负整数（不带 v、不带前导零）。Tauri updater 按 semver 比，mac 的 Release/tag 也只带它。 */
 export function assertVersion(version) {
   if (typeof version !== "string" || version.trim() !== version

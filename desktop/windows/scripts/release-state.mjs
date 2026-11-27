@@ -4,9 +4,10 @@
 // 壳只看这几项（签名验的是下载下来的安装包本身，清单不签）；另外记一段 navi（源码提交、安装包大小和 sha256），
 // 给发版脚本自己核对「这一版是不是从这个提交发的」「公开地址上那份是不是原包」，updater 不认识的字段一律不看。
 import { readFileSync } from "node:fs";
-import { assertVersion, compareVersions } from "../../shared/release-version.mjs";
+import { WORKFLOW, assertVersion, compareVersions, runName } from "../../shared/release-version.mjs";
 
-export const WORKFLOW = "release-win.yml";
+export { WORKFLOW, runName };
+
 export const PLATFORM = "windows-x86_64";
 
 export function readConfig(path) {
@@ -40,7 +41,6 @@ export const feedURL = (config) => `https://raw.githubusercontent.com/${config.f
 export const tagFor = (config, version) => `${config.tagPrefix}${version}`;
 export const installerName = (version) => `Navi-${version}-x64-setup.exe`;
 export const assetURL = (config, version) => `https://github.com/${config.releaseRepo}/releases/download/${tagFor(config, version)}/${installerName(version)}`;
-export const runName = (version, commit, publish = true) => `win ${version} ${commit} ${publish ? "publish" : "build"}`;
 
 /** 读更新清单：没有是 null；认不出的（不是这个格式、版本号不合规）直接报错，不拿它当「还没发过」。 */
 export function parseFeed(text) {

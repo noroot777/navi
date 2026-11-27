@@ -56,7 +56,7 @@ app 注册了 `navi://`（`build.sh` 写进 Info.plist）。`navi://open?project
 
 用 [Sparkle](https://sparkle-project.org) 2（版本和 sha256 钉在 `scripts/sparkle.mjs`，框架原样放进 `Contents/Frameworks`）。菜单「Navi → 检查更新…」，另外每 6 小时自己查一次。两个公开仓库，都在 `release.json` 里配：
 
-- **安装包**在 [noroot777/navi](https://github.com/noroot777/navi)（`releaseRepo`；GitHub 上要先从 noroot777/ash 改名过来，没改名时发版脚本会拦下、不去新建）：Apple 芯片版为 `navi-mac-v<版本>` Release 上的 `Navi-<版本>.dmg`，Intel 版为 `navi-mac-intel-v<版本>` 上的 `Navi-<版本>-intel.dmg`；旧版含构建号的包及链接不变。只出 dmg：新用户下载安装的、Sparkle 更新用的是同一个文件。
+- **安装包**在 [noroot777/navi](https://github.com/noroot777/navi)（`releaseRepo`；GitHub 上要先从 noroot777/ash 改名过来，没改名时发版脚本会拦下、不去新建）：每个版本一个 Release（tag `v<版本>`），Apple 芯片版 `Navi-<版本>.dmg`、Intel 版 `Navi-<版本>-intel.dmg` 和 Windows 安装包都在里面；0.3.5 及以前的 `navi-mac-v<版本>` / `navi-mac-intel-v<版本>` 和含构建号的包及链接不变。只出 dmg：新用户下载安装的、Sparkle 更新用的是同一个文件。
 - **appcast** 在素材库 [noroot777/materials](https://github.com/noroot777/materials)（`feedRepo`）的 `navi/mac/appcast.xml`，app 的 `SUFeedURL` 是它在 raw.githubusercontent 上的那份；每一版的下载地址指向 noroot777/navi 那个 Release 上的 dmg。改名前的 Ash.app 看的是同一个仓库里的 `ash/mac/appcast.xml`（`legacyAppcastPath`）：每次发版那一份换成一条「仅通知」的条目，见「从 Ash.app 升级」。
 
 **只靠 EdDSA 签名校验**：app 是 ad-hoc 签名，没有能跨版本延续的 Apple 签名身份，而 Sparkle 的规则是「Apple 签名身份和 EdDSA 密钥至少一样不变」。所以 Info.plist 里的 `SUPublicEDKey` **永远不能换**，换了已装的 app 就再也装不上新版。appcast 本身也签（`SURequireSignedFeed`），dmg 先验签再挂载（`SUVerifyUpdateBeforeExtraction`）：被改过的 dmg 或 appcast 一律拒装。公钥由 `build.sh` 从 `release.json` 写进 Info.plist；还没配公钥的构建不带更新源，菜单里也没有「检查更新…」。
@@ -133,21 +133,21 @@ cp backups/<那一份>.db ash.db
 
 ## 发版
 
-日常发布只需要在仓库根目录执行：
+mac 和 Windows 一起发，一个版本号、一个 Release。在仓库根目录执行：
 
 ```bash
-npm run release:mac -- 0.3.2
+npm run release -- 0.3.6
 ```
 
-mac 和 Windows 一起发同一个版本号用 `npm run release -- <版本>`（`desktop/release.mjs`）：两边的预检都过了才动版本号，两个版本文件进同一个提交、推一次，再用同一个 SHA 各触发一条工作流；推上去以后一边没触发成，另一边照样触发，重新执行同一命令只补那一边。流程在 `desktop/shared/cloud-release.mjs`，三个命令共用。
+发完是 tag `v0.3.6` 的一个 Release，里面三个安装包：`Navi-0.3.6.dmg`（Apple 芯片）、`Navi-0.3.6-intel.dmg`（Intel）、`Navi-0.3.6-x64-setup.exe`（Windows）。
 
-本地工作区干净、当前分支为 `main` 时，命令先检查版本和 GitHub 工作流，再核对远端是否领先：不自动合并、不强推。随后只修改 `build.sh` 的 `VERSION`、单独提交版本号、正常 push，再将完整源码 SHA 和版本号交给 GitHub Actions。其他开发改动由开发者事先整理提交。命令输出任务地址后即可关电脑，云端独立完成构建和发布。
+本地工作区干净、当前分支为 `main` 时，命令先把所有判断做完：凭证、工作流、两个 Mac 更新源和 Windows 更新清单（倒退、同一版换了提交、只发了一部分）、远端是否领先；不自动合并、不强推，从头到尾只认开始时的那个 HEAD，预检期间本地 main 多了提交就停。随后只修改 `build.sh` 的 `VERSION` 和 `desktop/windows/shell/tauri.conf.json` 的 `version`、进同一个提交、正常 push，再将完整源码 SHA 和版本号交给 GitHub Actions 的 **Release**（`.github/workflows/release.yml`）。其他开发改动由开发者事先整理提交。命令输出任务地址后即可关电脑，云端独立完成构建和发布。流程在 `desktop/shared/cloud-release.mjs`，两个平台各自的差异在各自的 `scripts/cloud-release.mjs`。
 
-版本提交或 push 已成功但触发失败时，重新执行同一命令不会重复提交版本号；同一源码和版本的任务正在运行时返回已有任务，失败时重跑原任务，已经成功时返回结果。只构建的演练与真正发布分别识别，不会把演练当成已发布。
+版本提交或 push 已成功但触发失败时，重新执行同一命令不会重复提交版本号；同一源码和版本的任务正在运行时返回已有任务，失败时重跑原任务，已经成功时返回结果。这一版只在一部分平台（或 Mac 一部分架构）发过、又没有可恢复的原工作流时，推之前就拒，改用新版本号。只构建的演练与真正发布分别识别，不会把演练当成已发布。
 
 ### 一次性配置
 
-1. 将 `.github/workflows/release-mac.yml` 合入 GitHub 的 `main`，启用 Actions。
+1. 将 `.github/workflows/release.yml` 合入 GitHub 的 `main`，启用 Actions。
 2. 在 `noroot777/navi → Settings → Secrets and variables → Actions` 添加两项 Repository secrets：
 
 | 名称 | 内容与权限 |
@@ -156,7 +156,7 @@ mac 和 Windows 一起发同一个版本号用 `npm run release -- <版本>`（`
 | `MAC_SPARKLE_PRIVATE_KEY` | 现有 Sparkle 私钥备份文件里的 base64 文本；沿用现有钥匙，不生成新公钥。 |
 
 3. 本地准备有 `navi` Actions 读写权限的凭证。查找顺序为 `GH_TOKEN` / `GITHUB_TOKEN` → `gh auth token` → git 的 github.com 凭证，不强制安装 gh。git push 仍使用本地已有的 Git 凭证。
-4. 在 Actions 的 **Release Mac → Run workflow** 选 main，填源码中的版本及完整提交 SHA，先关闭 `publish` 做云端构建演练。打开 `publish` 才会使用发布 Secret。
+4. 在 Actions 的 **Release → Run workflow** 选 main，填源码中的版本及完整提交 SHA，先关闭 `publish` 做云端构建演练（两个 Mac 架构和 Windows 都构建、冒烟）。打开 `publish` 才会使用发布 Secret。
 
 签名私钥目前在登录钥匙串的 `dev.navi.mac` 下；改名前的条目为 `dev.ash.mac`，本机备用脚本仍支持它。可从已有密码管理器备份取出，或使用已经下载的 Sparkle 工具导出：
 
@@ -169,9 +169,9 @@ desktop/macos/build/cache/Sparkle-*/bin/generate_keys --account dev.navi.mac -x 
 
 ### 云端与恢复
 
-同一条发布命令触发双架构工作流：Apple 芯片用标准 `macos-15` runner，Intel 用标准 `macos-15-intel` runner。从指定的完整 SHA 构建，只接受 main 上的源码及与源码一致的版本，不因普通 push 或 PR 自动发布。两路各自在对应架构运行 sqlite、终端和隔离服务健康检查，校验 app/Node/原生模块的 Mach-O 架构并保存恢复产物；两路构建都成功才进入串行发布。构建号基于工作流创建时间和各自更新源分配，始终比已有构建号大；不取消进行中的发布。
+同一条发布命令触发一条工作流：Apple 芯片用标准 `macos-15` runner，Intel 用标准 `macos-15-intel` runner，Windows 用 `windows-latest`（见 `desktop/windows/README.md`）。从指定的完整 SHA 构建，只接受 main 上的源码及与源码一致的版本，不因普通 push 或 PR 自动发布。两路各自在对应架构运行 sqlite、终端和隔离服务健康检查，校验 app/Node/原生模块的 Mach-O 架构并保存恢复产物；三路构建都成功才进入合并发布（`desktop/shared/release-together.mjs`，在 `macos-15` 上）：没有这一版的 Release 就建草稿 → 三个包各自签名、传进草稿、经 API 下回核对（各平台 `release.mjs --stage`）→ 三个都在草稿里了才一次公开、核对 tag → 各平台推自己的更新源（`--finish`），一个没推成不挡另一个。构建号基于工作流创建时间和各自更新源分配，始终比已有构建号大；不取消进行中的发布。
 
-Apple 芯片使用 `navi/mac/appcast.xml`、`navi-mac-v0.3.3` tag 和 `Navi-0.3.3.dmg`；Intel 使用 `navi/mac/appcast-intel.xml`、`navi-mac-intel-v0.3.3` tag 和 `Navi-0.3.3-intel.dmg`（以 0.3.3 为例）。两者包标识和 EdDSA 公钥相同，但包内更新源不同，自动更新不会混用架构；旧 Ash 通知源只由 Apple 芯片发布更新。固定下载页同时保留两路已发布包，版本暂不一致时分别标明版本，不展示未发布的 Intel 包。不需要新增 Secret。
+Apple 芯片使用 `navi/mac/appcast.xml` 和 `Navi-0.3.6.dmg`，Intel 使用 `navi/mac/appcast-intel.xml` 和 `Navi-0.3.6-intel.dmg`，和 Windows 安装包同在 tag `v0.3.6` 的 Release 里（以 0.3.6 为例；0.3.5 及以前各架构各有一个 tag：`navi-mac-v…`、`navi-mac-intel-v…`，即 `release.json` 的 `legacyTagPrefix`，老下载地址照旧认得出）。两者包标识和 EdDSA 公钥相同，但包内更新源不同，自动更新不会混用架构；旧 Ash 通知源只由 Apple 芯片发布更新。固定下载页同时保留两路已发布包，版本暂不一致时分别标明版本，不展示未发布的 Intel 包。不需要新增 Secret。
 
 「关于 Navi」、更新提示标题、Release 标题、固定下载页标题以及新发布的 tag、安装包文件名和下载 URL 都只带 `0.3.3` 这样的版本号，不附带日期构建号。内部 `CFBundleVersion`、`sparkle:version` 和恢复清单仍保留构建号，用于更新比较和精确恢复。同一版本号不能换构建重新发布，要发不同的包就提高版本号；恢复原包补收尾不受影响。已经发布的旧 tag、安装包及链接保持原样，脚本兼容旧命名的更新源和恢复产物，不迁移或覆盖历史包。
 
@@ -266,7 +266,7 @@ NAVI_URL=http://127.0.0.1:14977 NAVI_DATA_DIR=/tmp/navi-try HOME=/tmp/navi-home 
 
 也可以 `defaults write dev.navi.mac NaviDataDir <目录>` 换数据根、`defaults write dev.navi.mac NaviURL http://192.168.1.187:4317` 连别的 Navi（非本机地址不替它起服务，也不做身份判断）。
 
-定点回归（仅 macOS）：`node scripts/test-macos-update.mjs` 覆盖装之前那道闸（不会打断就不问；会打断先问、等到排空自己装、现在装；问不出来按会打断；等的时候一次 503 / 不应答不放行；只停评估过的那个进程；另一处在起服务时不停；维护标记跨进程生效、持有者没了作废；停不下来不装也不备份；重启前冻结：凭冻结之下的快照停、续期后才下刀，快照或续期时多出来的重新问，冻结被占不停不备份，老服务在确认框里如实说；别的 Navi 不碰；退出那一档和它备份失败时的说法；Sparkle 放弃后闸收回、重试再备份；起服务前补备份、没有服务记录时连着起不来也留住迁移前的原件、起它的启动器没等到时由之后看到它应答的那一处确认、下一版不拿上一次的底顶替、确认后旧恢复点作废；旧版服务识别）、库备份（WAL 里的写入、确认前不轮换、确认后只留 5 份、同一秒不覆盖且按生成先后认新旧）。`npm run test:release:mac` 覆盖本地触发入口、main/脏工作区/版本与权限预检、正常推送和冲突拒绝、重复触发与失败重跑；恢复产物的 app 软链/可执行位、原始 dmg 与构建号、篡改和过期拒绝、签名私钥隔离清理；Mac 固定下载页的验签初始化、不占全局 latest、失败补齐与不倒退；原发布脚本的真假 GitHub 双仓库预检、草稿上传/下回核对/公开/签名清单及旧版 Ash 通知。`node scripts/test-macos-sparkle-dmg.mjs` 用真的 Sparkle（`Tests/SparkleDmg` 编的空壳 app，更新配置同 build.sh）走一遍：dmg 被改一个字节 → 下载了但挂载前验签不过、不装；appcast 被改 → 连 dmg 都不下；都对 → 装上新版并由 Sparkle 重开。`node scripts/test-macos-client.mjs` 用真的 NaviConfig / NaviHealth / ServerLauncher / DataImport / BrowserWindowController 加一份假的自带运行时，覆盖下载事务、红绿灯下的页面、「端口上是谁」的判据（数据根 + 自带代码 + 本机模式）、窗口只连专用端口、在线后换人（自己那份停了、不认实例号的旧版 Navi 接手 4317，页面持续写请求，一条都到不了 4317；导航与定时两道撤页；自家服务重起后换上新实例号）、空数据根不起、起服务的环境（终端配置盖不掉）、占用提示、并发只起一份、锁超时、请求合并、起来就退、PID 核对、启动器报错、运行时缺件、构建号、安装（别名目录、带正则字符的目录、相对路径起的包内可执行文件、包外软链起的入口靠它拿着的锁认出、最后检查之后改名之前起来的入口等在锁上并读到整份新包、锁文件缺了不启动不安装、两个安装器并发）、导入（WAL 里的写入、命名管道跳过而链接照原样复制、暂存里洗过再发布、和起服务互斥、失败与抢跑不留痕迹、残留清单、停掉的源、互相包含、多人库拒绝）。server 那一半：`npm -w server run test:host-navi-mcp`（MCP 登记归类）、`npm -w server run test:import-snapshot`（导入不是重启：真的接管入口对着洗过的库认不出活着的源进程；同一串开机对账对着没洗/洗过的副本各跑一遍，前者替源实例重投修复、后者一行不动；路径逐字重定位）、`npm -w server run test:instance-binding`（真服务：带着别人实例号的写请求、页面、预览与预览 WebSocket 一律 409 且不执行，health 照答；窗口专用端口上同一套判据，被占着时 health 报 null、服务照常起）。
+定点回归（仅 macOS）：`node scripts/test-macos-update.mjs` 覆盖装之前那道闸（不会打断就不问；会打断先问、等到排空自己装、现在装；问不出来按会打断；等的时候一次 503 / 不应答不放行；只停评估过的那个进程；另一处在起服务时不停；维护标记跨进程生效、持有者没了作废；停不下来不装也不备份；重启前冻结：凭冻结之下的快照停、续期后才下刀，快照或续期时多出来的重新问，冻结被占不停不备份，老服务在确认框里如实说；别的 Navi 不碰；退出那一档和它备份失败时的说法；Sparkle 放弃后闸收回、重试再备份；起服务前补备份、没有服务记录时连着起不来也留住迁移前的原件、起它的启动器没等到时由之后看到它应答的那一处确认、下一版不拿上一次的底顶替、确认后旧恢复点作废；旧版服务识别）、库备份（WAL 里的写入、确认前不轮换、确认后只留 5 份、同一秒不覆盖且按生成先后认新旧）。`node scripts/test-release-all.mjs` 覆盖发版命令：main/脏工作区/版本与权限预检、只发过一部分时推之前就拒、预检期间多出来的提交不发、正常推送和冲突拒绝、重复触发与失败重跑；`node scripts/test-release-together.mjs` 覆盖合并发布：三个包都进草稿才公开、更新源一个没推成不挡另一个、重跑接着补；`npm run test:release:mac` 覆盖恢复产物的 app 软链/可执行位、原始 dmg 与构建号、篡改和过期拒绝、签名私钥隔离清理；Mac 固定下载页的验签初始化、不占全局 latest、失败补齐与不倒退；原发布脚本的真假 GitHub 双仓库预检、草稿上传/下回核对/公开/签名清单及旧版 Ash 通知。`node scripts/test-macos-sparkle-dmg.mjs` 用真的 Sparkle（`Tests/SparkleDmg` 编的空壳 app，更新配置同 build.sh）走一遍：dmg 被改一个字节 → 下载了但挂载前验签不过、不装；appcast 被改 → 连 dmg 都不下；都对 → 装上新版并由 Sparkle 重开。`node scripts/test-macos-client.mjs` 用真的 NaviConfig / NaviHealth / ServerLauncher / DataImport / BrowserWindowController 加一份假的自带运行时，覆盖下载事务、红绿灯下的页面、「端口上是谁」的判据（数据根 + 自带代码 + 本机模式）、窗口只连专用端口、在线后换人（自己那份停了、不认实例号的旧版 Navi 接手 4317，页面持续写请求，一条都到不了 4317；导航与定时两道撤页；自家服务重起后换上新实例号）、空数据根不起、起服务的环境（终端配置盖不掉）、占用提示、并发只起一份、锁超时、请求合并、起来就退、PID 核对、启动器报错、运行时缺件、构建号、安装（别名目录、带正则字符的目录、相对路径起的包内可执行文件、包外软链起的入口靠它拿着的锁认出、最后检查之后改名之前起来的入口等在锁上并读到整份新包、锁文件缺了不启动不安装、两个安装器并发）、导入（WAL 里的写入、命名管道跳过而链接照原样复制、暂存里洗过再发布、和起服务互斥、失败与抢跑不留痕迹、残留清单、停掉的源、互相包含、多人库拒绝）。server 那一半：`npm -w server run test:host-navi-mcp`（MCP 登记归类）、`npm -w server run test:import-snapshot`（导入不是重启：真的接管入口对着洗过的库认不出活着的源进程；同一串开机对账对着没洗/洗过的副本各跑一遍，前者替源实例重投修复、后者一行不动；路径逐字重定位）、`npm -w server run test:instance-binding`（真服务：带着别人实例号的写请求、页面、预览与预览 WebSocket 一律 409 且不执行，health 照答；窗口专用端口上同一套判据，被占着时 health 报 null、服务照常起）。
 
 ## 窗口
 

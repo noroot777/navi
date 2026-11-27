@@ -8,15 +8,18 @@ const arm = architectureConfig(config, "arm64");
 const intel = architectureConfig(config, "x64");
 assert.equal(arm.appcastPath, "navi/mac/appcast.xml");
 assert.equal(intel.appcastPath, "navi/mac/appcast-intel.xml");
-assert.equal(arm.tagPrefix, "navi-mac-v");
-assert.equal(intel.tagPrefix, "navi-mac-intel-v");
+assert.equal(arm.tagPrefix, "v", "一个版本一个 Release：两个架构同一个 tag");
+assert.equal(intel.tagPrefix, "v");
+assert.equal(arm.legacyTagPrefix, "navi-mac-v", "合并之前各架构自己的 tag 照旧认得出");
+assert.equal(intel.legacyTagPrefix, "navi-mac-intel-v");
 assert.equal(intel.legacyAppcastPath, null);
 assert.equal(arm.publicKey, intel.publicKey);
 assert.equal(arm.downloadTag, intel.downloadTag);
 assert.equal(architectureConfig(intel, "arm64").appcastPath, arm.appcastPath);
 assert.equal(distributionName("0.3.3", "arm64"), "Navi-0.3.3.dmg");
 assert.equal(distributionName("0.3.3", "x64"), "Navi-0.3.3-intel.dmg");
-for (const channel of [arm, intel]) {
+assert.notEqual(releaseNames(arm, "0.3.6", "1").name, releaseNames(intel, "0.3.6", "1").name, "同一个 Release 里两个架构靠文件名区分");
+for (const channel of [arm, intel, { ...arm, tagPrefix: arm.legacyTagPrefix }, { ...intel, tagPrefix: intel.legacyTagPrefix }]) {
   const shortVersion = "0.3.3";
   const version = "20261121.040506";
   const clean = releaseNames(channel, shortVersion, version);
@@ -43,9 +46,11 @@ assert.equal(buildArchitecture({ NAVI_MAC_ARCH: "arm64" }, "arm64"), "arm64");
 assert.throws(() => buildArchitecture({ NAVI_MAC_ARCH: "x64" }, "arm64"), /对应架构/);
 assert.throws(() => assertArchitecture("x86_64"), /不支持/);
 assert.throws(() => architectureConfig({ ...config, architectures: undefined }, "x64"), /缺少 Intel/);
-for (const override of [{ appcastPath: config.appcastPath }, { tagPrefix: config.tagPrefix }, { legacyAppcastPath: config.legacyAppcastPath }]) {
+for (const override of [{ appcastPath: config.appcastPath }, { legacyAppcastPath: config.legacyAppcastPath }]) {
   assert.throws(() => architectureConfig({ ...config, architectures: { x64: { ...config.architectures.x64, ...override } } }, "x64"));
 }
 for (const metadata of Object.values(ARCHITECTURES)) assert.match(metadata.checksum, /^[a-f0-9]{64}$/);
 assert.notEqual(ARCHITECTURES.arm64.checksum, ARCHITECTURES.x64.checksum);
-console.log("PASS: native architecture selection, pinned runtimes, separate update feeds, immutable Intel naming and legacy ARM compatibility");
+assert.equal(publishedNames(arm, { shortVersion: "0.3.5", version: "1", url: "https://github.com/o/app/releases/download/navi-mac-v0.3.5/Navi-0.3.5.dmg" }).tag, "navi-mac-v0.3.5", "已发的老 tag 认得出");
+assert.equal(publishedNames(intel, { shortVersion: "0.3.6", version: "1", url: "https://github.com/o/app/releases/download/v0.3.6/Navi-0.3.6-intel.dmg" }).tag, "v0.3.6");
+console.log("PASS: native architecture selection, pinned runtimes, separate update feeds, one shared release tag with per-architecture names, legacy per-architecture tags still recognised");

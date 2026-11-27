@@ -23,6 +23,9 @@ function run(command, args, options = {}) {
   return result.stdout?.trim();
 }
 
+/** 这一份包的工作目录：构建 job 里只有一份；合并发布那一步有两个架构，按 NAVI_RELEASE_DIR 分开放。 */
+export const releaseDirectory = (env = process.env) => env.NAVI_RELEASE_DIR || join(env.RUNNER_TEMP, "navi-mac-release");
+
 export function workflowRequest(env) {
   assert.equal(env.GITHUB_EVENT_NAME, "workflow_dispatch", "只接受显式 workflow_dispatch");
   assert.equal(env.GITHUB_REF, "refs/heads/main", "只允许从 main 运行发布工作流");
@@ -68,7 +71,7 @@ export async function prepareWorkflow({ env = process.env, root = ROOT, github, 
     }
   }
   request.buildNumber = artifact ? null : nextBuildNumber(latest?.version, new Date(metadata.created_at));
-  const directory = join(env.RUNNER_TEMP, "navi-mac-release");
+  const directory = releaseDirectory(env);
   mkdirSync(directory, { recursive: true });
   writeFileSync(join(directory, "request.json"), `${JSON.stringify(request, null, 2)}\n`);
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `restore=${artifact ? "true" : "false"}\nartifact_id=${artifact?.id ?? ""}\n`);
@@ -152,11 +155,12 @@ export function withSigningKey(env, operation) {
   }
 }
 
-export function publishBundle(directory, request, { env = process.env } = {}) {
+/** 发布：mode 是 release.mjs 的 --stage / --finish（合并发布分两段，见 desktop/shared/release-together.mjs）。 */
+export function publishBundle(directory, request, { env = process.env, mode } = {}) {
   assert.equal(request.publish, true, "演练不执行公开发布");
   const bundle = verifyDistribution(directory, request);
   return withSigningKey(env, (key, childEnv) => run(process.execPath,
-    [join(MAC, "scripts/release.mjs"), "--app", bundle.app, "--ed-key-file", key], {
+    [join(MAC, "scripts/release.mjs"), "--app", bundle.app, "--ed-key-file", key, ...(mode ? [`--${mode}`] : [])], {
       env: { ...childEnv, NAVI_MAC_RELEASE_ARTIFACTS: bundle.artifacts, NAVI_MAC_RECOVERY_TAG: bundle.manifest.tag }, stdio: "inherit",
     }));
 }
@@ -164,7 +168,7 @@ export function publishBundle(directory, request, { env = process.env } = {}) {
 async function main() {
   const command = process.argv[2];
   if (command === "validate") return prepareWorkflow();
-  const directory = join(process.env.RUNNER_TEMP, "navi-mac-release");
+  const directory = releaseDirectory();
   const request = JSON.parse(readFileSync(join(directory, "request.json"), "utf8"));
   if (command === "build") return buildBundle(directory, request);
   if (command === "restore") return restoreBundle(directory, request);

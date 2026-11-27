@@ -1,18 +1,15 @@
-// Windows 云端发版（.github/workflows/release-win.yml、desktop/windows/scripts/cloud-workflow.mjs、cloud-release.mjs，在 mac 上也跑）：
+// Windows 云端发版（.github/workflows/release.yml 的 build-win、desktop/windows/scripts/cloud-workflow.mjs，在 mac 上也跑）：
 //   · 工作流只认 main 上的 workflow_dispatch；源码提交在 main 上、源码版本号就是参数那一版、运行名对得上参数；
 //     重跑沿用这次运行保存的原包，原包过期、清单已是这一版又没有原包、重跑时已有 Release 又没有原包，都拒绝
 //   · 原包：清单（版本、提交、运行号、sha256、大小、运行时 id）与安装包一一对得上，改了一个字节就拒
 //   · 私钥：落成 0600 的临时文件、子进程环境里没有它、失败也删；publish=false 不发布
-//   · 工作流文件：action 钉 sha、构建一步拿不到发布 Secret、原包先存再发布、两步都在 windows-latest 上
-//   · `npm run release:win`：干净的 main 才改版本、只提交版本那一行、推送后按提交触发；同一提交已有任务就沿用，
-//     失败的重跑它；远端领先、倒退版本、同一版换了提交都不动
+//   · 工作流文件：build-win 在 windows-latest 上、拿不到发布 Secret 的值、冒烟过了才存原包（合并发布那一段见 test-release-together.mjs）
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { releaseCloud } from "../desktop/windows/scripts/cloud-release.mjs";
 import { buildBundle, prepareWorkflow, publishBundle, recoveryName, verifyBundle, withSigningKey, workflowRequest } from "../desktop/windows/scripts/cloud-workflow.mjs";
 import { renderFeed, runName } from "../desktop/windows/scripts/release-state.mjs";
 
@@ -130,108 +127,20 @@ try {
     console.log("✓ 私钥（与 mac 共用的 Secret）落成 0600 临时文件、子进程环境里没有它、成功失败都删；缺 Secret 直接停；publish=false 不发布");
   }
 
-  // ── 工作流文件 ────────────────────────────────────────────────────────
+  // ── 工作流文件（build-win 那一段）──────────────────────────────────────
   {
-    const yml = readFileSync(new URL("../.github/workflows/release-win.yml", import.meta.url), "utf8");
-    const jobs = yml.split(/^  (?=build:|publish:)/m);
-    const [build, publish] = [jobs.find((part) => part.startsWith("build:")), jobs.find((part) => part.startsWith("publish:"))];
-    assert.ok(build && publish, "构建和发布是两个 job");
-    for (const line of yml.match(/uses: \S+/g)) assert.match(line, /@[0-9a-f]{40}$/, `action 要钉 sha：${line}`);
-    assert.match(yml, /workflow_dispatch:/);
-    assert.doesNotMatch(yml, /^\s+(push|pull_request|schedule):/m, "只能手动触发");
-    for (const job of [build, publish]) {
-      assert.match(job, /runs-on: windows-latest/);
-      assert.match(job, /github\.ref == 'refs\/heads\/main'/, "只在 main 上跑");
-    }
-    assert.match(publish, /needs: build/);
-    assert.match(publish, /if: inputs\.publish/);
+    const yml = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+    const build = yml.slice(yml.indexOf("\n  build-win:\n"), yml.indexOf("\n  publish:\n"));
+    assert.ok(build, "Windows 有自己的构建 job");
+    assert.match(build, /runs-on: windows-latest/);
+    assert.match(build, /github\.ref == 'refs\/heads\/main'/, "只在 main 上跑");
     assert.deepEqual([...new Set(build.match(/secrets\.\w+/g))].sort(), ["secrets.MAC_RELEASE_TOKEN", "secrets.MAC_SPARKLE_PRIVATE_KEY"]);
     assert.match(build, /RELEASE_READY: \$\{\{ secrets\.MAC_RELEASE_TOKEN != '' && secrets\.MAC_SPARKLE_PRIVATE_KEY != '' \}\}/, "构建一步只看 Secret 配没配，拿不到它的值");
-    const signStep = publish.slice(publish.indexOf("cloud-workflow.mjs publish"));
-    assert.match(signStep, /MAC_SPARKLE_PRIVATE_KEY: \$\{\{ secrets\.MAC_SPARKLE_PRIVATE_KEY \}\}/);
-    assert.equal((publish.match(/secrets\.MAC_SPARKLE_PRIVATE_KEY/g) ?? []).length, 1, "私钥只给签名发布那一步");
-    assert.doesNotMatch(publish, /tauri-cli|cargo/, "签名用 node，发布那一步不装 tauri-cli");
     assert.ok(build.indexOf("smoke-installer.mjs") > build.indexOf("cloud-workflow.mjs build"), "构建后先冒烟");
     assert.ok(build.indexOf("upload-artifact") > build.indexOf("smoke-installer.mjs"), "冒烟过了才存原包");
-    assert.match(publish, /Require original installer[\s\S]*test "\$RESTORE" = true/, "发布只用存下来的原包");
-    assert.match(publish, /if: always\(\)\n\s+run: rm -rf "\$RUNNER_TEMP\/navi-win-signing"/);
-    assert.match(yml, /run-name: win \$\{\{ inputs\.version \}\} \$\{\{ inputs\.source_sha \}\} \$\{\{ inputs\.publish && 'publish' \|\| 'build' \}\}/);
-    assert.equal(runName("0.1.0", "abc", true), "win 0.1.0 abc publish");
-    console.log("✓ 工作流：手动触发、只在 main、action 钉 sha；构建一步拿不到 Secret 的值；冒烟过了才存原包；私钥只给签名发布那一步、用完删");
-  }
-
-  // ── npm run release:win ───────────────────────────────────────────────
-  {
-    const fixture = (name) => {
-      const dir = repo(name);
-      const bare = join(temporary, `${name}.git`);
-      git(temporary, "init", "--bare", "-q", bare);
-      git(dir, "config", `url.file://${bare}.insteadOf`, "https://github.com/o/app.git");
-      git(dir, "remote", "add", "origin", "https://github.com/o/app.git");
-      git(dir, "push", "-q", "origin", "main");
-      return { dir, bare };
-    };
-    const fakeGithub = (state = {}) => {
-      state.runs ??= [];
-      state.calls = [];
-      return {
-        state,
-        async call(method, url, { body } = {}) {
-          state.calls.push(`${method} ${url.replace(/\?.*$/, "")}`);
-          if (url === "/repos/o/app") return { json: { default_branch: "main" } };
-          if (url === "/repos/o/app/actions/workflows/release-win.yml") return { json: { state: "active" } };
-          if (url.startsWith("/repos/o/app/actions/workflows/release-win.yml/runs")) return { json: { workflow_runs: state.runs } };
-          if (url.endsWith("/dispatches")) {
-            assert.deepEqual(Object.keys(body.inputs).sort(), ["publish", "source_sha", "version"]);
-            state.runs.unshift({ id: 5, display_title: runName(body.inputs.version, body.inputs.source_sha), status: "queued", html_url: "https://run/5" });
-            return { json: { html_url: "https://run/5" } };
-          }
-          if (url.endsWith("/rerun")) return { json: {} };
-          throw new Error(`没料到的请求 ${method} ${url}`);
-        },
-        readFile: async () => (state.feed ? { text: state.feed } : null),
-      };
-    };
-    const quiet = { say: () => {} };
-
-    const { dir, bare } = fixture("cloud");
-    const github = fakeGithub();
-    await releaseCloud("0.2.0", { cwd: dir, github, ...quiet });
-    const head = git(dir, "rev-parse", "HEAD");
-    assert.equal(git(dir, "log", "-1", "--format=%s"), "chore(win): 版本号 0.2.0");
-    assert.deepEqual(git(dir, "show", "--name-only", "--format=", "HEAD").split("\n"), ["desktop/windows/shell/tauri.conf.json"], "只提交版本那一行");
-    assert.equal(readFileSync(join(dir, "desktop/windows/shell/tauri.conf.json"), "utf8"), conf("0.2.0"));
-    assert.equal(git(bare, "rev-parse", "main"), head, "推上去的就是版本提交");
-    assert.ok(github.state.calls.includes("POST /repos/o/app/actions/workflows/release-win.yml/dispatches"));
-
-    // 同一提交已有任务：沿用；失败的重跑
-    github.state.runs[0].status = "completed";
-    github.state.runs[0].conclusion = "failure";
-    await releaseCloud("0.2.0", { cwd: dir, github, ...quiet });
-    assert.ok(github.state.calls.includes("POST /repos/o/app/actions/runs/5/rerun"));
-    assert.equal(github.state.calls.filter((call) => call.endsWith("/dispatches")).length, 1, "不重复触发");
-    assert.equal(git(dir, "rev-parse", "HEAD"), head, "不再建版本提交");
-
-    // 工作区不干净 / 不在 main / 倒退 / 清单已是更新的 / 同一版换了提交 / 远端领先：都不动
-    writeFileSync(join(dir, "business.txt"), "dirty\n");
-    await assert.rejects(releaseCloud("0.3.0", { cwd: dir, github: fakeGithub(), ...quiet }), /没提交的改动/);
-    git(dir, "checkout", "-q", "--", "business.txt");
-    await assert.rejects(releaseCloud("0.1.0", { cwd: dir, github: fakeGithub(), ...quiet }), /倒退/);
-    await assert.rejects(releaseCloud("0.3.0", { cwd: dir, github: fakeGithub({ feed: feedText("0.4.0", head) }), ...quiet }), /更旧/);
-    await assert.rejects(releaseCloud("0.2.0", { cwd: dir, github: fakeGithub({ feed: feedText("0.2.0", "b".repeat(40)) }), ...quiet }), /另一个提交.*没有修改版本或推送/);
-    const other = join(temporary, "other");
-    git(temporary, "clone", "-q", bare, other);
-    git(other, "config", "user.name", "x");
-    git(other, "config", "user.email", "x@example.invalid");
-    writeFileSync(join(other, "business.txt"), "remote change\n");
-    git(other, "commit", "-q", "-am", "remote");
-    git(other, "push", "-q", "origin", "main");
-    await assert.rejects(releaseCloud("0.3.0", { cwd: dir, github: fakeGithub(), ...quiet }), /远端 main 有本地尚未包含的提交/);
-    assert.equal(git(dir, "rev-parse", "HEAD"), head, "被拒时没有版本提交");
-    assert.equal(git(dir, "status", "--porcelain"), "");
-    git(dir, "checkout", "-q", "-b", "feature");
-    await assert.rejects(releaseCloud("0.3.0", { cwd: dir, github: fakeGithub(), ...quiet }), /只从本地 main/);
-    console.log("✓ release:win：只提交版本那一行、推送后按提交触发；同提交沿用（失败的重跑）；不干净、倒退、清单更新、换提交、远端领先、不在 main 都不动");
+    assert.match(build, /name: win-release-\$\{\{ github\.run_id \}\}/, "原包按运行号存，合并发布那一步按它取");
+    assert.equal(runName("0.1.0", "abc", true), "release 0.1.0 abc publish", "运行名和 mac 共用一份");
+    console.log("✓ 工作流 build-win：windows-latest、只在 main、拿不到 Secret 的值；冒烟过了才存原包；运行名与 mac 共用");
   }
 } finally {
   rmSync(temporary, { recursive: true, force: true });

@@ -30,7 +30,6 @@ export function architectureConfig(config, architecture = "arm64") {
   assert.equal(selected.feedRepo, base.feedRepo);
   if (architecture !== "arm64") {
     assert.notEqual(selected.appcastPath, base.appcastPath, "Intel 更新源不能覆盖 Apple 芯片更新源");
-    assert.notEqual(selected.tagPrefix, base.tagPrefix, "Intel Release tag 不能覆盖 Apple 芯片 tag");
     assert.ok(!selected.legacyAppcastPath, "Intel 不发布旧版 Ash 通知源");
   }
   return selected;
@@ -40,17 +39,23 @@ export const configuredArchitectures = (config) => ["arm64", ...((config.baseCon
 export const distributionName = (version, architecture = "arm64") =>
   `Navi-${version}${assertArchitecture(architecture) === "x64" ? "-intel" : ""}.dmg`;
 
+// 一个版本一个 Release：两个架构的 dmg 和 Windows 安装包都在 tag <tagPrefix><版本> 下，靠文件名区分（Intel 带 -intel）。
+// 合并之前每个架构各有一个 tag（legacyTagPrefix：navi-mac-v / navi-mac-intel-v），已发的老版本照旧认得出来。
+const tagPrefixes = (config) => [config.tagPrefix, config.legacyTagPrefix].filter(Boolean);
+
 export function releaseNames(config, shortVersion, buildNumber, tag = `${config.tagPrefix}${shortVersion}`) {
-  const current = `${config.tagPrefix}${shortVersion}`;
-  const legacy = `${current}-${buildNumber}`;
-  assert.ok(tag === current || tag === legacy, "Release tag 与版本或架构不符");
-  return { tag, name: distributionName(tag === legacy ? `${shortVersion}-${buildNumber}` : shortVersion, config.architecture) };
+  const prefix = tagPrefixes(config).find((candidate) => tag === `${candidate}${shortVersion}` || tag === `${candidate}${shortVersion}-${buildNumber}`);
+  assert.ok(prefix !== undefined, "Release tag 与版本或架构不符");
+  const legacy = tag === `${prefix}${shortVersion}-${buildNumber}`;
+  return { tag, name: distributionName(legacy ? `${shortVersion}-${buildNumber}` : shortVersion, config.architecture) };
 }
 
 export function publishedNames(config, details) {
-  for (const tag of [`${config.tagPrefix}${details.shortVersion}`, `${config.tagPrefix}${details.shortVersion}-${details.version}`]) {
-    const names = releaseNames(config, details.shortVersion, details.version, tag);
-    if (details.url?.endsWith(`/${names.tag}/${names.name}`)) return names;
+  for (const prefix of tagPrefixes(config)) {
+    for (const tag of [`${prefix}${details.shortVersion}`, `${prefix}${details.shortVersion}-${details.version}`]) {
+      const names = releaseNames(config, details.shortVersion, details.version, tag);
+      if (details.url?.endsWith(`/${names.tag}/${names.name}`)) return names;
+    }
   }
   throw new Error("更新源的下载地址与版本或架构不符，未改下载页");
 }

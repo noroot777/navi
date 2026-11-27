@@ -4,8 +4,7 @@
 
 ```bash
 npm run build:win                    # → desktop/windows/build/{Navi-<版本>-x64-setup.exe, Navi\}（mac 上交叉编译）
-npm run release:win -- 0.1.0         # 发一版：交给 GitHub Actions 构建、冒烟、签名、发布（见「发版」）
-npm run release -- 0.3.5             # mac 和 Windows 一起发同一个版本号
+npm run release -- 0.3.6             # 和 mac 一起发一版：交给 GitHub Actions 构建、冒烟、签名、发布（见「发版」）
 ```
 
 ## 自带运行时
@@ -128,7 +127,7 @@ node desktop/windows/scripts/make-icon.mjs   # 标改了才要：在 mac 上重�
 
 Tauri updater（`tauri-plugin-updater`，`shell/src/update.rs`）。托盘「检查更新…」，另外起来 1 分钟后查一次、之后每 6 小时一次（`launcher/updates.mjs`）。两个公开仓库，都在 `release.json`：
 
-- **安装包**在 [noroot777/navi](https://github.com/noroot777/navi) 的 Release `navi-win-v<版本>` 上，`Navi-<版本>-x64-setup.exe`。新用户下载安装的、更新用的是同一个文件。
+- **安装包**在 [noroot777/navi](https://github.com/noroot777/navi) 的 Release `v<版本>` 上（和 mac 的 dmg 同一个 Release），`Navi-<版本>-x64-setup.exe`。新用户下载安装的、更新用的是同一个文件。
 - **更新清单**是素材库 [noroot777/materials](https://github.com/noroot777/materials) 的 `navi/win/latest.json`（Tauri 的静态 JSON：版本、说明、日期、`windows-x86_64` 的地址和签名），壳里编的是它在 raw.githubusercontent 上的地址。
 
 **只靠 updater 签名**（minisign，ed25519）：公钥在 `release.json` 的 `publicKey`，编进壳；私钥只在 GitHub Secret 里。钥匙和 mac 版是同一把 Ed25519：`publicKey` 由 `desktop/macos/release.json` 的 `publicKey` 算出来（minisign 只是外面多包一层，key id 取公钥 BLAKE2b-512 的前 8 字节，见 `scripts/minisign.mjs`），签名用的就是 Sparkle 私钥，由 node 按 tauri-cli `signer sign` 的格式签，不再需要 tauri-cli 的签名命令。签名的可信注释里带着版本号（`--app-version`，壳开了 `requireSignedVersion`），拿旧版的合法签名配新清单也装不上。公钥随第一版发出去后**永远不能换**：已装的壳只认它。
@@ -154,7 +153,7 @@ server 一起来就做不可逆的迁移，所以停旧服务之前用 SQLite �
 # 1. 托盘「退出 Navi」，停掉服务（数据根里库的单例锁记着 pid）
 cd $env:LOCALAPPDATA\Navi\data
 Stop-Process -Id (Get-Content navi.db.navi.lock | ConvertFrom-Json).pid
-# 2. 从 noroot777/navi 的 Releases 下回旧版安装包（tag navi-win-v<版本>），装上（降级要先卸载；卸载时别勾删数据）
+# 2. 从 noroot777/navi 的 Releases 下回旧版安装包（tag v<版本>），装上（降级要先卸载；卸载时别勾删数据）
 # 3. 把底放回去（先挪开现在这份，别直接覆盖）
 mkdir rolled-back; Move-Item navi.db, navi.db-wal, navi.db-shm rolled-back\ -ErrorAction SilentlyContinue
 Copy-Item backups\<那一份>.db navi.db
@@ -164,16 +163,14 @@ Copy-Item backups\<那一份>.db navi.db
 ## 发版
 
 ```bash
-npm run release:win -- 0.1.0
+npm run release -- 0.3.6
 ```
 
-mac 和 Windows 一起发同一个版本号用 `npm run release -- <版本>`（`desktop/release.mjs`）：两边的预检都过了才动版本号，两个版本文件进同一个提交、推一次，再用同一个 SHA 各触发一条工作流；推上去以后一边没触发成，另一边照样触发，重新执行同一命令只补那一边。流程在 `desktop/shared/cloud-release.mjs`，三个命令共用。
-
-只发 Windows（`scripts/cloud-release.mjs`）口径同 mac：工作区干净、在 `main` 上，先核对版本、工作流和远端是否领先（不自动合并、不强推）；只改 `shell/tauri.conf.json` 的 `version`、单独提交版本号、正常 push，再把完整源码 SHA 和版本交给 GitHub Actions 的 **Release Windows**（`.github/workflows/release-win.yml`）。输出任务地址后就可以关电脑。重复执行不重复提交；同一源码和版本的任务在跑就返回它，失败了就重跑它。
+和 mac 一起发，一个版本号、一个 Release（tag `v<版本>`，里面两个 dmg 和 `Navi-<版本>-x64-setup.exe`）；命令和口径见 `desktop/macos/README.md`「发版」。Windows 这一边只改 `shell/tauri.conf.json` 的 `version`（和 mac 的版本号进同一个提交），差异在 `scripts/cloud-release.mjs`。
 
 ### 一次性配置
 
-1. 把 `release-win.yml` 合进 GitHub 的 `main`、启用 Actions。
+1. 把 `.github/workflows/release.yml` 合进 GitHub 的 `main`、启用 Actions（mac 和 Windows 共用这一条）。
 2. Secrets 和 mac 版共用，不另加（见 `desktop/macos/README.md`「发版」）：
 
 | 名称 | Windows 用它做什么 |
@@ -182,13 +179,13 @@ mac 和 Windows 一起发同一个版本号用 `npm run release -- <版本>`（`
 | `MAC_SPARKLE_PRIVATE_KEY` | updater 签名。Sparkle 导出的 32 字节种子就是 minisign 要的那把 Ed25519 私钥；旧版 Sparkle 的 96 字节私钥推不回种子，签不了。 |
 
 3. 本地要有 `navi` Actions 读写权限的凭证（查找顺序同 mac：`GH_TOKEN` / `GITHUB_TOKEN` → `gh auth token` → git 的 github.com 凭证）。
-4. 先在 Actions 里 **Release Windows → Run workflow** 选 main、填版本和完整 SHA、关掉 `publish` 做一次云端构建演练。
+4. 先在 Actions 里 **Release → Run workflow** 选 main、填版本和完整 SHA、关掉 `publish` 做一次云端构建演练。
 
 私钥不进仓库、不进日志：云端只在发布那一步写成 `RUNNER_TEMP` 下 0600 的临时文件，成败都删，不进产物、缓存和子进程环境（`cloud-workflow.mjs` 的 `withSigningKey`）。丢了私钥就再也发不出已装用户认的更新，只能让他们手动装新公钥的版本——而且 mac 和 Windows 一起丢，泄露也是两边一起失守。
 
 ### 云端与恢复
 
-两段分开：**build**（windows-latest）从指定 SHA 检出（只接受 main 上的、版本与源码一致的）、`npm ci`、装钉死版本的 tauri-cli、`build-shell.mjs`、核对安装包（大小、sha256、PE 头、里面的运行时 id）、`smoke-installer.mjs` 真装真卸一遍，然后把原包存成产物 `win-release-<run id>`（留一天）。这一段**没有任何发布凭证**，`publish=false` 跑完就停。**publish** 段只在 `publish=true` 时跑：取回原包（不重新构建）→ 签名 → 用 `release.json` 的公钥验过 → 核对两个仓库都写得了、清单分支没有保护规则 → 草稿 Release → 传包 → 下回核对 → 公开、核对 tag → 从公开地址下回核对 → 带原文件 SHA 提交 `latest.json`（冲突就拒绝覆盖）。
+两段分开：**build-win**（windows-latest）从指定 SHA 检出（只接受 main 上的、版本与源码一致的）、`npm ci`、装钉死版本的 tauri-cli、`build-shell.mjs`、核对安装包（大小、sha256、PE 头、里面的运行时 id）、`smoke-installer.mjs` 真装真卸一遍，然后把原包存成产物 `win-release-<run id>`（留一天）。这一段**没有任何发布凭证**，`publish=false` 跑完就停。**publish** 段只在 `publish=true` 时跑，和 mac 的两个包一起（`desktop/shared/release-together.mjs`，macOS runner）：取回原包（不重新构建）→ 签名 → 用 `release.json` 的公钥验过 → 核对两个仓库都写得了、清单分支没有保护规则 → 传进共用的草稿 Release、下回核对（`release.mjs --stage`）→ 三个包都在草稿里了才一次公开、核对 tag → 从公开地址下回核对 → 带原文件 SHA 提交 `latest.json`（`--finish`，冲突就拒绝覆盖）。
 
 版本只能往前；同一版只能是同一个提交、同一个包（清单记着 sha256），重跑只补没做完的步骤，不重签不重传。包公开后不撤回。原产物过期且 Release 已存在时停下，改发新版本。缓存只有 npm 内容缓存、cargo 注册表和 tauri-cli，不含产物和凭证。
 
@@ -198,7 +195,7 @@ mac 和 Windows 一起发同一个版本号用 `npm run release -- <版本>`（`
 node desktop/windows/scripts/release.mjs --installer <安装包> --version <v> --commit <完整 sha> --key-file <私钥> [--notes '…']
 ```
 
-与云端 publish 段是同一个脚本。
+与云端 publish 段是同一个脚本；不带 `--stage` / `--finish` 时自己建 Release、自己公开，只放这一个安装包。
 
 ### 本地演练
 

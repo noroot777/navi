@@ -1,4 +1,4 @@
-// 云端发布 Windows 版的各步（.github/workflows/release-win.yml 调；对应 mac 的 cloud-workflow.mjs）：
+// 云端发布 Windows 版的各步（.github/workflows/release.yml 的 build-win 与合并发布调；对应 mac 的 cloud-workflow.mjs）：
 //
 //   validate   核对这次运行：只认 main 上的 workflow_dispatch、源码提交在 main 上、源码里的版本号就是参数里那一版、
 //              运行名对得上参数；找这次运行里有没有保存过的原始产物（重跑时沿用它，不重新构建）
@@ -8,7 +8,7 @@
 //   publish    签名并发布（只在 publish=true 的那一步、拿到 Secret 之后）：私钥落成 0600 的临时文件，用完即删。
 //              Secret 和 mac 版共用：MAC_RELEASE_TOKEN 传包、提交清单，MAC_SPARKLE_PRIVATE_KEY 签名（同一把 Ed25519，见 minisign.mjs）
 //
-// 构建那一步拿不到发布 Secret（release-win.yml 里只给 publish 那一步），所以构建出来的包不经签名就先存成恢复产物；
+// 构建那一步拿不到发布 Secret（release.yml 里只给 publish 那一步），所以构建出来的包不经签名就先存成恢复产物；
 // 签名只签这一份原包，重跑发布时也是同一份 —— 重新构建出来的字节不一样，签名就和已公开的那个对不上了。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -32,6 +32,9 @@ function run(command, args, options = {}) {
   if (result.status !== 0) throw new Error(`${command} ${args[0]} 失败（${result.status ?? result.signal}）\n${result.stderr ?? ""}${result.stdout ?? ""}`);
   return result.stdout?.trim();
 }
+
+/** 这一份包的工作目录（合并发布那一步按 NAVI_RELEASE_DIR 和 mac 的两份分开放）。 */
+export const releaseDirectory = (env = process.env) => env.NAVI_RELEASE_DIR || join(env.RUNNER_TEMP, "navi-win-release");
 
 export function workflowRequest(env) {
   assert.equal(env.GITHUB_EVENT_NAME, "workflow_dispatch", "只接受显式 workflow_dispatch");
@@ -73,7 +76,7 @@ export async function prepareWorkflow({ env = process.env, root = ROOT, github, 
       if (releases.length < 100) break;
     }
   }
-  const directory = join(env.RUNNER_TEMP, "navi-win-release");
+  const directory = releaseDirectory(env);
   mkdirSync(directory, { recursive: true });
   writeFileSync(join(directory, "request.json"), `${JSON.stringify(request, null, 2)}\n`);
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `restore=${artifact ? "true" : "false"}\nartifact_id=${artifact?.id ?? ""}\n`);
@@ -128,19 +131,20 @@ export function withSigningKey(env, operation) {
   }
 }
 
-export function publishBundle(directory, request, { env = process.env } = {}) {
+/** 发布：mode 是 release.mjs 的 --stage / --finish（合并发布分两段，见 desktop/shared/release-together.mjs）。 */
+export function publishBundle(directory, request, { env = process.env, mode } = {}) {
   assert.equal(request.publish, true, "演练不执行公开发布");
   const { installer, manifest } = verifyBundle(directory, request);
   return withSigningKey(env, (key, childEnv) => run(process.execPath, [
     join(ROOT, "desktop/windows/scripts/release.mjs"),
-    "--installer", installer, "--version", manifest.version, "--commit", manifest.source, "--key-file", key,
+    "--installer", installer, "--version", manifest.version, "--commit", manifest.source, "--key-file", key, ...(mode ? [`--${mode}`] : []),
   ], { env: childEnv, stdio: "inherit" }));
 }
 
 async function main() {
   const command = process.argv[2];
   if (command === "validate") return prepareWorkflow();
-  const directory = join(process.env.RUNNER_TEMP, "navi-win-release");
+  const directory = releaseDirectory();
   const request = JSON.parse(readFileSync(join(directory, "request.json"), "utf8"));
   if (command === "build") return buildBundle(directory, request);
   if (command === "restore" || command === "verify") return verifyBundle(directory, request);

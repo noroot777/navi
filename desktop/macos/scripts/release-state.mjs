@@ -1,12 +1,11 @@
 import { readFileSync } from "node:fs";
-import { assertVersion } from "../../shared/release-version.mjs";
+import { WORKFLOW, assertVersion, runName } from "../../shared/release-version.mjs";
 import { compareVersions, latestVersion, parseItems } from "./appcast.mjs";
 
-export const WORKFLOW = "release-mac.yml";
 export const DOWNLOAD_TAG = "navi-mac-latest";
 export const LINK_COMMIT_PREFIX = "docs(README): mac 版下载指向";
 
-export { assertVersion };
+export { WORKFLOW, assertVersion, runName };
 
 export function readConfig(path) {
   const config = JSON.parse(readFileSync(path, "utf8"));
@@ -47,5 +46,4 @@ export function nextBuildNumber(latest, clock = new Date()) {
   return `${date}.${String(Number(serial) + 1).padStart(6, "0")}`;
 }
 
-export const runName = (version, commit, publish = true) => `mac ${version} ${commit} ${publish ? "publish" : "build"}`;
 export const downloadPage = (config) => `https://github.com/${config.releaseRepo}/releases/tag/${config.downloadTag}`;

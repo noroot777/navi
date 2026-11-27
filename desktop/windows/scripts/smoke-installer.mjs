@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 在 Windows 上把安装包真装一遍、真卸一遍（云端发版 release-win.yml 的冒烟一步；本地演练见 README）：
+// 在 Windows 上把安装包真装一遍、真卸一遍（云端发版 release.yml 里 build-win 的冒烟一步；本地演练见 README）：
 //
 //   node desktop/windows/scripts/smoke-installer.mjs <Navi-<版本>-x64-setup.exe> [--runtime <清单 id>]
 //

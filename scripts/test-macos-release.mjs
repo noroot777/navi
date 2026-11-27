@@ -338,9 +338,9 @@ async function formalRehearsal() {
     architectures: { x64: { appcastPath: "navi/mac/appcast-intel.xml", tagPrefix: "navi-mac-intel-v", legacyAppcastPath: null } } };
   const feed = "https://raw.githubusercontent.com/o/feed/main/navi/mac/appcast.xml";
   const { readme, git } = readmeRepo();
-  const publish = async (github, app, { conf = config, artifacts = "formal-artifacts", recoveryTag = "" } = {}) => new Promise((done) => {
+  const publish = async (github, app, { conf = config, artifacts = "formal-artifacts", recoveryTag = "", extra = [] } = {}) => new Promise((done) => {
     writeFileSync(configFile, JSON.stringify(conf));
-    const child = spawn(process.execPath, [releaseScript, "--app", app, "--ed-key-file", key.file, "--notes", "正式 & <b>演练</b>"], {
+    const child = spawn(process.execPath, [releaseScript, "--app", app, "--ed-key-file", key.file, "--notes", "正式 & <b>演练</b>", ...extra], {
       env: { ...cleanEnv, GH_TOKEN: "test-token", GITHUB_TOKEN: "", NAVI_MAC_GITHUB_API: github.base,
         NAVI_MAC_RELEASE_CONFIG: configFile, NAVI_MAC_RELEASE_ARTIFACTS: join(temporary, artifacts), NAVI_MAC_RECOVERY_TAG: recoveryTag, NAVI_MAC_README: readme },
       stdio: ["ignore", "pipe", "pipe"],
@@ -413,6 +413,33 @@ async function formalRehearsal() {
   assert.deepEqual(writes(github).filter((c) => c.startsWith("POST /repos")), ["POST /repos/o/app/releases"], "only the fixed download page is created");
   assert.equal(github.state.tags["o/app:navi-mac-v0.2.0"], sha, "publishing writes this build's commit as the target, so the tag lands on it");
   console.log("PASS: an old draft is found on a later page and published with this build's commit as its tag");
+
+  // 合并发布的两段（一个版本一个 Release，tag v<版本>）：--stage 只进草稿；公开由合并发布做；--finish 之后才推 appcast 和下载页。
+  {
+    const together = { ...config, tagPrefix: "v", legacyTagPrefix: "navi-mac-v",
+      architectures: { x64: { appcastPath: "navi/mac/appcast-intel.xml", legacyTagPrefix: "navi-mac-intel-v", legacyAppcastPath: null } } };
+    const shared = await fakeGitHub({ push: both, commits: { abc1234: sha } });
+    let step = await publish(shared, app, { conf: together, artifacts: "together-artifacts", extra: ["--finish"] });
+    assert.notEqual(step.status, 0);
+    assert.match(step.out, /Release v0\.2\.0 还没公开/, "finish 只认已公开的 Release");
+    step = await publish(shared, app, { conf: together, artifacts: "together-artifacts", extra: ["--stage"] });
+    assert.equal(step.status, 0, step.out);
+    const [staged] = shared.state.releases;
+    assert.equal(staged.tag_name, "v0.2.0");
+    assert.equal(staged.draft, true, "stage 不公开");
+    assert.deepEqual(writes(shared), ["POST /repos/o/app/releases", `POST /uploads/${staged.id}`], "stage 只建草稿、传包，不碰 appcast 和下载页");
+    const opened = await fetch(`${shared.base}/repos/o/app/releases/${staged.id}`, { method: "PATCH", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ draft: false, target_commitish: sha }) });
+    assert.equal(opened.status, 200);
+    shared.state.calls.length = 0;
+    step = await publish(shared, app, { conf: together, artifacts: "together-artifacts", extra: ["--finish"] });
+    await shared.close();
+    assert.equal(step.status, 0, step.out);
+    assert.deepEqual(writes(shared), ["PUT /repos/o/feed/contents/navi/mac/appcast.xml", "PUT /repos/o/feed/contents/ash/mac/appcast.xml", "POST /repos/o/app/releases"],
+      "finish 不重传、不再公开：只推 appcast、改名前的通知和下载页");
+    assert.ok(shared.state.files.get("o/feed:navi/mac/appcast.xml").text.includes(`${shared.base}/download/o/app/v0.2.0/Navi-0.2.0.dmg`), "appcast 指向合并的 Release 里的 dmg");
+    assert.ok(shared.state.releases.find((entry) => entry.tag_name === "navi-mac-latest").body.includes("/v0.2.0/Navi-0.2.0.dmg"), "下载页指向它");
+    console.log("PASS: combined release halves — --stage only drafts and uploads, --finish only after the shared release is public, then the appcast and download page");
+  }
 
   const initial = git("rev-list", "--max-parents=0", "HEAD");
   git("reset", "-q", "--hard", initial);

@@ -1,21 +1,22 @@
 {
-  "//": "发版配置，见 desktop/macos/README.md「发版」。安装包（dmg，人下载和 Sparkle 更新都用它）是 releaseRepo 里 tag 为 <tagPrefix><版本>-<构建号> 的 Release 附件；appcast 在 feedRepo 的 feedBranch 上的 appcastPath，app 的 SUFeedURL 指向它。两个都是公开仓库。publicKey 是 EdDSA 公钥（公开的，可以入库）；私钥只在登录钥匙串里，条目名是 keychainAccount。publicKey 一旦随第一版发出去就永远不能换：已装的 app 只认它。legacy* 三项是改名（ash → navi）的兼容值：legacyAppcastPath 是改名前的 Ash.app 看的那份 appcast（只放一条「仅通知」的条目，见 release.mjs 的 publishLegacyFeed，已装的 Ash.app 都换掉之前别删）；legacyKeychainAccount 是私钥还没挪到新条目名下时的旧条目；legacyReleaseRepo 是装包仓库在 GitHub 上改名前的名字。",
+  "//": "发版配置，见 desktop/macos/README.md「发版」。安装包（dmg，人下载和 Sparkle 更新都用它）是 releaseRepo 里 tag 为 <tagPrefix><版本> 的 Release 附件——一个版本一个 Release，两个架构的 dmg 和 Windows 安装包都在里面，靠文件名区分；legacyTagPrefix 是合并之前各架构自己的 tag 前缀（老版本的下载地址还认它）；appcast 在 feedRepo 的 feedBranch 上的 appcastPath，app 的 SUFeedURL 指向它。两个都是公开仓库。publicKey 是 EdDSA 公钥（公开的，可以入库）；私钥只在登录钥匙串里，条目名是 keychainAccount。publicKey 一旦随第一版发出去就永远不能换：已装的 app 只认它。legacy* 三项是改名（ash → navi）的兼容值：legacyAppcastPath 是改名前的 Ash.app 看的那份 appcast（只放一条「仅通知」的条目，见 release.mjs 的 publishLegacyFeed，已装的 Ash.app 都换掉之前别删）；legacyKeychainAccount 是私钥还没挪到新条目名下时的旧条目；legacyReleaseRepo 是装包仓库在 GitHub 上改名前的名字。",
   "releaseRepo": "noroot777/navi",
   "legacyReleaseRepo": "noroot777/ash",
   "feedRepo": "noroot777/materials",
   "feedBranch": "main",
   "appcastPath": "navi/mac/appcast.xml",
   "legacyAppcastPath": "ash/mac/appcast.xml",
-  "tagPrefix": "navi-mac-v",
+  "tagPrefix": "v",
   "downloadTag": "navi-mac-latest",
   "architectures": {
     "x64": {
       "appcastPath": "navi/mac/appcast-intel.xml",
-      "tagPrefix": "navi-mac-intel-v",
-      "legacyAppcastPath": null
+      "legacyAppcastPath": null,
+      "legacyTagPrefix": "navi-mac-intel-v"
     }
   },
   "keychainAccount": "dev.navi.mac",
   "legacyKeychainAccount": "dev.ash.mac",
-  "publicKey": "qmEowTREgXY+e/AalqZkEISl/ii8GuSd0B3U5b34z+M="
+  "publicKey": "qmEowTREgXY+e/AalqZkEISl/ii8GuSd0B3U5b34z+M=",
+  "legacyTagPrefix": "navi-mac-v"
 }

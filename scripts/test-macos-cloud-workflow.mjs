@@ -64,7 +64,7 @@ try {
         const page = Number(new URL(path, "https://api.github.com").searchParams.get("page") ?? 1);
         return { json: state.releases.slice((page - 1) * 100, page * 100) };
       }
-      return { json: { event: "workflow_dispatch", head_branch: "main", display_title: `mac 0.3.2 ${source} publish`, created_at: "2026-11-21T04:05:06Z" } };
+      return { json: { event: "workflow_dispatch", head_branch: "main", display_title: `release 0.3.2 ${source} publish`, created_at: "2026-11-21T04:05:06Z" } };
     },
     async readFile() { return { text: state.feed }; },
   };
@@ -200,21 +200,22 @@ try {
   assert.equal(existsSync(keyPath), false, "failed signing always removes the private key");
   assert.equal(readFileSync(join(directory, "bundle.tar")).includes(Buffer.from(signing.MAC_SPARKLE_PRIVATE_KEY)), false);
   const project = fileURLToPath(new URL("..", import.meta.url));
-  const workflow = readFileSync(join(project, ".github/workflows/release-mac.yml"), "utf8");
-  assert.match(workflow, /runs-on: macos-15/);
-  assert.match(workflow, /architecture: arm64\n            runner: macos-15\n/);
-  assert.match(workflow, /architecture: x64\n            runner: macos-15-intel\n/);
-  assert.match(workflow, /runs-on: \$\{\{ matrix.runner \}\}/);
-  assert.match(workflow, /needs: build/);
-  assert.match(workflow, /max-parallel: 1/);
-  assert.match(workflow, /name: mac-release-\$\{\{ github.run_id \}\}-\$\{\{ matrix.architecture \}\}/);
-  const buildJob = workflow.split(/^  publish:\n/m)[0];
+  // 一条工作流（release.yml）：build-mac 两个架构、build-win、publish（合并发布，见 test-release-together.mjs）。这里只看 mac 那一段。
+  const workflow = readFileSync(join(project, ".github/workflows/release.yml"), "utf8");
+  const buildJob = workflow.slice(workflow.indexOf("\n  build-mac:\n"), workflow.indexOf("\n  build-win:\n"));
+  const publishJob = workflow.slice(workflow.indexOf("\n  publish:\n"));
+  assert.match(publishJob, /runs-on: macos-15\n/, "合并发布在 mac 上做：dmg 的签名和 codesign/hdiutil 核对");
+  assert.match(buildJob, /architecture: arm64\n            runner: macos-15\n/);
+  assert.match(buildJob, /architecture: x64\n            runner: macos-15-intel\n/);
+  assert.match(buildJob, /runs-on: \$\{\{ matrix.runner \}\}/);
+  assert.match(publishJob, /needs: \[build-mac, build-win\]/);
+  assert.match(buildJob, /name: mac-release-\$\{\{ github.run_id \}\}-\$\{\{ matrix.architecture \}\}/);
   assert.doesNotMatch(buildJob, /MAC_SPARKLE_PRIVATE_KEY: \$\{\{ secrets\./);
   assert.match(buildJob, /smoke-distribution\.mjs/);
   assert.match(workflow, /cancel-in-progress: false/);
   assert.match(workflow, /retention-days: 1/);
   assert.match(workflow, /node-version: '26\.13\.1'\n          package-manager-cache: false/);
-  const cache = workflow.match(/      - name: Cache verified downloads[^\n]*\n([\s\S]*?)(?=      - name:)/)?.[1];
+  const cache = buildJob.match(/      - name: Cache verified downloads[^\n]*\n([\s\S]*?)(?=      - name:)/)?.[1];
   assert.ok(cache, "fresh native builds cache downloads");
   assert.match(cache, /if: steps\.request\.outputs\.restore != 'true'/);
   assert.match(cache, /continue-on-error: true/);
@@ -231,7 +232,7 @@ try {
   }
   assert.doesNotMatch(workflow, /^\s+(push|pull_request|pull_request_target):/m);
   assert.ok(workflow.indexOf("Save original distribution") < workflow.indexOf("MAC_SPARKLE_PRIVATE_KEY: ${{ secrets."));
-  assert.equal([...workflow.matchAll(/uses: actions\/[^@]+@([a-f0-9]{40})/g)].length, 10);
+  for (const line of workflow.match(/uses: \S+/g)) assert.match(line, /@[0-9a-f]{40}$/, `action 要钉 sha：${line}`);
   console.log("PASS: signing key is private, excluded from child environment/artifacts, and cleaned on failure; workflow pins actions and saves recovery before injecting secrets");
 } finally {
   rmSync(temporary, { recursive: true, force: true });

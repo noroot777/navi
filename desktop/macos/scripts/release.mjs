@@ -13,6 +13,8 @@
 //                                               # 演练：dmg 和 appcast 写进本地目录，不碰 GitHub、不碰 README
 //
 // 其它选项：--app <Navi.app> 用现成的构建（不重新 build）；--notes <文字> 换掉自动生成的更新说明。
+// --stage / --finish 给合并发布用（desktop/shared/release-together.mjs，几个平台的包在同一个 Release 里）：
+// --stage 只把 dmg 传进草稿并核对，不公开、不碰 appcast；--finish 在 Release 公开之后核对它、再推 appcast 和下载页。
 //
 // 几条不变量（README「发版」里有为什么）：
 //  · 发出去的 app 里的公钥必须就是签这一版的私钥对应的那把 —— 对不上直接拒，发出去谁都装不上。
@@ -101,8 +103,13 @@ async function main() {
       notes: { type: "string" },
       keys: { type: "boolean" },
       "init-repo": { type: "boolean" },
+      stage: { type: "boolean" },
+      finish: { type: "boolean" },
     },
   });
+  const mode = values.stage ? "stage" : values.finish ? "finish" : "single";
+  if (values.stage && values.finish) die("--stage 和 --finish 只能选一个");
+  if (mode !== "single" && values.local) die("--stage / --finish 只用于正式发布，不和 --local 一起用");
   let config = readConfig();
   const sparkle = await ensureSparkle();
   const tool = (name) => join(sparkle, "bin", name);
@@ -220,12 +227,13 @@ async function main() {
     copyFileSync(dmg, join(local, dmgName));
   } else {
     const put = await putPackage(github, config, {
-      tag, commit, file: dmg, length, say,
+      tag, commit, file: dmg, length, say, mode,
       name: `Navi for macOS ${shortVersion}${config.architecture === "x64" ? " · Intel" : ""}`,
       body: `${notes.text}\n\n安装：下载 ${dmgName}，打开后把 Navi（Navi.app）拖进 Applications。第一次打开被系统拦住时的处理见 https://github.com/${config.releaseRepo}#下载-mac-版`
         + `\n\n装着改名前的 Ash.app：装法一样，装好打开一次 Navi，它会接过 Ash 的设置、数据和登录项，把 Ash.app 移到废纸篓。`,
     });
     url = put.url;
+    if (mode === "stage") return say(`✓ ${dmgName} 已在 Release ${tag} 的草稿里`);
   }
 
   // ── 6. 再更新 appcast ──

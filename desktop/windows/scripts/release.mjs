@@ -6,7 +6,9 @@
 //   node desktop/windows/scripts/release.mjs --installer <Navi-<v>-x64-setup.exe> --version <v> --commit <完整 sha> --key-file <私钥>
 //   node desktop/windows/scripts/release.mjs ... --local <目录> --base-url <http://…/>   # 演练：安装包和清单写进本地目录，不碰 GitHub
 //
-// 正式发布由云端工作流调（release-win.yml → cloud-workflow.mjs publish），私钥只在那一步从 Secret 落成临时文件。
+// 正式发布由云端工作流调（release.yml → desktop/shared/release-together.mjs），私钥只在那一步从 Secret 落成临时文件。
+// --stage / --finish 给合并发布用（几个平台的包在同一个 Release 里）：--stage 只把安装包传进草稿并核对，
+// 不公开、不推清单；--finish 在 Release 公开之后核对它、再推清单。
 // 几条不变量（同 mac，README「发版」）：
 //  · 签名验不过 release.json 的公钥（Secret 里的私钥和仓库里的公钥不是一对）就什么都不传：发出去谁都装不上。
 //  · 版本只能往前；同一版只能是同一个提交、同一个包（清单里记着 sha256），补收尾不重签不重传。
@@ -34,7 +36,8 @@ const say = (line) => process.stdout.write(`${line}\n`);
 const die = (line) => { throw new ReleaseStop(line); };
 const sha256 = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
 
-export async function release({ installer, version, commit, keyFile, notes, local, baseURL, github, signer = (file, v, key) => signFile(file, v, readFileSync(key, "utf8")) }) {
+export async function release({ installer, version, commit, keyFile, notes, local, baseURL, github, mode = "single", signer = (file, v, key) => signFile(file, v, readFileSync(key, "utf8")) }) {
+  if (mode !== "single" && local) die("--stage / --finish 只用于正式发布，不和 --local 一起用");
   const config = readConfig(CONFIG_PATH);
   installer = resolve(installer);
   if (basename(installer) !== installerName(version)) die(`安装包该叫 ${installerName(version)}，不是 ${basename(installer)}`);
@@ -88,11 +91,15 @@ export async function release({ installer, version, commit, keyFile, notes, loca
   } else {
     const tag = tagFor(config, version);
     ({ url } = await putOnRelease(github, config, {
-      tag, commit, file: installer, length, feed: FEED, say,
+      tag, commit, file: installer, length, feed: FEED, say, mode,
       name: `Navi for Windows ${version}`,
       body: `${text}\n\n安装：下载 ${basename(installer)} 双击运行（装在自己的用户目录下，不要管理员）。`
         + "Windows 会提示「未知发布者」：点「更多信息」→「仍要运行」。已经装了的会自己提示更新。",
     }));
+    if (mode === "stage") {
+      say(`✓ ${basename(installer)} 已在 Release ${tag} 的草稿里`);
+      return { staged: true, signature };
+    }
     await confirmDownloadable(url, installer, length, { feed: FEED });
   }
 
@@ -127,13 +134,15 @@ async function main() {
   const { values } = parseArgs({
     options: {
       installer: { type: "string" }, version: { type: "string" }, commit: { type: "string" }, "key-file": { type: "string" },
-      notes: { type: "string" }, local: { type: "string" }, "base-url": { type: "string" },
+      notes: { type: "string" }, local: { type: "string" }, "base-url": { type: "string" }, stage: { type: "boolean" }, finish: { type: "boolean" },
     },
   });
   for (const name of ["installer", "version", "key-file"]) if (!values[name]) die(`缺 --${name}`);
+  if (values.stage && values.finish) die("--stage 和 --finish 只能选一个");
   await release({
     installer: values.installer, version: values.version, commit: values.commit, keyFile: resolve(values["key-file"]),
     notes: values.notes, local: values.local ? resolve(values.local) : null, baseURL: values["base-url"],
+    mode: values.stage ? "stage" : values.finish ? "finish" : "single",
   });
 }
 

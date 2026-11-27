@@ -211,8 +211,23 @@ try {
     // 清单提交不上：包已公开，说清重跑
     const conflict = fake({ writeFile: async () => { throw new Error("HTTP 409"); } });
     await assert.rejects(quiet(() => release({ installer: installer("0.2.0"), version: "0.2.0", commit: COMMIT, keyFile: "k", github: conflict, signer: key.sign })), /没提交上.*公开不撤回.*重跑/s);
+
+    // 合并发布的两段：--stage 只进草稿、不公开、不推清单；--finish 只认已公开的 Release，公开后才推清单
+    const together = fake();
+    const shared = installer("0.3.6");
+    await assert.rejects(quiet(() => release({ installer: shared, version: "0.3.6", commit: COMMIT, keyFile: "k", github: together, signer: key.sign, mode: "finish" })), /还没公开/);
+    const staged = await quiet(() => release({ installer: shared, version: "0.3.6", commit: COMMIT, keyFile: "k", github: together, signer: key.sign, mode: "stage" }));
+    assert.equal(staged.staged, true);
+    assert.ok(!together.state.calls.some((call) => /publish|writeFile/.test(call)), "stage 不公开、不推清单");
+    assert.equal(together.state.releases.get("navi-win-v0.3.6").draft, true);
+    await together.publishRelease("o/navi", together.state.releases.get("navi-win-v0.3.6"), COMMIT);
+    await quiet(() => release({ installer: shared, version: "0.3.6", commit: COMMIT, keyFile: "k", github: together, signer: key.sign, mode: "finish" }));
+    assert.equal(parseFeed(together.state.feed.text).version, "0.3.6", "finish 在公开之后推清单");
+    assert.equal(together.state.calls.filter((call) => call.startsWith("upload")).length, 1, "finish 不重传");
+    await assert.rejects(release({ installer: shared, version: "0.3.6", keyFile: key.file, local: join(temporary, "x"), baseURL: "http://x/", mode: "stage" }), /不和 --local 一起用/);
     server.close();
     console.log("✓ 正式发布：两个仓库先证明写得了；签名验不过公钥、草稿下回来不对都不公开；包公开且下得下来才推清单；同版同包不重发，同版换包拒发");
+    console.log("✓ 合并发布的两段：stage 只进草稿、不公开、不推清单；finish 只认已公开的 Release，公开后推清单、不重传");
   }
 } finally {
   rmSync(temporary, { recursive: true, force: true });
