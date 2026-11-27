@@ -14,6 +14,7 @@ const { beginDelivery, deliveryOptions, deliveryVerdict, deliverPendingMessages,
 const { reviewDeliveryBlocked, reviewDeliveryFrom } = await import("../src/review-ownership.js");
 const { beginReviewContinuation, commitReviewTurnDelivery, preserveReviewWait } = await import("../src/review-continuation.js");
 const { noteReviewInputAcceptance } = await import("../src/review-input-verdict.js");
+const { freeWorkflowState } = await import("../src/free-workflow-state.js");
 const { directionIdentityCleared, turnDirectionStart } = await import("../src/task-direction-epoch.js");
 const { continueTask } = await import("../src/orchestrator.js");
 const { setTaskQuestion } = await import("../src/task-question.js");
@@ -178,7 +179,20 @@ try {
         return receipt;
       }, { behavior: "immediate" });
       const [receipt] = await Promise.all([resuming, reconcileRegressionSettlements()]);
-      await commitReviewTurnDelivery(owner.id, receipt);
+      const launched = { model: `launched-${mode}`, reasoningEffort: "high" };
+      const free = mode === "free" || mode === "accepted_merge";
+      const versionBefore = free ? (await freeWorkflowState(review.taskId)).stateVersion : 0;
+      await commitReviewTurnDelivery(owner.id, receipt, undefined, undefined, undefined, launched);
+      // 「哪个模型审的」记在核过派发身份的这一笔上,值就是拉起进程那一份执行器解析(orchestrator 传进来的);
+      // 只落到自由审查那一轮,验证轮 / 旧式审查任务没有那一行可写。
+      const freeRounds = await db.select().from(schema.freeReviewRounds).where(eq(schema.freeReviewRounds.runId, review.runId));
+      if (free) {
+        assert.deepEqual(freeRounds.find((item) => item.round === review.round)?.ranOn, launched);
+        // 已经开着的页面拒收同版本快照:记下模型必须让状态版本往前走,新快照里也要带着它。
+        const after = await freeWorkflowState(review.taskId);
+        assert(after.stateVersion > versionBefore, "recording the model must publish a newer free-workflow state version");
+        assert.deepEqual(after.reviews.find((run) => run.id === review.runId)?.rounds.find((item) => item.round === review.round)?.ranOn, launched);
+      } else assert.equal(freeRounds.length, 0, "non-free reviews have no free round to record on");
       // 真实链路里紧跟着交付凭据的是协议回执那一笔(continueTask → turn-input-settlement.ts);这里没有
       // 执行器,照它补上「收下了」—— 否则凭据停在 spawn 时的 unknown,审查结算会按「送没送到说不清」按住。
       await noteReviewInputAcceptance(owner.id, receipt, "accepted");

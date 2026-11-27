@@ -10,6 +10,7 @@
 import type { TerminalReservation } from "./terminal-capacity.js";
 import type { TerminalProcess } from "./terminal-pty.js";
 import type { LaunchClocks } from "./terminal-launch-survivors.js";
+import type { TerminalTheme } from "@navi/shared/terminal-themes";
 
 export type TerminalEvent =
   | { seq: number; type: "data"; data: string }
@@ -196,6 +197,7 @@ export type TerminalSession = Omit<TerminalSessionInfo, "stoppedByUser"> & {
 export type CreateOptions = {
   cols?: number;
   rows?: number;
+  theme?: TerminalTheme;
   shell?: string;
   shellArgs?: string[];
   /**

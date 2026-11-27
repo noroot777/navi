@@ -2,12 +2,13 @@
 // 会话管理、进程组清场那套逻辑全在 terminal.ts;这里只做「请求 → 调 manager → 回响应」的
 // 薄壳,拆出来是为了让 terminal.ts 专注会话/进程,不被路由样板撑过 700 行。
 import type { Hono } from "hono";
-import { streamSSE } from "hono/streaming";
 import { eq } from "drizzle-orm";
+import { terminalTheme } from "@navi/shared/terminal-themes";
 import { db } from "./db/index.js";
 import { projects } from "./db/schema.js";
 import { instanceAdminOnly } from "./auth/context.js";
-import { resolveTerminalDirectory, terminalSessions, type TerminalEvent } from "./terminal.js";
+import { resolveTerminalDirectory, terminalSessions } from "./terminal.js";
+import { terminalEventStream } from "./terminal-event-stream.js";
 
 async function projectDirectory(projectId: string): Promise<string | null> {
   const project = (await db.select().from(projects).where(eq(projects.id, projectId))).at(0);
@@ -27,9 +28,9 @@ export function mountTerminalRoutes(api: Hono): void {
     const projectId = c.req.param("projectId");
     const cwd = await projectDirectory(projectId);
     if (!cwd) return c.json({ error: "项目目录不存在，请先在项目设置中填写可用的本地目录" }, 400);
-    const body: { cols?: number; rows?: number } = await c.req.json().catch(() => ({}));
+    const body: { cols?: number; rows?: number; theme?: unknown } = await c.req.json().catch(() => ({}));
     try {
-      return c.json(await terminalSessions.createAsync(projectId, cwd, body), 201);
+      return c.json(await terminalSessions.createAsync(projectId, cwd, { ...body, theme: terminalTheme(body.theme) }), 201);
     } catch (error) {
       return c.json({ error: `终端启动失败：${error instanceof Error ? error.message : String(error)}` }, 500);
     }
@@ -48,50 +49,25 @@ export function mountTerminalRoutes(api: Hono): void {
   api.get("/projects/:projectId/terminal/sessions/:sessionId/events", (c) => {
     const projectId = c.req.param("projectId");
     const sessionId = c.req.param("sessionId");
-    const after = Number(c.req.header("last-event-id") ?? c.req.query("after") ?? 0) || 0;
-    const replay = terminalSessions.eventsAfter(sessionId, projectId, after);
-    if (!replay) return c.json({ error: "terminal session not found" }, 404);
-    return streamSSE(c, async (stream) => {
-      let replaying = true;
-      const pending: TerminalEvent[] = [];
-      const write = (event: TerminalEvent) => stream.writeSSE({ id: String(event.seq), data: JSON.stringify(event) });
-      const unsubscribe = terminalSessions.subscribe(sessionId, projectId, (event) => {
-        if (replaying) pending.push(event);
-        else void write(event).catch(() => undefined);
-      });
-      stream.onAbort(() => unsubscribe?.());
-      try {
-        for (const event of replay) await write(event);
-        replaying = false;
-        for (const event of pending) await write(event);
-        while (!stream.aborted) {
-          await stream.writeSSE({ event: "ping", data: "1" });
-          await stream.sleep(15_000);
-        }
-      } catch {
-        /* normal disconnect */
-      } finally {
-        unsubscribe?.();
-      }
-    });
+    return terminalEventStream(c, terminalSessions, projectId, sessionId);
   });
 
   api.post("/projects/:projectId/terminal/sessions/:sessionId/input", async (c) => {
-    const body: { data?: unknown } = await c.req.json().catch(() => ({}));
+    const body: { data?: unknown; focused?: unknown } = await c.req.json().catch(() => ({}));
     if (typeof body.data !== "string") return c.json({ error: "data required" }, 400);
     if (Buffer.byteLength(body.data) > 64 * 1024) return c.json({ error: "data too large" }, 413);
-    if (!terminalSessions.write(c.req.param("sessionId"), c.req.param("projectId"), body.data)) {
+    if (!terminalSessions.write(c.req.param("sessionId"), c.req.param("projectId"), body.data, typeof body.focused === "boolean" ? body.focused : undefined)) {
       return c.json({ error: "terminal session not found" }, 404);
     }
     return c.body(null, 204);
   });
 
   api.post("/projects/:projectId/terminal/sessions/:sessionId/resize", async (c) => {
-    const body: { cols?: unknown; rows?: unknown } = await c.req.json().catch(() => ({}));
+    const body: { cols?: unknown; rows?: unknown; theme?: unknown } = await c.req.json().catch(() => ({}));
     if (typeof body.cols !== "number" || typeof body.rows !== "number") {
       return c.json({ error: "cols and rows required" }, 400);
     }
-    if (!terminalSessions.resize(c.req.param("sessionId"), c.req.param("projectId"), body.cols, body.rows)) {
+    if (!terminalSessions.resize(c.req.param("sessionId"), c.req.param("projectId"), body.cols, body.rows, terminalTheme(body.theme))) {
       return c.json({ error: "terminal session not found" }, 404);
     }
     return c.body(null, 204);

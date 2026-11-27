@@ -14,7 +14,7 @@ import { ReviewNote } from "../review/ReviewNote.tsx";
 import { ReviewScreenshotStrip } from "../review/ReviewScreenshotStrip.tsx";
 import { FreeReviewDisputeRecord, type DisputeRecordHost } from "./FreeReviewDisputeRecord.tsx";
 import {
-  checkModeText, missingReportText, noVerdictSaidText, recurrenceText, reviewRoundLabel, timeRange,
+  checkModeText, missingReportText, noVerdictSaidText, recurrenceText, reviewEffortText, reviewModelText, reviewRoundLabel, timeRange,
 } from "./freeReviewRounds.ts";
 import { useFreeWorkflowSnapshot } from "./useFreeWorkflowState.ts";
 
@@ -66,7 +66,13 @@ function roundTitle(run: FreeReviewRun, round: FreeReviewRound): string {
 }
 
 function roundSubtitle(run: FreeReviewRun, round: FreeReviewRound): string {
-  return `${reviewRoundLabel(round)} · ${run.reviewerName} · ${checkModeText(run)}`;
+  return [reviewRoundLabel(round), run.reviewerName, reviewModelText(run, round), checkModeText(run)].filter(Boolean).join(" · ");
+}
+
+/** 铺开那一份的第一行：哪个模型、哪档智能水平审的（行上只写审查者名字）、检查类型、起止。说不出模型就不写。 */
+function roundMeta(run: FreeReviewRun, round: FreeReviewRound): string {
+  return [reviewModelText(run, round), reviewEffortText(run, round), checkModeText(run), timeRange(round.startedAt, round.endedAt)]
+    .filter(Boolean).join(" · ");
 }
 
 type RoundFallback = { run: FreeReviewRun; round: FreeReviewRound } | null;
@@ -121,7 +127,7 @@ export function FreeReviewRoundBody({ taskId, run, round, dispute }: {
 }) {
   return (
     <ReviewInlineReport
-      meta={`${checkModeText(run)} · ${timeRange(round.startedAt, round.endedAt)}`}
+      meta={roundMeta(run, round)}
       entry={freeReportEntry(taskId, run.id, round.round, { run, round })}
       screenshots={hasScreenshots(round) ? <Screenshots taskId={taskId} run={run} round={round} /> : null}
       after={round.dispute && dispute ? <FreeReviewDisputeRecord run={run} round={round} host={dispute} /> : null}

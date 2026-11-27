@@ -323,6 +323,7 @@ export async function collectFreeWorkflow(taskId: string): Promise<HandoffFreeWo
       disputeResolutionNote: r.disputeResolutionNote,
       disputeSupersededAt: r.disputeSupersededAt,
       historyRefs: r.historyRefs, carries: r.carries,
+      ranOn: r.ranOn,
       startedAt: r.startedAt, endedAt: r.endedAt,
     });
     byRun.set(r.runId, list);

@@ -7,22 +7,23 @@
 // 启动记号与端口管着的那次启动 —— 所以返回体里常有一句 `notice`:动作做了,但现场还有
 // 核不上归属的东西,不说就是谎报(见 server/src/terminal-stop-notices.ts)。
 import type { LaunchAbandonment, LaunchResidueView, TerminalSessionInfo } from "./apiTypes.ts";
+import type { TerminalTheme } from "@navi/shared/terminal-themes";
 import { apiPath, id, json, request } from "./apiClient.ts";
 
 export const terminalApi = {
   createTerminalSession: (
     projectId: string,
-    size: { cols: number; rows: number },
+    size: { cols: number; rows: number; theme?: TerminalTheme },
   ): Promise<TerminalSessionInfo> =>
     request(`/projects/${id(projectId)}/terminal/sessions`, json("POST", size)),
-  terminalEventsUrl: (projectId: string, sessionId: string, after = 0): string =>
-    apiPath(`/projects/${id(projectId)}/terminal/sessions/${id(sessionId)}/events?after=${after}`),
-  writeTerminalSession: (projectId: string, sessionId: string, data: string): Promise<void> =>
-    request(`/projects/${id(projectId)}/terminal/sessions/${id(sessionId)}/input`, json("POST", { data })),
+  terminalScreenUrl: (projectId: string, sessionId: string): string =>
+    apiPath(`/projects/${id(projectId)}/terminal/sessions/${id(sessionId)}/events?view=screen`),
+  writeTerminalSession: (projectId: string, sessionId: string, data: string, focused?: boolean): Promise<void> =>
+    request(`/projects/${id(projectId)}/terminal/sessions/${id(sessionId)}/input`, json("POST", { data, focused })),
   resizeTerminalSession: (
     projectId: string,
     sessionId: string,
-    size: { cols: number; rows: number },
+    size: { cols: number; rows: number; theme?: TerminalTheme },
   ): Promise<void> =>
     request(`/projects/${id(projectId)}/terminal/sessions/${id(sessionId)}/resize`, json("POST", size)),
   closeTerminalSession: (projectId: string, sessionId: string): Promise<void> =>

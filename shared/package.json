@@ -6,6 +6,14 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./terminal-themes": {
+      "types": "./src/terminal-themes.ts",
+      "default": "./src/terminal-themes.ts"
+    },
+    "./terminal-screen": {
+      "types": "./src/terminal-screen.ts",
+      "default": "./src/terminal-screen.ts"
+    },
     "./task-runtime": {
       "types": "./src/task-runtime.ts",
       "default": "./src/task-runtime.ts"

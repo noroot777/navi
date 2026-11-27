@@ -3,7 +3,7 @@
 // 把产物按「与仓库同形」的布局拷进运行时目录。各平台自己只管 node 包的形状和原生依赖怎么来。
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, createReadStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, createReadStream, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -36,8 +36,41 @@ export async function sha256Of(file) {
   return hash.digest("hex");
 }
 
+/**
+ * 检出里 package-lock.json 要的、磁盘上却没装对的包名（没装、版本不对、工作区链接指错）。
+ * 拉了新代码、清单里新增或换了版本的包还没装，`npm run build` 就会找不到它。认的是磁盘上每个包自己的
+ * package.json：npm 记在 node_modules/.package-lock.json 的那份只是缓存，包被删了它照样记着装好了。
+ * 可选依赖（别的平台的原生包）本来就不一定装，不算。
+ */
+export function staleDependencies(repo = REPO) {
+  let wanted;
+  try { wanted = JSON.parse(readFileSync(join(repo, "package-lock.json"), "utf8")).packages ?? {}; }
+  catch (error) { die(`${join(repo, "package-lock.json")} 读不出来：${error.message}`); }
+  const real = (path) => { try { return realpathSync(path); } catch { return null; } };
+  const version = (path) => { try { return JSON.parse(readFileSync(join(path, "package.json"), "utf8")).version; } catch { return null; } };
+  return Object.entries(wanted).filter(([path, want]) => {
+    if (!path.includes("node_modules/") || want.optional) return false;
+    const at = join(repo, path);
+    return want.link ? !real(at) || real(at) !== real(join(repo, want.resolved)) : version(at) !== want.version;
+  }).map(([path]) => path.slice(path.lastIndexOf("node_modules/") + "node_modules/".length));
+}
+
+const listed = (names) => `${names.slice(0, 5).join("、")}${names.length > 5 ? ` 等 ${names.length} 个` : ""}`;
+
+/** 依赖没装对就装：先删掉 npm 的已装缓存，它才会重新看磁盘，不然被删掉的包它当成还在、不补。 */
+function ensureDependencies() {
+  const stale = staleDependencies();
+  if (!stale.length) return;
+  say(`▶ npm install（检出里的依赖跟 package-lock.json 对不上：${listed(stale)}）`);
+  rmSync(join(REPO, "node_modules", ".package-lock.json"), { force: true });
+  run("npm", ["install", "--no-audit", "--no-fund"], { cwd: REPO, shell: process.platform === "win32" });
+  const left = staleDependencies();
+  if (left.length) die(`npm install 之后依赖还是对不上：${listed(left)}`);
+}
+
 export function buildProducts({ skip }) {
   if (!skip) {
+    ensureDependencies();
     say("▶ npm run build");
     run("npm", ["run", "build"], { cwd: REPO, shell: process.platform === "win32" });
   }

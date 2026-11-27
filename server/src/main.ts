@@ -188,6 +188,9 @@ async function initializeServer() {
   if (!IS_PREVIEW_INSTANCE) {
     // 自动开工先按住，接回之后数名额才数得对（launch-request.ts），由下面 startPrerequisiteLaunches 放开。
     (await import("./launch-request.js")).holdLaunchesForBoot();
+    // 系统通知记底要排在接回、收拾之前：之后收拾出来的中断才是「新发生的」，不会被当成历史记掉（system-notify.ts）。
+    await (await import("./system-notify.js")).baselineSystemNotify()
+      .catch((err) => console.error("[navi] 系统通知记底失败（不影响启动，全量对账时再记）:", err));
     await reattachRunningTasks();
     // 回合里交出去、那一轮却没被接回来的哨兵结果退回待发送 —— 必须夹在这两步之间
     // (顺序的理由见 monitor-turn-handoff.ts 的 `returnOrphanTurnHandoffs`)。
@@ -618,6 +621,10 @@ activeServer = serve({ fetch: app.fetch, port, ...(LOCAL_ONLY ? { hostname: LOCA
       // 飞书长连接（没配凭证就什么都不做）。同一个库起了多个实例（没拿到单实例锁）时不连：
       // 飞书长连接是集群模式，两个客户端会随机分走事件。通道以绑定者身份调本进程的路由，
       // 所以要传 app.fetch —— 走完整的鉴权与可见性中间件（im/navi-client.ts）。
+      // 系统通知（客户端弹的横幅）：同飞书推送一套判据，对账驱动（system-notify.ts）。
+      void import("./system-notify.js")
+        .then(({ startSystemNotify }) => startSystemNotify())
+        .catch((error) => console.error("[navi] 系统通知启动失败:", error));
       void import("./im/channel.js")
         .then(({ startFeishuChannel }) => startFeishuChannel({ fetch: app.fetch, exclusive: singletonLock !== null }))
         .catch((error) => console.error("[navi] 飞书通道启动失败:", error));

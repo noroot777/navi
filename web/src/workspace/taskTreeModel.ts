@@ -143,11 +143,7 @@ export type TaskProjectGroup<T extends TaskListItem = TaskListItem> = {
   tasks: T[];
 };
 
-// 任务模式下「任务」那一节再按项目分一层。
-//
-// 项目的先后**跟着行走**：喂进来的 tasks 已经是更新时间倒序，所以谁的最新一条更近，
-// 谁就排在最前。按名字或创建时间排会把最活跃的那家沉到底下，而这个列表存在的意义
-// 就是「现在谁在动」—— 排序原则跟行一样只认更新时间，不为分组另立一套。
+// 任务模式下「任务」那一节再按项目分一层。这里只管分桶，桶的先后见 groupTaskModeProjects。
 export function groupTasksByProject<T extends TaskListItem>(tasks: T[]): TaskProjectGroup<T>[] {
   const groups = new Map<string, T[]>();
   for (const task of tasks) {
@@ -158,7 +154,12 @@ export function groupTasksByProject<T extends TaskListItem>(tasks: T[]): TaskPro
   return [...groups].map(([projectId, rows]) => ({ projectId, tasks: rows }));
 }
 
-export function groupTaskModeProjects<T extends TaskListItem>(tasks: T[], allTasks: T[], pinned: T[]) {
+// 项目分组的先后**定死**，跟项目列表（项目切换器里那份）同序，不看任务的执行情况
+// （用户 2026-11-26 指定）。从前按「谁的最新一条更近」排，一条任务有了动静，整个
+// 文件夹就带着它的行跳到最上面，眼睛刚找到的位置下一秒就换了人。组里的行照旧按更新
+// 时间排 —— 动的只是行，文件夹不动。项目列表里没有的（还没读到、或已不可见）排在最后，
+// 按 id 排，同样不随任务变动。
+export function groupTaskModeProjects<T extends TaskListItem>(tasks: T[], allTasks: T[], pinned: T[], projectOrder: readonly string[] = []) {
   const groups = groupTasksByProject(tasks);
   const defaultIds = new Set([...tasks, ...pinned].map((task) => task.id));
   const extras = new Map(groupTasksByProject(
@@ -170,6 +171,10 @@ export function groupTaskModeProjects<T extends TaskListItem>(tasks: T[], allTas
     groups.push({ projectId: task.projectId, tasks: [] });
     projectIds.add(task.projectId);
   }
+  const rank = new Map(projectOrder.map((projectId, index) => [projectId, index]));
+  const unranked = projectOrder.length;
+  groups.sort((a, b) => (rank.get(a.projectId) ?? unranked) - (rank.get(b.projectId) ?? unranked)
+    || (rank.has(a.projectId) ? 0 : a.projectId.localeCompare(b.projectId)));
   return groups.map((group) => ({ ...group, extraTasks: extras.get(group.projectId) ?? [] }));
 }
 

@@ -189,9 +189,8 @@ assert.equal(revealMoreLabel(7), "展开(7/7)");
 assert.equal(revealMoreLabel(20), "展开(20/20)");
 assert.equal(revealMoreLabel(87), "展开(20/87)");
 
-// —— 任务模式里「任务」那一节再按项目分一层：项目的先后**跟着行走**（喂进来的是更新
-// 时间倒序，谁的最新一条更近谁排前），不按名字也不按创建时间 —— 否则最活跃的那家会
-// 沉到底下，而这个列表就是拿来看「现在谁在动」的。同项目的行保持原有相对顺序。
+// —— 任务模式里「任务」那一节再按项目分一层。分桶本身不排序（桶的先后由
+// groupTaskModeProjects 按项目列表定）；同项目的行保持原有相对顺序。
 const byProject = groupTasksByProject([
   { ...task("b-new", "single"), projectId: "beta" },
   { ...task("a-1", "single"), projectId: "alpha" },
@@ -220,12 +219,25 @@ const modeAll = [
   { ...task("archived", "single"), projectId: "alpha", archived: true },
   { ...task("idle", "single"), projectId: "idle" },
 ];
-const modeGroups = groupTaskModeProjects(modeDefaults, modeAll, modePinned);
-assert.deepEqual(modeGroups.map((group) => group.projectId), ["beta", "alpha", "gamma"]);
-assert.deepEqual(modeGroups.map((group) => group.tasks.map((row) => row.id)), [["b-live"], ["a-live"], []]);
+const modeOrder = ["gamma", "alpha", "beta"];
+const modeGroups = groupTaskModeProjects(modeDefaults, modeAll, modePinned, modeOrder);
+// 项目分组的先后定死在项目列表的顺序上，不跟着任务的动静走（用户 2026-11-26 指定）。
+assert.deepEqual(modeGroups.map((group) => group.projectId), ["gamma", "alpha", "beta"]);
+assert.deepEqual(modeGroups.map((group) => group.tasks.map((row) => row.id)), [[], ["a-live"], ["b-live"]]);
 assert.deepEqual(modeGroups.map((group) => group.extraTasks.map((row) => row.id)), [
-  ["b-elsewhere"], ["a-pin", "a-recent"], ["c-settled"],
+  ["c-settled"], ["a-pin", "a-recent"], ["b-elsewhere"],
 ]);
+// 行的先后反过来（alpha 那条刚有了动静），文件夹的位置一格不动。
+assert.deepEqual(
+  groupTaskModeProjects([...modeDefaults].reverse(), modeAll, modePinned, modeOrder).map((group) => group.projectId),
+  ["gamma", "alpha", "beta"],
+  "任务有动静不许挪动项目分组",
+);
+// 项目列表里没有的排在最后、按 id 排，同样不随任务变动。
+assert.deepEqual(
+  groupTaskModeProjects([...modeDefaults].reverse(), modeAll, modePinned, ["alpha"]).map((group) => group.projectId),
+  ["alpha", "beta", "gamma"],
+);
 assert.deepEqual(groupTaskModeProjects([], modeAll, []), [], "没有默认任务的项目不额外占据默认列表");
 const modePreview = previewProjectTasks(modeDefaults.slice(1), modeGroups[1].extraTasks, Date.parse("2026-08-01T12:00:00.000Z"));
 assert.deepEqual(modePreview.visible.map((row) => row.id), ["a-live"], "最近更新或置顶的补充任务也必须等展开后再显示");

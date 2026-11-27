@@ -6,6 +6,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// 窗口建出来之前就收到的 navi:// 链接（被链接拉起时，系统可能先递链接、后报启动完成）。
   private var pendingLinks: [URL] = []
 
+  func applicationWillFinishLaunching(_ notification: Notification) {
+    // 点通知把 app 拉起来时，那一下在启动完成前后就会交给 delegate：先设上（SystemNotifications）。
+    SystemNotifications.shared.open = { [weak self] url in self?.application(NSApp, open: [url]) }
+    SystemNotifications.shared.install()
+  }
+
   func applicationDidFinishLaunching(_ notification: Notification) {
     // 第一个 WKWebView 建出来之前：要先让旧 app 退出、把改名前的网页数据复制过来（见 LegacyIdentity）。
     guard adoptLegacyIdentity() else { return }

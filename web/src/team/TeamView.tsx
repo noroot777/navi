@@ -35,6 +35,7 @@ import { TeamReviewWorkspace } from "./TeamReviewWorkspace.tsx";
 import { activeTeamHaltMarker, leadTurns, teamFeedRows } from "./teamModel.ts";
 import { useWorkerLiveLines } from "./workerLiveLines.ts";
 import { localeDateTime } from "../lib/localeFormat.ts";
+import { useViewingTask } from "../lib/taskViewing.ts";
 
 
 function WorkerDrawer({
@@ -99,6 +100,7 @@ export function TeamView({
 }) {
   const [groups, setGroups] = useState<Group[]>([]);
   const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null);
+  useViewingTask(task.id);
   const [reviewOpen, setReviewOpen] = useState(initialReviewOpen);
   // 中间那一栏同一时刻只放一样东西：团队会话 / 验收台。点开的文件、文件夹、diff 摊在右侧面板
   // 「查看」那一格（files/fileViewTab.tsx），团队会话一直留着。

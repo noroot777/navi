@@ -20,10 +20,12 @@ import { questionItems, questionKey } from "@navi/shared/questions";
 import { humanTurnOf, type HumanTurnKind } from "@navi/shared/task-attention";
 import { acceptanceMessage } from "@navi/shared/accept-message";
 import { isFinalHumanGate } from "@navi/shared/workflow-policy";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { projects, scheduledMessages, tasks } from "../db/schema.js";
 import { freeReviewRuns, freeWorkflowStates } from "../db/schema-free-workflow.js";
+import { regressionEvidence } from "../db/schema-regression-evidence.js";
+import { reviewChainVerdict } from "../free-review-outcome.js";
 import { currentGateVersion } from "../duet/gate-version.js";
 import { unresolvedDisputes } from "../free-review-dispute.js";
 import { deliversOnItsOwn } from "../pending-delivery-facts.js";
@@ -98,7 +100,10 @@ export async function viewOf(taskId: string): Promise<TaskView | null | undefine
 }
 
 export interface ReviewFacts {
-  /** 审查链还没出结论：最近一条在审（reviewing），或预约着下一轮（修复完自动复审、跑着时预约的首审）。 */
+  /**
+   * 审查链还没出结论：最近一条在审（reviewing），或预约着下一轮（修复完自动复审、跑着时预约的首审），或这一轮刚判了
+   * 转修复、收尾还没把修复意见和续审预约挂上（结算先落 stopped，收尾是之后排空的，free-review-finalization.ts）。
+   */
   pending: boolean;
   /** 最近一条工作区审查链：没通过（stopped = 用完轮数或停下等修，failed = 跑出错）。口径同网页 freeReviewCopy.ts。 */
   failed: boolean;
@@ -115,23 +120,45 @@ async function freeReviewFacts(rows: { id: string; endedAt: string | null }[]): 
   const out = new Map<string, ReviewFacts>();
   if (!rows.length) return out;
   const ids = rows.map((row) => row.id);
-  const [runs, armed] = await Promise.all([
-    db.select({ id: freeReviewRuns.id, taskId: freeReviewRuns.taskId, status: freeReviewRuns.status, finishedAt: freeReviewRuns.finishedAt })
+  const [runs, armed, finalizing] = await Promise.all([
+    db.select({
+      id: freeReviewRuns.id, taskId: freeReviewRuns.taskId, status: freeReviewRuns.status, finishedAt: freeReviewRuns.finishedAt,
+      currentRound: freeReviewRuns.currentRound, retryLimit: freeReviewRuns.retryLimit,
+    })
       .from(freeReviewRuns)
       .where(and(inArray(freeReviewRuns.taskId, ids), eq(freeReviewRuns.targetKind, "workspace")))
       .orderBy(desc(freeReviewRuns.createdAt)),
     db.select({ taskId: freeWorkflowStates.taskId }).from(freeWorkflowStates)
       .where(and(inArray(freeWorkflowStates.taskId, ids), eq(freeWorkflowStates.reviewArmed, true))),
+    repairsBeingQueued(ids),
   ]);
   const reserved = new Set(armed.map((row) => row.taskId));
   for (const row of rows) {
     const latest = runs.find((run) => run.taskId === row.id);
+    const repairing = latest?.status === "stopped" && !reviewChainVerdict(latest) && finalizing.has(latest.id);
     out.set(row.id, {
-      pending: reserved.has(row.id) || latest?.status === "reviewing",
+      pending: reserved.has(row.id) || latest?.status === "reviewing" || repairing,
       failed: latest?.status === "stopped" || latest?.status === "failed",
       passed: latest?.status === "passed" && latest.finishedAt ? { runId: latest.id, finishedAt: latest.finishedAt } : null,
       current: !!latest?.finishedAt && latest.finishedAt >= (row.endedAt ?? ""),
     });
+  }
+  return out;
+}
+
+/** 收尾还没走完、也没卡住的那几条自由审查链（卡住的等人去补跑，不当成还在走）。 */
+async function repairsBeingQueued(taskIds: string[]): Promise<Set<string>> {
+  const rows = await db.select({ finalization: regressionEvidence.finalization }).from(regressionEvidence)
+    .where(and(inArray(regressionEvidence.taskId, taskIds), isNotNull(regressionEvidence.finalization)));
+  const out = new Set<string>();
+  for (const { finalization } of rows) {
+    if (!finalization || finalization.kind !== "free" || finalization.completed || finalization.blockedStep) continue;
+    try {
+      const runId = (JSON.parse(finalization.payload) as { run?: { id?: string } }).run?.id;
+      if (runId) out.add(runId);
+    } catch {
+      // 载荷读不了：收尾那一侧同样走不下去，不当成还在走
+    }
   }
   return out;
 }

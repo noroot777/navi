@@ -6,6 +6,7 @@ import { useIsInstanceAdmin, useIsLocalOnly, useIsMultiUser, useIsSingleOnly } f
 import { api } from "../lib/api.ts";
 import { ColorThemeCard } from "./ColorThemeCard.tsx";
 import { ComposerSendKeyCard } from "./ComposerSendKeyCard.tsx";
+import { SystemNotifyCard } from "./SystemNotifyCard.tsx";
 import { HandoffSettings } from "./HandoffSettings.tsx";
 import { InstanceModeCard } from "./InstanceModeCard.tsx";
 import { RemoteAccessCard } from "./RemoteAccessCard.tsx";
@@ -82,6 +83,7 @@ export function DefaultsSettings({ notify, onOpen }: {
         onChange={patchSendKey}
       />
       <ColorThemeCard notify={notify} />
+      <SystemNotifyCard notify={notify} />
       <HandoffSettings
         settings={settings}
         loading={loading}

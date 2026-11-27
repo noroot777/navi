@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import * as pty from "node-pty";
 import { SERVICE_COMMAND_ID } from "@navi/shared/project-commands";
+import type { TerminalTheme } from "@navi/shared/terminal-themes";
 import { IS_WINDOWS } from "./platform.js";
 import { createPortScanner, LAUNCH_ID_ENV } from "./service-ports.js";
 import { id } from "./util.js";
@@ -20,8 +21,9 @@ import { killAllSessionTrees, killSessionTree, terminateSession, type KillResult
 import { withLaunchHandover, withSessionLock } from "./terminal-management-lock.js";
 import { sampleLaunchClocks, settleLaunchClocks, type LaunchIdentity } from "./terminal-launch-survivors.js";
 import { TerminalWatcher } from "./terminal-session-watch.js";
-import { commandLaunch, ptyEnvironment, shellCommand, terminalSize } from "./terminal-shell.js";
+import { commandLaunch, interactivePtyEnvironment, ptyEnvironment, shellCommand, terminalSize } from "./terminal-shell.js";
 import { spawnWindowsPty, type TerminalProcess } from "./terminal-pty.js";
+import { withTerminalProtocol } from "./terminal-protocol.js";
 import { TerminalCapacity } from "./terminal-capacity.js";
 import { registerShutdownCleanup } from "./shutdown-resources.js";
 import { waitServiceThaw } from "./runtime-handover-state.js";
@@ -242,13 +244,15 @@ export class TerminalSessionManager {
     // 各个钟的起跑读数同样在 spawn 之前取:事后补取,创建子进程到取样之间那段停顿会让真后代
     // 比上界更老,于是在读记号之前就被筛掉(第 6 轮自由审查,见 terminal-launch-survivors.ts)。
     const launchClocks = sampleLaunchClocks();
-    const processHandle = spawnProcess(spawnSpec.file, spawnSpec.args, {
+    const cols = terminalSize(options.cols, 100, 20, 400);
+    const rows = terminalSize(options.rows, 24, 5, 200);
+    const processHandle = withTerminalProtocol(spawnProcess(spawnSpec.file, spawnSpec.args, {
       name: "xterm-256color",
-      cols: terminalSize(options.cols, 100, 20, 400),
-      rows: terminalSize(options.rows, 24, 5, 200),
+      cols,
+      rows,
       cwd,
-      env: ptyEnvironment(launchToken ? { [LAUNCH_ID_ENV]: launchToken } : {}),
-    });
+      env: launchToken ? ptyEnvironment({ [LAUNCH_ID_ENV]: launchToken }) : interactivePtyEnvironment(shell, args),
+    }), cols, rows, options.theme);
     const session: TerminalSession = {
       id: id(),
       projectId,
@@ -303,40 +307,39 @@ export class TerminalSessionManager {
     const session = this.session(sessionId, projectId);
     return session ? sessionInfo(session) : null;
   }
+  screen(sessionId: string, projectId: string) {
+    return this.session(sessionId, projectId, true)?.process.screen;
+  }
 
   eventsAfter(sessionId: string, projectId: string, seq: number): TerminalEvent[] | null {
-    const session = this.session(sessionId, projectId);
+    const session = this.session(sessionId, projectId, true);
     if (!session) return null;
-    session.lastAccessedAt = Date.now();
     return session.events.filter((event) => event.seq > seq);
   }
 
   subscribe(sessionId: string, projectId: string, listener: (event: TerminalEvent) => void): (() => void) | null {
-    const session = this.session(sessionId, projectId);
+    const session = this.session(sessionId, projectId, true);
     if (!session) return null;
-    session.lastAccessedAt = Date.now();
     session.listeners.add(listener);
     return () => session.listeners.delete(listener);
   }
 
-  write(sessionId: string, projectId: string, data: string): boolean {
-    const session = this.session(sessionId, projectId);
+  write(sessionId: string, projectId: string, data: string, focused?: boolean): boolean {
+    const session = this.session(sessionId, projectId, true);
     if (!session) return false;
-    session.lastAccessedAt = Date.now();
     // 已退出的会话(常用命令跑完/被停,日志还挂着给人看)吞掉输入:进程都没了,写下去
     // 只会让 node-pty 抛错、前端弹「连接失败」——而用户只是在死 tab 里碰了下键盘。
     if (session.exitCode !== null) return true;
-    try { session.process.write(data); } catch { /* pty died between checks */ }
+    try { session.process.write(data, focused); } catch { /* pty died between checks */ }
     return true;
   }
 
-  resize(sessionId: string, projectId: string, cols: number, rows: number): boolean {
-    const session = this.session(sessionId, projectId);
+  resize(sessionId: string, projectId: string, cols: number, rows: number, theme?: TerminalTheme): boolean {
+    const session = this.session(sessionId, projectId, true);
     if (!session) return false;
-    session.lastAccessedAt = Date.now();
     // 同上:对死 pty 调 resize 是 ioctl ENOTTY,不是调用方的错,静默成功。
     if (session.exitCode !== null) return true;
-    try { session.process.resize(terminalSize(cols, 100, 20, 400), terminalSize(rows, 24, 5, 200)); } catch { /* pty died between checks */ }
+    try { session.process.resize(terminalSize(cols, 100, 20, 400), terminalSize(rows, 24, 5, 200), theme); } catch { /* pty died between checks */ }
     return true;
   }
 
@@ -488,7 +491,7 @@ export class TerminalSessionManager {
     let closed = 0;
     for (const session of this.sessions.values()) {
       // A subscriber means the CLI is still open, even when the shell is silent.
-      if (session.listeners.size > 0 || session.lastAccessedAt >= cutoff) continue;
+      if (session.listeners.size > 0 || session.process.screen?.observed || session.lastAccessedAt >= cutoff) continue;
       // 活着的会话一律不回收:命令会话是「常驻服务」,交互 shell 是**持久终端**(VSCode
       // 语义:关抽屉只是收起,回来还要原样在,结束它的只有 tab 上的关闭按钮和它自己
       // exit)。判「活」含 daemonize 形状(组长退了、子进程还在):回收会话就没人能停
@@ -641,10 +644,11 @@ export class TerminalSessionManager {
     return this.capacity.hasSlot(projectId, commandId, true);
   }
 
-  private session(sessionId: string, projectId?: string): TerminalSession | null {
+  private session(sessionId: string, projectId?: string, touch = false): TerminalSession | null {
     const session = this.sessions.get(sessionId) ?? null;
-    if (session && (!projectId || session.projectId === projectId)) return session;
-    return null;
+    if (!session || (projectId && session.projectId !== projectId)) return null;
+    if (touch) session.lastAccessedAt = Date.now();
+    return session;
   }
 
   /**

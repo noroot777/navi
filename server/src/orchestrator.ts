@@ -550,7 +550,7 @@ export async function continueTask(
         });
       }
     };
-    if (reviewStart) await commitReviewTurnDelivery(taskId, reviewStart, handle.detached, persistRunner, sessId);
+    if (reviewStart) await commitReviewTurnDelivery(taskId, reviewStart, handle.detached, persistRunner, sessId, { model: ex.model ?? null, reasoningEffort: ex.reasoningEffort ?? null });
     else await persistRunner(db);
     // 两条分支都算开了一个回合：开始就落行,收尾时按同一身份补 ended_at（见 session-turns.ts）。
     await openTurn({

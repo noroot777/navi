@@ -63,10 +63,11 @@
 .project-terminal__drawer-hide:hover { background: #2b2c34; color: #ecedf2; }
 .project-terminal__drawer-hide:focus-visible { outline: 2px solid color-mix(in oklab, var(--accent) 78%, white); outline-offset: -2px; }
 
-.project-terminal__viewport { min-height: 0; flex: 1; overflow: hidden; padding: 12px 16px; }
+.project-terminal__viewport { min-height: 0; flex: 1; overflow: auto; padding: 12px 16px; }
 .project-terminal__viewport[hidden] { display: none; }
-.project-terminal__viewport .xterm { height: 100%; }
+.project-terminal__viewport .xterm { width: max-content; min-width: 100%; }
 .project-terminal__viewport .xterm-viewport { scrollbar-color: rgb(201 203 214 / 22%) transparent; }
+.project-terminal__status { background: #202128; color: #c9cbd6; padding: 4px 16px; font-size: var(--t-xs); }
 
 .terminal-appearance { position: relative; }
 .terminal-appearance__toggle { display: grid; place-items: center; width: 28px; height: 26px; border: 0; border-radius: 4px; background: transparent; color: #aeb7ca; cursor: pointer; }

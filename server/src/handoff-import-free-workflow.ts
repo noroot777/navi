@@ -31,6 +31,14 @@ export interface FreeWorkflowImportRows {
 
 export const EMPTY_FREE_WORKFLOW_ROWS: FreeWorkflowImportRows = { state: null, runs: [], rounds: [], events: [] };
 
+/** 这一轮跑在哪个模型上：两项都得是字符串或 null，形状不对就当没记过（老载荷没有这一项）。 */
+function ranOnOf(value: unknown): { model: string | null; reasoningEffort: string | null } | null {
+  if (!value || typeof value !== "object") return null;
+  const { model, reasoningEffort } = value as Record<string, unknown>;
+  const ok = (field: unknown) => field === null || typeof field === "string";
+  return ok(model) && ok(reasoningEffort) ? { model: model as string | null, reasoningEffort: reasoningEffort as string | null } : null;
+}
+
 /**
  * 预约来源怎么带过来：对端**明说了**就照搬（来源是这条预约的事实，不能被本机再按 runId
  * 推断一遍改写——那正是这一列要取代的东西）；唯一的例外是对端说续轮、却没把那条 run 带过来，
@@ -135,6 +143,7 @@ export async function buildFreeWorkflowRows(
     disputeSupersededAt: round.disputeSupersededAt ?? null,
     historyRefs: Array.isArray(round.historyRefs) ? round.historyRefs : null,
     carries: Array.isArray(round.carries) ? round.carries : null,
+    ranOn: ranOnOf(round.ranOn),
     startedAt: round.startedAt,
     endedAt: round.endedAt,
   })));

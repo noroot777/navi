@@ -12,6 +12,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   var downloads: [ObjectIdentifier: DownloadTransaction] = [:]
   private var chrome: WindowChrome?
   var computerPreview: ComputerPreviewBridge?
+  private var notifications: SystemNotificationBridge?
   private var observations: [NSKeyValueObservation] = []
   private var healthTimer: Timer?
   private var guardTimer: Timer?
@@ -70,6 +71,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     window.delegate = self
     computerPreview = ComputerPreviewBridge(webView: webView, origin: NaviConfig.windowURL, local: NaviConfig.isLocal)
+    notifications = SystemNotificationBridge(webView: webView)
     window.contentView = makeContent()
     // 内容铺到窗口顶，红绿灯浮在页面上（见 WindowChrome）。窗口底色仍跟页面的 theme-color 走，
     // 页面还没画出来的那一瞬和占位页都是同一个底色。
@@ -319,7 +321,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
   /// 窗口只对认过的那一份服务开着页面。导航（刷新、前进后退、页面自己跳转）放行前各认一次
   /// （WebViewBridge），已经载好的页面自己发的请求、SSE 不经过导航 —— 它们落到新来的那一份上会被
-  /// 实例号挡下（见 `bind`），但页面会一直报错。所以页面在的时候还要定时认：不是自己那份了就撤掉页面、说清楚。
+  /// 实例号挡下（见 `bind`），但页面会一直报错。所以页面在的时候还要定时认：答出来的不是自己那份、
+  /// 连接被拒（没人听了）才撤掉页面、说清楚；只是没答上不算（见 `checkInstance`）。
   private func startInstanceGuard() {
     guard NaviConfig.isLocal, guardTimer == nil else { return }
     guardTimer = Timer.scheduledTimer(withTimeInterval: Self.instanceGuardInterval, repeats: true) { [weak self] timer in
@@ -342,10 +345,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         guard let self, self.guardTimer === timer else { return }
         self.guardProbing = false
         if case .unreachable = probe {
-          // 服务忙时连续几秒答不出探活，一个超时不能证明端口换了人。
+          // 没答上（超时、半路断了）说明端口上有人、只是这会儿答不上来 —— 连着多少次都证明不了换了人。
+          // 页面留着：慢的请求、断了的 SSE 由页面自己等、自己重连，跟浏览器里用 web 版一样；
+          // 一直不答时页面自己的连接状态会报断开（web/src/lib/events.ts 的心跳）。换没换人等它下一次答出来再认。
           self.unreachableProbes += 1
           RuntimeLog.record("probe.miss", RuntimeLog.fields(of: probe).merging(["streak": self.unreachableProbes]) { a, _ in a })
-          if self.unreachableProbes < 3 { return }
+          return
         }
         guard let instance = NaviHealth.ours(probe) else {
           RuntimeLog.record("page.takedown", RuntimeLog.fields(of: probe).merging(["via": "guard", "streak": self.unreachableProbes]) { a, _ in a })
@@ -418,14 +423,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
   ///
   /// `takeOverWhenFree`：端口被别人占着时，对方一停（端口空出来）就接着起自己那份，不必用户再点
   /// 「重试」。只给「被占着」这一档：起不来的那一档要是也这样，就会每 2 秒起一次注定失败的服务。
-  func startHealthPolling(at url: URL = NaviConfig.healthURL, takeOverWhenFree: Bool = false) {
+  /// `takeOverWhen`：除了服务应答，这件事成立了也接着走一遍 loadHome（在后台线程上问）。
+  func startHealthPolling(at url: URL = NaviConfig.healthURL, takeOverWhenFree: Bool = false,
+                          takeOverWhen: (() -> Bool)? = nil) {
     guard healthTimer == nil else { return }
     healthTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
       NaviHealth.probe(url) { probe in
         var down = false
         if case .down = probe { down = true }
         if case .unreachable = probe { down = true }
-        guard NaviHealth.isServing(probe) || (takeOverWhenFree && down) else { return }
+        guard NaviHealth.isServing(probe) || (takeOverWhenFree && down) || takeOverWhen?() == true else { return }
         DispatchQueue.main.async {
           guard let self, self.healthTimer === timer else { return }
           self.loadHome()

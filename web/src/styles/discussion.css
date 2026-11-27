@@ -27,7 +27,7 @@
 .insp-rec.is-here { border-radius: 8px; animation: talk-here 1.6s var(--ease-out) both; }
 @keyframes talk-here {
   0%, 35% { background: var(--accent-soft); }
-  100% { background: transparent; }
+  100% { background: var(--rec-bg, transparent); }
 }
 :root[data-motion="reduce"] .insp-rec.is-here { animation: none; background: var(--overlay); }
 @media (prefers-reduced-motion: reduce) {

@@ -17,6 +17,9 @@ final class ServerLauncher {
     case needsSetup
     /// 端口被别的 navi / 别的程序占着。带着说给用户听的那段话：是谁、怎么办。
     case occupied(String)
+    /// 端口上没人应答，可这份库还握在一个活着的服务进程手里（单实例锁），等满时限也没缓过来。没有另起一份：
+    /// 起了也会被它的锁挡下。带着那个进程（用户点「停掉它」时只停它）和说给用户听的那段话。
+    case unresponsive(LockHolder, String)
     case failed(String)
 
     /// 运行日志里的名字（不带说明原文）。
@@ -25,6 +28,7 @@ final class ServerLauncher {
       case .ready: return "ready"
       case .needsSetup: return "needs_setup"
       case .occupied: return "occupied"
+      case .unresponsive: return "unresponsive"
       case .failed: return "failed"
       }
     }
@@ -67,11 +71,14 @@ final class ServerLauncher {
   func ensureRunningSync(timeout: TimeInterval) -> Outcome {
     do {
       if NaviConfig.isLocal {
-        if try RuntimeRecovery.paused() == nil { try RuntimeStore.prepare() }
+        // 只把这一版的运行时发布进数据根，不切 current：current 跟着确认在服务的那一份走（ServerRecord.confirmServing）——
+        // 端口上还是旧服务时（在等它缓过来、在等安全接管），新开的 MCP 也该用旧服务那一版。还没有 current（第一次
+        // 用外置运行时）时没有「旧的」可留，直接指向这一版，mcp.sh 才有东西可起。
+        if try RuntimeRecovery.paused() == nil { try RuntimeStore.prepare(activate: !RuntimeStore.hasCurrent) }
       }
     }
     catch { return .failed(error.localizedDescription) }
-    if let settled = Self.settle(NaviHealth.probeSync()) { return settled }
+    if let settled = Self.settleNow() { return settled }
     if let hold { return .failed(hold) }
     guard NaviConfig.isLocal else {
       return .failed("连不上 \(NaviConfig.baseURL.absoluteString)。它不是本机地址，app 不会替它启动服务。")
@@ -82,7 +89,7 @@ final class ServerLauncher {
       lock = try ServerStartLock(dataDir: NaviConfig.dataURL)
       let deadline = Date().addingTimeInterval(timeout)
       while try !lock.tryAcquire() {
-        if let settled = Self.settle(NaviHealth.probeSync()) { return settled }
+        if let settled = Self.settleNow() { return settled }
         if let hold { return .failed(hold) }
         guard Date() < deadline else { return .failed("等另一处启动 Navi 服务超时。可以重试；服务起来后也会自动载入。") }
         Thread.sleep(forTimeInterval: 0.2)
@@ -91,22 +98,26 @@ final class ServerLauncher {
       return .failed("无法取得服务启动锁：\(error.localizedDescription)")
     }
     defer { withExtendedLifetime(lock) {} }
-    if let settled = Self.settle(NaviHealth.probeSync()) { return settled }
+    if let settled = Self.settleNow() { return settled }
     if let hold { return .failed(hold) }
+    if let waited = waitForLockHolder(timeout: timeout) { return waited }
     let pause: RuntimeRecovery.Pause?
     let runtime: URL
     do {
       pause = try RuntimeRecovery.paused()
       runtime = pause.map { URL(fileURLWithPath: $0.previous) } ?? NaviConfig.targetRuntimeURL
-      if pause != nil || RuntimeStore.destination != nil { try RuntimeStore.activate(runtime) }
+      // 回退暂停里起的是要回到的那一版，current 先指回它。别的情形 current 等新起的那份应答了再跟过去（adopt →
+      // ServerRecord.confirmServing）：它没起来，current 就还指着原来那一版，不用事后再退。
+      if pause != nil { try RuntimeStore.activate(runtime) }
     }
     catch { return .failed("无法启用新版运行时，未启动服务：\(error.localizedDescription)") }
     let version = pause?.version ?? NaviConfig.bundleVersion
-    if let failure = Self.backUpBeforeMigration(version: version) { return .failed(failure) }
+    // 缺件就根本起不了：先查，不备份、不记尝试。
     let parts = ["node/bin/node", "server/dist/index.js", "scripts/start-detached.mjs"].map { runtime.appendingPathComponent($0) }
     if let missing = parts.first(where: { !FileManager.default.fileExists(atPath: $0.path) }) {
       return .failed("app 里自带的 Navi 不完整（缺 \(missing.path)）。重新装一次 Navi.app。")
     }
+    if let failure = Self.backUpBeforeMigration(version: version, runtime: runtime) { return .failed(failure) }
     do {
       try FileManager.default.createDirectory(at: NaviConfig.logURL, withIntermediateDirectories: true)
     } catch {
@@ -115,20 +126,30 @@ final class ServerLauncher {
     switch spawnDetached(runtime: runtime) {
     case .failure(let reason): return .failed(reason)
     case .success(let pid):
-      // 进程一起来就记下 pid：这个启动器等不到它应答（被退掉、超时）也不要紧，之后谁看到它应答
-      // 都能认出是它、替它确认（见 settle）。
-      ServerRecord.write(pid: Int(pid), version: version)
+      // 进程一起来就记下 pid（记在这一次尝试里，不碰在服务的那一份）：这个启动器等不到它应答（被退掉、超时、
+      // 端口被人抢了）也不要紧，之后谁看到它应答都能认出是它、替它确认（见 settle）；它一直没应答，就只是一次
+      // 没成的尝试，端口上原来那份照样认得出是哪一版起的。
+      if !ServerRecord.write(pid: Int(pid), version: version, runtime: runtime) {
+        RuntimeLog.record("server.confirm_deferred", ["serverPid": Int(pid), "step": "attempt"])
+      }
       RuntimeLog.record("server.spawn", ["serverPid": Int(pid), "version": version])
       let outcome = waitReady(pid: pid, timeout: timeout)
       if case .failed(let startupFailure) = outcome, kill(pid, 0) != 0, errno == ESRCH {
+        // 它退了，这份库这会儿却握在另一个活着的服务手里（在上面那次查过之后才出现的）：不在它底下拿恢复点
+        // 覆盖库，接着等它。它是被那份的锁挡下的、还是自己出了事之后那份才起来，这里分不出来，不猜 —— 恢复点
+        // 照常固定着，等下一次确认才作废。
+        if let holder = DatabaseFile.liveHolder(in: NaviConfig.dataURL), holder.pid != pid {
+          RuntimeLog.record("server.exited_while_held", ["serverPid": Int(pid), "holderPid": Int(holder.pid)])
+          return waitForLockHolder(timeout: timeout) ?? outcome
+        }
         do {
           if pause == nil, let previous = try RuntimeRecovery.restoreBeforeAdoption(reason: startupFailure) {
             switch spawnDetached(runtime: previous) {
             case .failure(let reason): return .failed("已恢复迁移前数据库，但旧服务启动失败：\(reason)")
             case .success(let previousPID):
-              if let record = ServerRecord.read() {
-                try JSONEncoder().encode(ServerRecord(pid: Int(previousPID), bundleVersion: record.bundleVersion,
-                                                     confirmedAt: record.confirmedAt)).write(to: ServerRecord.url, options: .atomic)
+              let previousVersion = ServerRecord.read()?.bundleVersion ?? "unknown"
+              if !ServerRecord.write(pid: Int(previousPID), version: previousVersion, runtime: previous) {
+                RuntimeLog.record("server.confirm_deferred", ["serverPid": Int(previousPID), "step": "attempt"])
               }
               let restored = waitReady(pid: previousPID, timeout: timeout)
               if case .ready = restored {
@@ -153,15 +174,17 @@ final class ServerLauncher {
   /// 其余的 —— 退出时没过闸就被 Sparkle 装上了、`build.sh --install`、手动换了 app、导入来的库 ——
   /// 在这里补一份。备份不成、或者记不下「这一版要起了」就不起：库原样留着，配上旧版 app 还能回去。
   /// 返回 nil = 可以起。
-  private static func backUpBeforeMigration(version: String) -> String? {
+  private static func backUpBeforeMigration(version: String, runtime: URL) -> String? {
+    let hasDatabase: Bool
     do {
-      guard try DatabaseFile.existing(in: NaviConfig.dataURL) != nil else { return nil }
+      hasDatabase = try DatabaseFile.existing(in: NaviConfig.dataURL) != nil
     } catch {
       return "数据根里的库认不准（\(error.localizedDescription)），没备份、也没起服务。照提示处理好再点「重试」（docs/rename-db.md）。"
     }
-    let lastServedBy = ServerRecord.read()?.bundleVersion ?? "unknown"
+    // 还没有库（第一次全新开始）就没东西可备；尝试照样记，记下的是「那时没有库」（ServerRecord.lastHandedTo）。
+    let lastServedBy = ServerRecord.read()?.lastHandedTo ?? "unknown"
     do {
-      if lastServedBy != version && !DatabaseBackup.covers(lastServedBy: lastServedBy) {
+      if hasDatabase && lastServedBy != version && !DatabaseBackup.covers(lastServedBy: lastServedBy) {
         try DatabaseBackup.beforeUpdate(fromVersion: lastServedBy)
       }
     } catch {
@@ -169,28 +192,57 @@ final class ServerLauncher {
         + "腾出空间 / 修好权限后点「重试」；要回到旧版，把旧版 app 装回来就行（README「回到旧版」）。"
     }
     do {
-      try ServerRecord.writeAttempt(version: version)
+      try ServerRecord.writeAttempt(version: version, runtime: runtime)
     } catch {
       return "记不下这一次要起的是哪一版（\(NaviConfig.dataURL.path)：\(error.localizedDescription)），所以没起服务、库没动过。修好权限 / 腾出空间后点「重试」。"
     }
     return nil
   }
 
+  /// 端口上没人应答（连不上 / 答不上来），可这份库的单实例锁还握在一个活着的服务进程手里：多半就是它，一时
+  /// 缓不过来（事件循环被同步活儿堵住、正在迁移、正在退出）。这时另起一份只会被它的锁挡下来，起之前还要切运行时、
+  /// 留底、把记录改成一个从没服务过的进程 —— 所以接着等它：它应答了就是它（settle），它退了才轮到起新的（nil）。
+  /// 等满时限还这样就如实说是谁；它是忙还是卡死了，这里分不出来，停不停交给用户（见 Occupant.unresponsive）。
+  private func waitForLockHolder(timeout: TimeInterval) -> Outcome? {
+    guard var holder = DatabaseFile.liveHolder(in: NaviConfig.dataURL) else { return nil }
+    RuntimeLog.record("server.held", ["holderPid": Int(holder.pid)])
+    let deadline = Date().addingTimeInterval(timeout)
+    while true {
+      if let settled = Self.settleNow() { return settled }
+      if let hold { return .failed(hold) }
+      guard let current = DatabaseFile.liveHolder(in: NaviConfig.dataURL) else { return nil }
+      holder = current
+      guard Date() < deadline else { return .unresponsive(holder, Occupant.unresponsive(holder, waited: timeout)) }
+      Thread.sleep(forTimeInterval: 0.5)
+    }
+  }
+
+  /// 现在探一眼，看结果里哪些已经是结论。
+  static func settleNow() -> Outcome? {
+    let asked = Date()
+    return settle(NaviHealth.probeSync(), askedAt: asked)
+  }
+
   /// 探到的结果里哪些已经是结论：自己那份在 → ready；别人占着 → occupied；连不上 → nil（接着起）。
-  static func settle(_ probe: NaviProbe) -> Outcome? {
+  /// `askedAt`：这一眼是什么时候发出去的（见 adopt）。
+  static func settle(_ probe: NaviProbe, askedAt: Date) -> Outcome? {
     switch probe {
     case .down, .unreachable: return nil
     case .notNavi(let what): return .occupied(Occupant.notNavi(what))
     case .navi(let instance):
       guard NaviHealth.isServing(probe) else { return .occupied(Occupant.otherNavi(instance)) }
-      // 不管服务是谁起的、谁先看到它起来，确认都在这一处（窗口、登录项、另一个窗口的重试都经过这里）。
-      if NaviConfig.isLocal {
-        RuntimeRecovery.confirmed(instance)
-        RuntimeStore.reclaimAfterConfirmation(instance)
-        ServerRecord.confirmServing(pid: instance.pid)
-        ServedInstance.observe(instance)
-      }
+      if NaviConfig.isLocal { adopt(instance, askedAt: askedAt) }
       return .ready
+    }
+  }
+
+  /// 自己那份应答了。不管服务是谁起的、谁先看到它起来，确认都在这一处（窗口、登录项、另一个窗口的重试、起它的
+  /// 那个启动器都经过这里）。这一眼可能是过时的（探到和走到这里之间，旧服务可能已经退了、新的一次已经起了），
+  /// 所以带上发出去的时刻，由服务记录那一层判断它还算不算数（ServerRecord.confirmServing）。
+  private static func adopt(_ instance: NaviInstance, askedAt: Date, launchedHere: Bool = false) {
+    guard instance.isOurs else { return }
+    if ServerRecord.confirmServing(pid: instance.pid, codeDir: instance.codeDir, observedAt: askedAt, launchedHere: launchedHere) {
+      RuntimeStore.reclaimAfterConfirmation(instance)
     }
   }
 
@@ -252,12 +304,10 @@ final class ServerLauncher {
   private func waitReady(pid: Int32, timeout: TimeInterval) -> Outcome {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
+      let asked = Date()
       let probe = NaviHealth.probeSync()
       if case .navi(let instance) = probe, instance.isOurs, instance.pid == Int(pid) {
-        RuntimeRecovery.confirmed(instance)
-        RuntimeStore.reclaimAfterConfirmation(instance)
-        ServerRecord.confirmServing(pid: Int(pid))
-        ServedInstance.observe(instance)
+        Self.adopt(instance, askedAt: asked, launchedHere: true)
         return .ready
       }
       if case .navi(let instance) = probe, !instance.isOurs { return .occupied(Occupant.otherNavi(instance)) }
@@ -317,6 +367,14 @@ enum Occupant {
     let stop = instance.pid.map { "kill \($0)" } ?? "lsof -nP -iTCP:\(port) -sTCP:LISTEN 找到它再停"
     lines.append("要用 app：先停掉它（\(stop)），再点「重试」。开发实例以后换个端口起，例如 PORT=14317 npm run restart。")
     return lines.joined(separator: "\n\n")
+  }
+
+  static func unresponsive(_ holder: LockHolder, waited: TimeInterval) -> String {
+    let port = NaviConfig.port
+    let elsewhere = holder.port.map { $0 == port ? "" : "它听的是 \($0) 端口，不是 \(port)。" } ?? ""
+    return "Navi 服务（进程 \(holder.pid)）还开着这份数据，但 \(Int(waited)) 秒没在 \(port) 端口上应答。\(elsewhere)"
+      + "没有另起一份：它不退出，新起的也会被它挡下。\n\n"
+      + "它可能正忙（迁移、大批写入），缓过来这里会自动接上。确定它卡住了再点「停掉它」：它名下在跑的任务可能被打断。"
   }
 
   static func notNavi(_ what: String) -> String {

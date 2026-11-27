@@ -22,7 +22,7 @@ ARCH="$(node "$HERE/scripts/architecture.mjs")"
 export NAVI_MAC_ARCH="$ARCH"
 SWIFT_ARCH="${ARCH/x64/x86_64}"
 # 给人看的版本。Sparkle 比的是下面的 CFBundleVersion。
-VERSION="0.3.4"
+VERSION="0.3.5"
 # CFBundleVersion 必须严格递增：账本记着这台机器上发过的最后一个号，新号一定比它大（规则见
 # scripts/build-number.mjs）。账本放在仓库的 git 公共目录里，各个 worktree 共用一本；不在仓库里构建时
 # 退回 build/ 下。
@@ -67,7 +67,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Framewor
 cp "$HERE/../../docs/logo/loader.svg" "$APP/Contents/Resources/loader.svg"
 
 swiftc -O -swift-version 5 -target "$SWIFT_ARCH-apple-macos14.0" \
-  -framework AppKit -framework WebKit -framework ScreenCaptureKit -F "$SPARKLE" -framework Sparkle \
+  -framework AppKit -framework WebKit -framework ScreenCaptureKit -framework UserNotifications -F "$SPARKLE" -framework Sparkle \
   -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
   "$HERE"/Sources/*.swift -o "$APP/Contents/MacOS/Navi"
 # 框架原样放进去（ditto 保住里面的软链和 Sparkle 自己的签名）。
