@@ -278,6 +278,11 @@ export function useConversation(
         });
         refreshSessions();
       }
+      // 上下文分项只住在会话行上（服务端落了库才播）：重读会话行，不进会话流。
+      if (event.type === "agent.event" && event.taskId === taskId && event.event.kind === "contextBreakdown") {
+        refreshSessions();
+        return;
+      }
       if (event.type === "agent.event" && event.taskId === taskId) {
         appendTimeline({
           kind: "server",

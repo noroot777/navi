@@ -1,4 +1,4 @@
-import type { ContextUsage, Session } from "@navi/shared";
+import type { ContextBreakdown, ContextUsage, Session } from "@navi/shared";
 import type { ConversationItem } from "../conversationModel.ts";
 import { COMPACTING, isCompactionEvent } from "../../lib/compaction.ts";
 
@@ -12,11 +12,13 @@ export interface InfoRunFacts {
   /** 任务自己最近一轮所在的会话（审查者另开的不算）：上下文那一行的「压缩设置」要它定位执行器 profile。 */
   session: Session | null;
   context: ContextUsage | null;
+  /** 同一条会话回合末取到的上下文分项（只有 claude 有），没有就是 null。 */
+  breakdown: ContextBreakdown | null;
   /** 正在自动 / 手动压缩上下文（见 compactingNow）。 */
   compacting: boolean;
 }
 
-export const EMPTY_RUN_FACTS: InfoRunFacts = { session: null, context: null, compacting: false };
+export const EMPTY_RUN_FACTS: InfoRunFacts = { session: null, context: null, breakdown: null, compacting: false };
 
 // 「此刻在压」= 回合还开着，执行过程里最后一次压缩那一步还停在「在压缩上下文」。压没压成，
 // 服务端都会接着报一条（压完并成「压缩了上下文」，没压成是一条异常）——异常也算收口。
@@ -46,6 +48,7 @@ export function latestRunFacts(items: readonly ConversationItem[]): InfoRunFacts
     return {
       session: item.session ?? null,
       context: item.sessionContext ?? item.session?.context ?? null,
+      breakdown: item.session?.contextBreakdown ?? null,
       compacting: compactingNow(item),
     };
   }

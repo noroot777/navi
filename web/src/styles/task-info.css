@@ -80,6 +80,186 @@
   background: var(--red);
 }
 
+/* 有分项（claude）时细条按分项分色：用掉的那一截整体随水位伸缩，里面各段按回合末那份分项的比例分。
+   颜色跟展开后列表里的色块是同一份（data-ctx）。快满时变红的那一下挪到「剩 X%」上，不盖掉分色。 */
+.insp-bar__used {
+  display: flex;
+  height: 100%;
+  gap: 1px;
+  transform-origin: left;
+  transition: transform var(--dur-3) var(--ease-out);
+}
+
+.insp-bar__used > i {
+  display: block;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  background: var(--ctx);
+}
+
+.insp-num.is-low {
+  color: var(--red);
+}
+
+[data-ctx="system-prompt"] { --ctx: var(--muted); }
+[data-ctx="system-tools"] { --ctx: var(--faint); }
+[data-ctx="mcp-tools"] { --ctx: var(--cyan); }
+[data-ctx="mcp-instructions"] { --ctx: color-mix(in oklab, var(--cyan) 50%, var(--panel)); }
+[data-ctx="agents"] { --ctx: var(--violet); }
+[data-ctx="memory"] { --ctx: var(--amber); }
+[data-ctx="skills"] { --ctx: var(--green); }
+[data-ctx="messages"] { --ctx: var(--accent); }
+[data-ctx="other"] { --ctx: color-mix(in oklab, var(--ink) 35%, var(--panel)); }
+[data-ctx="buffer"] { --ctx: var(--line2); }
+[data-ctx="free"] { --ctx: transparent; }
+
+/* 标签旁的小箭头：指到这一行（或焦点进了这一行）才出，展开时转下来 */
+.insp-ctx-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.insp-ctx-label__chev {
+  color: var(--faint);
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease-out), transform var(--dur-2) var(--ease-out);
+}
+
+.insp-kv > dt.insp-ctx-head:hover .insp-ctx-label__chev,
+.insp-kv > dt.insp-ctx-head:has(+ dd:hover) .insp-ctx-label__chev,
+.insp-kv > dt.insp-ctx-head:has(+ dd :focus-visible) .insp-ctx-label__chev {
+  opacity: 1;
+}
+
+/* 开着不另外垫底色：开没开由箭头和下面那张表说，键只在指到时显出来 */
+.insp-ctx-toggle[aria-expanded="true"]:not(:hover) {
+  background: transparent;
+}
+
+.insp-kv > dt.insp-ctx-head.is-open .insp-ctx-label__chev {
+  transform: rotate(90deg);
+}
+
+/* 分项列表：就地展开在「上下文」那一行下面，缩进到值那一列（标签列 56px + 间距 12px）。
+   收着时高度为 0，开合用 0fr → 1fr 过渡，下面几行顺势挪。内边距放在列表上：外层压到 0 时它不占地方。 */
+.insp-kv > .insp-ctx {
+  padding: 0;
+}
+
+.insp-ctx__fold {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dur-3) var(--ease-out);
+}
+
+.insp-ctx__fold[data-open] {
+  grid-template-rows: 1fr;
+}
+
+.insp-ctx__inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.insp-ctx__list,
+.insp-ctx__sub {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.insp-ctx__list {
+  padding-left: 68px;
+}
+
+/* 一项一行：色块 · 名称 · token · 占比，两列数字右对齐 */
+.insp-ctx__row {
+  display: grid;
+  min-height: 24px;
+  grid-template-columns: 8px minmax(0, 1fr) 52px 48px;
+  align-items: center;
+  gap: 0 8px;
+}
+
+.insp-ctx__row > .insp-num {
+  text-align: right;
+}
+
+.insp-ctx__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--ctx);
+}
+
+.insp-ctx__dot[data-ctx="free"] {
+  box-shadow: inset 0 0 0 1px var(--line2);
+}
+
+.insp-ctx__name {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 「MCP 工具」那一项能再点开：整行是颗键，悬停才显出来 */
+button.insp-ctx__row {
+  width: calc(100% + 16px);
+  margin: 0 -8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  padding: 0 8px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  transition: background var(--dur-1) var(--ease-out);
+}
+
+button.insp-ctx__row:hover {
+  background: var(--hover-bg);
+}
+
+button.insp-ctx__row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.insp-ctx__chev {
+  flex: 0 0 auto;
+  color: var(--faint);
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease-out), transform var(--dur-2) var(--ease-out);
+}
+
+button.insp-ctx__row:hover .insp-ctx__chev,
+button.insp-ctx__row:focus-visible .insp-ctx__chev,
+button.insp-ctx__row[aria-expanded="true"] .insp-ctx__chev {
+  opacity: 1;
+}
+
+button.insp-ctx__row[aria-expanded="true"] .insp-ctx__chev {
+  transform: rotate(90deg);
+}
+
+.insp-ctx__sub > .insp-ctx__row {
+  color: var(--muted);
+}
+
+.insp-ctx__sub > .insp-ctx__row > .insp-cut {
+  padding-left: 12px;
+}
+
+.insp-ctx__stamp {
+  margin: 2px 0 0;
+  padding: 0 0 6px 68px;
+  color: var(--muted);
+  font-size: var(--t-xs);
+}
+
 /* 能指上去看补充的一段字：不画虚线，指到才说 */
 .insp-has-tip {
   min-width: 0;

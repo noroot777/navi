@@ -2,7 +2,8 @@
 // 以及会话号和 resume 命令。后三样以前是会话最后一条回复尾巴上的药丸，搬到这里以后取数
 // 照旧（会话行上的账本 + 会话流里最新那条气泡的直播值，见 infoRunFacts.ts），只是换成「标签 值」。
 // 每一回合各自烧了多少收在那一回合尾的「更多」菜单里（TurnActions）。
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { CaretRight } from "@phosphor-icons/react";
 import type { Session, Task, TokenUsage } from "@navi/shared";
 import { addUsage, formatTokens, formatTokensExact, hasContext, hasUsage, usageTotal } from "@navi/shared/usage";
 import { taskCreationLabel } from "@navi/shared/task-origin";
@@ -17,6 +18,8 @@ import { formatInstant, formatInstantRange, taskDurationInfo } from "../utils.ts
 import type { InfoRunFacts } from "./infoRunFacts.ts";
 import { RollingNumber } from "../../lib/motion/index.ts";
 import { InfoBranchRow } from "./InfoBranchRow.tsx";
+import { ContextBreakdownList, ContextSegmentBar, useContextBreakdownOpen } from "./ContextBreakdownRows.tsx";
+import { breakdownUsedShare } from "./contextBreakdownView.ts";
 
 /** 一段字，指上去 / 键盘走到再说一句补充（不用原生 title）。 */
 function Tipped({ tip, children, className = "" }: { tip: string; children: React.ReactNode; className?: string }) {
@@ -54,8 +57,11 @@ function UsageValue({ label, agentType, usage, wakes }: { label: string; agentTy
   );
 }
 
-/** 上下文那一行：一根细条从左往右涨，画已经用掉的那一截（剩到 15% 以下变红），右边是「压缩设置」——点开就是原来那颗胶囊的明细加快捷设置。 */
-function ContextValue({ facts }: { facts: InfoRunFacts }) {
+/**
+ * 上下文那一行：一根细条从左往右涨，画已经用掉的那一截（剩到 15% 以下变红），右边是「压缩设置」——点开就是原来那颗胶囊的明细加快捷设置。
+ * 有分项（claude）时细条按分项分色，细条连同「剩 X%」是一颗键，点开在这一行下面就地列出分项。
+ */
+function ContextValue({ facts, detail }: { facts: InfoRunFacts; detail?: { id: string; open: boolean; toggle: () => void } }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(true);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -71,18 +77,38 @@ function ContextValue({ facts }: { facts: InfoRunFacts }) {
   }
   const view = contextMeterView(context);
   const remain = view.remain;
-  return (
+  const low = remain !== null && remain <= 15;
+  const breakdown = detail ? facts.breakdown : null;
+  const meter = (
     <>
-      {remain !== null && (
-        <span className={`insp-bar${remain <= 15 ? " is-low" : ""}`} aria-hidden="true">
-          <i style={{ transform: `scaleX(${Math.min(1, Math.max(0, 1 - remain / 100))})` }} />
-        </span>
-      )}
-      <span className={facts.compacting ? "insp-live" : "insp-num"} aria-label={facts.compacting ? "正在压缩上下文" : view.spoken}>
+      {breakdown
+        ? <ContextSegmentBar breakdown={breakdown} fill={remain !== null ? 1 - remain / 100 : breakdownUsedShare(breakdown)} />
+        : remain !== null && (
+          <span className={`insp-bar${low ? " is-low" : ""}`} aria-hidden="true">
+            <i style={{ transform: `scaleX(${Math.min(1, Math.max(0, 1 - remain / 100))})` }} />
+          </span>
+        )}
+      <span className={facts.compacting ? "insp-live" : `insp-num${breakdown && low ? " is-low" : ""}`} aria-label={breakdown ? undefined : facts.compacting ? "正在压缩上下文" : view.spoken}>
         {facts.compacting
           ? "压缩中"
           : remain === null ? `已用 ${formatTokens(context.used)}` : `剩 ${view.approx}${remain}%`}
       </span>
+    </>
+  );
+  return (
+    <>
+      {breakdown && detail ? (
+        <button
+          type="button"
+          className="insp-val insp-ctx-toggle"
+          aria-expanded={detail.open}
+          aria-controls={detail.id}
+          aria-label={`${facts.compacting ? "正在压缩上下文" : view.spoken}，上下文分项`}
+          onClick={detail.toggle}
+        >
+          {meter}
+        </button>
+      ) : meter}
       <button
         ref={triggerRef}
         type="button"
@@ -104,6 +130,25 @@ function ContextValue({ facts }: { facts: InfoRunFacts }) {
         />,
         document.body,
       )}
+    </>
+  );
+}
+
+/** 上下文那一行，有分项时连同下面就地展开的分项列表。标签旁的小箭头指到这一行才出。 */
+function ContextRows({ facts }: { facts: InfoRunFacts }) {
+  const [open, toggle] = useContextBreakdownOpen();
+  const id = useId();
+  const breakdown = hasContext(facts.context) ? facts.breakdown : null;
+  if (!breakdown) return <InspRow label="上下文"><ContextValue facts={facts} /></InspRow>;
+  return (
+    <>
+      <InspRow
+        className={`insp-ctx-head${open ? " is-open" : ""}`}
+        label={<span className="insp-ctx-label">上下文<CaretRight size={10} className="insp-ctx-label__chev" aria-hidden="true" /></span>}
+      >
+        <ContextValue facts={facts} detail={{ id, open, toggle }} />
+      </InspRow>
+      <ContextBreakdownList id={id} breakdown={breakdown} open={open} />
     </>
   );
 }
@@ -153,9 +198,7 @@ export function InfoRunRows({ task, sessions, facts, notify }: {
           <UsageValue label={label} agentType={agentType} usage={usage} wakes={wakes} />
         </InspRow>
       ))}
-      {(hasContext(facts.context) || facts.compacting) && (
-        <InspRow label="上下文"><ContextValue facts={facts} /></InspRow>
-      )}
+      {(hasContext(facts.context) || facts.compacting) && <ContextRows facts={facts} />}
     </>
   );
 }
