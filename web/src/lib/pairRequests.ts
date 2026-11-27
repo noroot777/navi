@@ -2,41 +2,43 @@
 // 读的是同一份名单，不各读各的：各自读的话一边读成了、一边读失败，失败的那边就一直不知道。
 //
 // 名单只从服务端读（GET /remote-access/requests），什么都只是「该重读了」的信号：定时轮询、事件流上的 pair.requests
-// （申请递上来 / 被处理掉）、事件流连回来、页面回到可见、别处处理完申请（PAIR_REQUESTS_CHANGED_EVENT）。读失败就等
-// 下一次信号，轮询保证下一次一定会来。几次读前后脚发出时只认最新发出的那次：处理掉一张之前发出的读晚回来，会把它带回来。
+// （申请递上来 / 被处理掉）、事件流连回来、页面回到可见、别处处理完申请（PAIR_REQUESTS_CHANGED_EVENT）。读走单飞
+// （lib/coalescedReader.ts）：信号只会让在路上的那次读完再读一次，不会把它作废 —— 否则网络一慢，每个读回来的结果都
+// 已被下一轮轮询作废，名单永远不动。作废只在本页处理掉一张申请时（dropPairRequest）：那之前发出的读会把它带回来。
+// 读失败、超时就等下一次信号，轮询保证下一次一定会来。
 //
-// 每读成一次都告诉订阅方一遍，哪怕名单没变：通知那边靠它重试上一次没弹出去的。
+// 每读成一次都告诉订阅方一遍，哪怕名单没变：通知那边靠它重试上一次没弹出去的。名单带着读回的时刻，用的人自己判断
+// 它还新不新鲜。
 import type { PairRequestView } from "@navi/shared";
 import { authApi } from "./authApi.ts";
+import { coalescedReader, type CoalescedReader } from "./coalescedReader.ts";
 import { subscribeConnection, subscribeEvents } from "./events.ts";
 import { PAIR_REQUESTS_CHANGED_EVENT } from "./pairing.ts";
 
 const POLL_MS = 4_000;
 
+export interface PairRequestsSnapshot {
+  requests: PairRequestView[];
+  /** 读回（或本页改动）的时刻。 */
+  at: number;
+}
+
 type Listener = (requests: PairRequestView[]) => void;
 
 const listeners = new Set<Listener>();
-let current: PairRequestView[] | null = null;
-let epoch = 0;
+let current: PairRequestsSnapshot | null = null;
+let reader: CoalescedReader | null = null;
 let stopWatching: (() => void) | null = null;
 
-function publish(next: PairRequestView[]): void {
-  current = next;
-  for (const listener of listeners) listener(next);
-}
-
-async function reload(): Promise<void> {
-  const mine = ++epoch;
-  try {
-    const next = (await authApi.pairRequests()).requests;
-    if (mine === epoch && listeners.size) publish(next);
-  } catch {
-    // 读不到（正好断了、服务在重启）：下一次轮询或信号再读
-  }
+function publish(requests: PairRequestView[]): void {
+  current = { requests, at: Date.now() };
+  for (const listener of listeners) listener(requests);
 }
 
 function watch(): () => void {
-  const onReload = () => void reload();
+  const own = coalescedReader(() => authApi.pairRequests(), ({ requests }) => publish(requests));
+  reader = own;
+  const onReload = () => own.reload();
   const timer = window.setInterval(onReload, POLL_MS);
   const onVisible = () => { if (document.visibilityState === "visible") onReload(); };
   window.addEventListener(PAIR_REQUESTS_CHANGED_EVENT, onReload);
@@ -51,6 +53,8 @@ function watch(): () => void {
     connected = now;
   });
   return () => {
+    own.close();
+    reader = null;
     window.clearInterval(timer);
     window.removeEventListener(PAIR_REQUESTS_CHANGED_EVENT, onReload);
     document.removeEventListener("visibilitychange", onVisible);
@@ -62,26 +66,25 @@ function watch(): () => void {
 /** 订阅名单（没人订时不轮询）。已经读到过的，订上那一下先给一份。返回退订。 */
 export function subscribePairRequests(listener: Listener): () => void {
   listeners.add(listener);
-  if (current) listener(current);
+  if (current) listener(current.requests);
   stopWatching ??= watch();
-  void reload();
+  reader?.reload();
   return () => {
     listeners.delete(listener);
     if (listeners.size || !stopWatching) return;
     stopWatching();
     stopWatching = null;
     current = null;
-    epoch += 1;
   };
 }
 
-/** 此刻最新的名单（还没读到过是空的）。 */
-export function pairRequestsNow(): PairRequestView[] {
-  return current ?? [];
+/** 此刻最新的名单（还没读到过是 null）。 */
+export function pairRequestsNow(): PairRequestsSnapshot | null {
+  return current;
 }
 
-/** 这一张刚在本页处理掉：先从名单里拿掉，之前发出、还没回来的读一律作废（回来的是旧的）。 */
+/** 这一张刚在本页处理掉：先从名单里拿掉，之前发出、还没回来的读作废（回来的是旧的），读完再读一次。 */
 export function dropPairRequest(id: string): void {
-  epoch += 1;
-  if (current) publish(current.filter((request) => request.id !== id));
+  reader?.invalidate();
+  if (current) publish(current.requests.filter((request) => request.id !== id));
 }

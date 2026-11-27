@@ -95,7 +95,12 @@ export function viewedSomewhere(taskId: string): boolean {
   return watching().includes(taskId) || othersInFront().some((state) => state.tasks.includes(taskId));
 }
 
-/** 这台设备上有没有哪个页面此刻在前台（本页或别的页），不管它在看什么。 */
+/** 本页此刻在前台（可见、有焦点）。 */
+export function frontHere(): boolean {
+  return foreground();
+}
+
+/** 这台设备上有没有哪个页面此刻在前台（本页或别的页），不管它在看什么。别的页是它最近一次报的，可能已经过时。 */
 export function frontSomewhere(): boolean {
   return foreground() || othersInFront().length > 0;
 }
