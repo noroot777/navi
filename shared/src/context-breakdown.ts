@@ -28,7 +28,7 @@ export interface ContextBreakdownMcpServer {
 }
 
 export interface ContextBreakdown {
-  /** 取到这份分项的时刻。 */
+  /** 问这份分项的时刻(发出请求那一刻,不是回执到的那一刻):落库按它判新旧,界面按它说「几分钟前」。 */
   at: string;
   /** 它是哪一回合末取的(会话的 turnStartedAt);不知道是 null。 */
   turnStartedAt: string | null;

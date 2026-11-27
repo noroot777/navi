@@ -27,7 +27,7 @@ import { recordSessionUsageEvent, setSessionContext } from "../usage.js";
 import { consumeInbound } from "./inbound-queue.js";
 import { sendToLead } from "./lead-delivery.js";
 // 会话行的写入口(摘牌闸、失败只上报)住在 lead-session-writes.ts,见那份顶部。
-import { closeOwnSessionWithTurn, flushPendingCredential, ownRow, persistOrReport, updateOwnSession, type SessionPatch } from "./lead-session-writes.js";
+import { closeOwnSessionWithTurn, flushPendingCredential, noteContextBreakdown, ownRow, persistOrReport, updateOwnSession, type SessionPatch } from "./lead-session-writes.js";
 import type { PendingInbound } from "./inbound-queue.js";
 import {
   idleRotation,
@@ -42,7 +42,6 @@ import type { Lead } from "./session-types.js";
 import {
   flushSessionNotices,
   leadStallActions,
-  noteContextBreakdown,
   noteSessionNotice,
   publish,
   recordSystemTurn,

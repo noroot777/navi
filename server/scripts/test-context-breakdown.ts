@@ -2,8 +2,9 @@
 //   ① 回执 → 快照:分类原样、MCP 工具按服务聚合、方格画不留、认不出的形状给 null
 //   ② 控制请求的往返:请求号不撞打断那一路,报错 / 超时 / 进程没了都给 null、从不抛
 //   ③ 单飞收台:请求与关 stdin 同一刻写出,回执到了先吐分项再 done;CLI 不认、不理、先退了都照常收台,
-//      不多等(等的上限只给真卡住的那一种)
-//   ④ 落库覆盖式、带回合起点,读回来跟写进去的一样;坏 JSON 当没有
+//      不多等(等的上限只给真卡住的那一种);写 stdin 本身卡住也在同一个期限里
+//   ④ 落库覆盖式、带回合起点,读回来跟写进去的一样;只认更新的那份;坏 JSON 当没有
+//   ⑤ 调度台:乱序回执、被接管后旧台的回执都写不进去、也不广播
 // 对面是按 stream-json 说话的假 CLI 子进程,走真实的 ClaudeExecutor.attach → residentFromChild →
 // parseClaudeStream → singleRunFromResident。
 //   npm -w server run test:context-breakdown
@@ -134,14 +135,18 @@ const turn = [
   result,
 ];
 
-/** 假 CLI:吐完一个回合;收到控制请求按 `onControl` 回;`exitOnEof` 读到 EOF 就退;`exitAfterTurn` 回合说完就退。 */
-function stubCli(name: string, onControl: string, opts: { exitOnEof?: boolean; exitAfterTurn?: boolean } = {}) {
+type StubOpts = { exitOnEof?: boolean; exitAfterTurn?: boolean; jam?: boolean };
+/**
+ * 假 CLI:吐完一个回合;收到控制请求按 `onControl` 回;`exitOnEof` 读到 EOF 就退;`exitAfterTurn` 回合说完就退;
+ * `jam` 一个字都不读 stdin,测试先往管道里塞满 8 MiB —— 之后再写什么都卡在写队列里。
+ */
+function stubCli(name: string, onControl: string, opts: StubOpts = {}) {
   const script = join(root, `${name}.cjs`);
   writeFileSync(script, `
 const readline = require("node:readline");
 const emit = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 const reply = ${JSON.stringify(reply)};
-readline.createInterface({ input: process.stdin }).on("line", (raw) => {
+if (!${!!opts.jam}) readline.createInterface({ input: process.stdin }).on("line", (raw) => {
   const message = JSON.parse(raw);
   process.stderr.write("INPUT " + message.type + " " + (message.request ? message.request.subtype : "") + "\\n");
   if (message.type === "control_request") { ${onControl} }
@@ -151,13 +156,14 @@ if (${!!opts.exitAfterTurn}) process.stdout.write("", () => process.exit(0));
 setTimeout(() => process.exit(0), 20000);
 `);
   const child = spawn(process.execPath, [script], { stdio: ["pipe", "pipe", "pipe"] });
+  if (opts.jam) child.stdin.write(Buffer.alloc(8 * 1024 * 1024, 0x20));
   let stderr = "";
   child.stderr.on("data", (data) => { stderr += data.toString(); });
   return { child, stderr: () => stderr };
 }
 
 const executor = new ClaudeExecutor();
-async function runTurn(name: string, onControl: string, opts?: { exitOnEof?: boolean; exitAfterTurn?: boolean }) {
+async function runTurn(name: string, onControl: string, opts?: StubOpts) {
   const stub = stubCli(name, onControl, opts);
   const handle = executor.attach(stub.child, { sessionId: "sess-c", commandLine: "claude -p --input-format stream-json" });
   const started = Date.now();
@@ -202,6 +208,14 @@ const kinds = (events: AgentEvent[]) => events.map((event) => event.kind).filter
   console.log("✓ 卡住的 CLI:等满上限照常收台");
 }
 
+{
+  // 写进 stdin 就卡住(管道积压、CLI 不读输入):期限盖住整件事,不单独等写回调。
+  const { events, ms } = await runTurn("jammed", "", { jam: true });
+  assert.deepEqual(kinds(events), ["done"]);
+  assert.ok(ms < 8_000, `写卡住也在上限内收台(用了 ${ms}ms)`);
+  console.log("✓ 写 stdin 卡住:同一个期限内照常收台");
+}
+
 // ④ 落库
 {
   await db.insert(sessions).values({ id: "sess-row", taskId: "task-c", role: "single", agentType: "claude", executor: "claude", startedAt: AT });
@@ -213,9 +227,48 @@ const kinds = (events: AgentEvent[]) => events.map((event) => event.kind).filter
   const newer = { ...parsed, at: "2026-11-27T09:00:00.000Z", total: 1 };
   await usage.setSessionContextBreakdown("sess-row", newer, null);
   assert.deepEqual(await read(), { ...newer, turnStartedAt: null }, "覆盖不累加");
+  assert.equal(await usage.setSessionContextBreakdown("sess-row", { ...parsed, at: "2026-11-27T08:30:00.000Z", total: 2 }, null), false,
+    "比库里那份早问的不写");
+  assert.equal((await read())?.total, 1, "晚到的旧回执盖不掉新的");
   assert.equal(parseStoredContextBreakdown("{坏的"), null);
   assert.equal(parseStoredContextBreakdown(JSON.stringify({ at: AT, categories: [] })), null, "空表当没有");
   console.log("✓ 落库覆盖式、带回合起点;坏 JSON 当没有");
+}
+// ⑤ 调度台:回执乱序到、被接管之后旧台的回执到,都写不进去、也不广播
+{
+  const { noteContextBreakdown } = await import("../src/team/lead-session-writes.js");
+  const { bus } = await import("../src/bus.js");
+  await db.insert(sessions).values({ id: "lead-row", taskId: "task-lead", role: "lead", agentType: "claude", executor: "claude", startedAt: AT, leadHolder: "old" });
+  const broadcast: number[] = [];
+  const unsubscribe = bus.subscribe((event) => {
+    if (event.type === "agent.event" && event.event.kind === "contextBreakdown") broadcast.push(event.event.breakdown.total);
+  });
+  const pending: ((value: any) => void)[] = [];
+  const lead = {
+    taskId: "task-lead", sessId: "lead-row", holder: "old", retired: false, agentType: "claude", model: null, reasoningEffort: null, turnStart: null,
+    handle: { contextBreakdown: () => new Promise((resolve) => pending.push(resolve)) },
+  } as any;
+  const base = parseClaudeContextUsage(reply, AT)!;
+  const stored = async () => usage.sessionContextBreakdown((await db.select().from(sessions).where(eq(sessions.id, "lead-row")))[0]!);
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
+  noteContextBreakdown(lead, "turn-1");
+  noteContextBreakdown(lead, "turn-2");
+  pending[1]!({ ...base, at: "2026-11-27T08:02:00.000Z", total: 200 }); // 后问的先回
+  await settle();
+  pending[0]!({ ...base, at: "2026-11-27T08:01:00.000Z", total: 100 });
+  await settle();
+  assert.equal((await stored())?.total, 200, "先问的回执晚到,盖不掉后问的");
+  assert.deepEqual(broadcast, [200], "没写进去的不广播");
+
+  // 新台接管了这一行(代次换了),旧台手上还没收回来的回执到了:一笔都不写。
+  noteContextBreakdown(lead, "turn-3");
+  await db.update(sessions).set({ leadHolder: "new" }).where(eq(sessions.id, "lead-row"));
+  pending[2]!({ ...base, at: "2026-11-27T08:03:00.000Z", total: 300 });
+  await settle();
+  assert.equal((await stored())?.total, 200, "被接管之后旧台写不进去");
+  assert.deepEqual(broadcast, [200]);
+  unsubscribe();
+  console.log("✓ 调度台:乱序到的旧回执、被接管后旧台的回执都写不进去,也不广播");
 }
 clearInterval(keepAlive);
 process.exit(0);

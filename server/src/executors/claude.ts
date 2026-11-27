@@ -443,16 +443,15 @@ export class ClaudeExecutor implements AgentExecutor {
       },
       contextBreakdown: async (timeoutMs = CONTEXT_BREAKDOWN_TIMEOUT_MS) => {
         if (child.exitCode !== null || child.signalCode !== null) return null;
-        // 请求行在这一句同步段里就写进 stdin(writeChecked 的 write 不等 await),调用方紧接着关 stdin 也排在它后面。
+        // 快照的时刻记**发出请求**这一刻:落库按它判新旧(usage.ts setSessionContextBreakdown),回执先后不算数。
+        const requestedAt = new Date().toISOString();
+        // 期限从这一刻起算、盖住整件事:写进 stdin 要是卡住(管道积压、CLI 不读输入),等的也只是同一个
+        // 期限,不单独等写回调。请求行在这一句同步段里就写出去了(writeChecked 的 write 不等 await),
+        // 调用方紧接着关 stdin 也排在它后面;写失败当场了结。
         const query = resident.query(CONTEXT_BREAKDOWN_SUBTYPE, { detail: "summary" }, timeoutMs);
-        try {
-          await writeChecked(query.line);
-        } catch {
-          query.cancel();
-          return null;
-        }
+        writeChecked(query.line).catch(() => query.cancel());
         const reply = await query.reply;
-        return reply === null ? null : parseClaudeContextUsage(reply, new Date().toISOString());
+        return reply === null ? null : parseClaudeContextUsage(reply, requestedAt);
       },
       close: () => {
         child.stdin?.end();

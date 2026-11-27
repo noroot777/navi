@@ -278,14 +278,19 @@ export function useConversation(
         });
         refreshSessions();
       }
+      // 上下文分项只是会话行上的一份快照(回合末才到,常常晚过回合收口):重读会话行就够,不进正文组装 ——
+      // 进了就会在收过口的回合后面多出一颗空气泡。
+      if (event.type === "agent.event" && event.taskId === taskId && event.event.kind === "contextBreakdown") {
+        refreshSessions();
+        return;
+      }
       if (event.type === "agent.event" && event.taskId === taskId) {
         appendTimeline({
           kind: "server",
           id: createClientId(),
           event,
         });
-        // 上下文分项落在会话行上(回合末才到,排在 session 那一下之后),到了就重读一次。
-        if (event.event.kind === "session" || event.event.kind === "contextBreakdown") {
+        if (event.event.kind === "session") {
           refreshSessions();
         }
       }

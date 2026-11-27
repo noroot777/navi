@@ -458,7 +458,11 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
         }
         // 水位相反：**覆盖**。它属于整条会话的此刻，不属于某一个回合，所以也不进 trace。
         if (emittedEvent.kind === "context") await setSessionContext(sessId, emittedEvent.context);
-        if (emittedEvent.kind === "contextBreakdown") await setSessionContextBreakdown(sessId, emittedEvent.breakdown, a.turnStart);
+        // 分项同样覆盖式;库里已经有更新的那份就不写,也不广播(判据在 setSessionContextBreakdown)。
+        if (emittedEvent.kind === "contextBreakdown") {
+          if (await setSessionContextBreakdown(sessId, emittedEvent.breakdown, a.turnStart)) publishEvent(emittedEvent, record);
+          continue;
+        }
         publishEvent(emittedEvent, record);
       }
     }

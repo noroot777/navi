@@ -6,7 +6,8 @@ import { db } from "../db/index.js";
 import { sessions } from "../db/schema.js";
 import { recordTurnSpan } from "../session-turns.js";
 import { now } from "../util.js";
-import { reportLeadFailure } from "./lead-voice.js";
+import { publish, reportLeadFailure } from "./lead-voice.js";
+import { setSessionContextBreakdown } from "../usage.js";
 import type { Lead } from "./session-types.js";
 
 /** 跑一次写库;失败只上报不外抛,返回它成没成。**只能在 lead.out.end() 之前调**。 */
@@ -113,4 +114,20 @@ export async function flushPendingCredential(lead: Lead, leads: ReadonlyMap<stri
   const ok = await updateOwnSession(lead, "新会话凭据", patch);
   if (ok) lead.pendingCredential = null;
   return ok;
+}
+
+/**
+ * 回合末向调度台问一份上下文分项(../executors/claude-context-breakdown.ts),写进这台持有的那一行、写成了
+ * 才广播。不等、不抛:进程跨回合活着,回执晚到也收得到;取不到就什么都不留。入口那一眼 `retired` 只是
+ * 省一次写库,真正挡住旧台的是语句里的 `ownRow`,挡住晚到的旧回执的是语句里的新旧判断(见
+ * setSessionContextBreakdown)。
+ */
+export function noteContextBreakdown(lead: Lead, turnStartedAt: string | null): void {
+  if (!lead.handle.contextBreakdown) return;
+  void lead.handle.contextBreakdown().then(async (breakdown) => {
+    if (!breakdown || lead.retired) return;
+    if (await setSessionContextBreakdown(lead.sessId, breakdown, turnStartedAt, ownRow(lead))) {
+      publish(lead, { kind: "contextBreakdown", breakdown });
+    }
+  }).catch((error) => console.warn(`[navi] 调度台 ${lead.sessId} 的上下文分项没记上:`, error));
 }
