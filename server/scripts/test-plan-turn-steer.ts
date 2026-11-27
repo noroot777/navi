@@ -2,7 +2,7 @@
 // 任务执行结算，原话照样能原生插进同一条会话（runs.ts `planSteerTarget`）。真正的 CLI 原生命令
 // 回合（`/compact`）仍然不让引导；计划回合里要换执行器/模型的消息也不让（那只能硬切重起）。
 // 连带三件：能不能引导一变就让托盘重拉；引导之后计划回合里的提问照常挂上（不按方向分新旧）；
-// 重启接回的计划回合照样认得出来。
+// 重启接回的计划回合照样认得出来；引导没送进去时，原会话期间新问的那一问留着，身份照样回来。
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createWriteStream, mkdtempSync, rmSync } from "node:fs";
@@ -50,12 +50,13 @@ const refusal = async (messageId: string, taskId: string) => gate.steerRefusal(a
 const steerableOnTray = async (taskId: string, messageId: string) =>
   (await pendingWait.pendingMessagePresence(taskId, [{ ...await row(messageId), afterDone: false, afterEndedAt: null, afterWaitReason: null }])).at(0)!.steerable;
 
-await db.insert(tasks).values([task("plan"), task("compact"), task("plan-model"), task("plan-ask")]);
+await db.insert(tasks).values([task("plan"), task("compact"), task("plan-model"), task("plan-ask"), task("plan-fail")]);
 await db.insert(scheduledMessages).values([
   message("m-plan", "plan"),
   message("m-compact", "compact"),
   message("m-plan-model", "plan-model", { model: "claude-sonnet-5" }),
   message("m-plan-ask", "plan-ask"),
+  message("m-plan-fail", "plan-fail"),
 ]);
 const trayReloads: string[] = [];
 bus.subscribe((event) => { if (event.type === "task.pendingMessages") trayReloads.push(event.taskId); });
@@ -194,6 +195,66 @@ try {
     console.log("✓ 引导之后读到的提问照常挂上，这一轮不报错");
   }
 
+
+  // 引导在写出打断之前失败：原进程还活着、只认得旧方向身份。清场到回滚之间它问的那一问按回合
+  // 存下了 —— 回滚不能因为提问那格被占就连身份一起放弃，否则它之后交卷/暂停/再提问都被当成
+  // 过期方向拒掉（第 3 轮自由审查）。
+  {
+    const queue: AgentEvent[] = [];
+    let wake: (() => void) | null = null;
+    let ended = false;
+    const push = (event: AgentEvent) => { queue.push(event); wake?.(); wake = null; };
+    const resident: ResidentHandle = {
+      sessionId: "plan-fail-cli",
+      commandLine: "claude -p --permission-mode plan --permission-prompt-tool stdio --input-format stream-json",
+      events: (async function* () {
+        while (true) {
+          if (queue.length) { yield queue.shift()!; continue; }
+          if (ended) return;
+          await new Promise<void>((resolve) => { wake = resolve; });
+        }
+      })(),
+      send: () => true,
+      interrupt: () => {},
+      steer: async () => {
+        push({ kind: "userInput", questions: [{ question: "引导没送进去时原会话新问的", options: ["甲", "乙"] }] });
+        await waitFor(async () => (await taskRow("plan-fail")).question === "引导没送进去时原会话新问的", "期间的提问按回合存下");
+        throw new Error("模拟 interrupt 写出前失败");
+      },
+      close: () => { ended = true; wake?.(); },
+      kill: () => { ended = true; wake?.(); },
+    };
+    const handle = singleRunFromResident(resident);
+    const owner = runs.claimOwnTurn("plan-fail");
+    assert.ok(owner);
+    runs.reclaimTurn("plan-fail", owner, "side");
+    runs.trackRun("plan-fail", handle);
+    const out = createWriteStream(join(root, "plan-fail.md"));
+    const consuming = consumeSingleRun({
+      taskId: "plan-fail", sessId: "plan-fail-session", agentType: "claude",
+      ex: { model: null, reasoningEffort: null } as never, cwd: root, handle, out,
+      turnStart: at, cliSessionId: "plan-fail-cli", autoTitle: false,
+      nativeSteer: { record: () => {}, plan: true },
+    }).then(() => null, (error: unknown) => error);
+    await waitFor(() => !!runs.planSteerTarget("plan-fail"), "消费循环绑上计划回合的引导目标");
+
+    const failed = await steer.steerQueuedMessage("m-plan-fail");
+    assert.equal(failed.ok, false);
+    const after = await taskRow("plan-fail");
+    assert.equal(after.activeDirectionToken, "plan-fail-direction", "原会话的方向身份回来了");
+    assert.equal(after.activeTurnToken, "plan-fail-turn");
+    assert.equal(after.question, "引导没送进去时原会话新问的", "期间新问的那一问留着");
+    assert.equal((await row("m-plan-fail")).status, "pending", "消息继续排队");
+    // 用例到此为止：别让回合一放开就把它投递出去（那时库已经关了）。
+    await db.update(scheduledMessages).set({ status: "canceled" }).where(eq(scheduledMessages.id, "m-plan-fail"));
+
+    push({ kind: "turnEnd" });
+    assert.equal(await consuming, null);
+    runs.untrackRun("plan-fail", handle);
+    runs.releaseTurn("plan-fail", owner);
+    await new Promise<void>((resolve) => out.end(resolve));
+    console.log("✓ 引导没送进去时，原会话期间的提问留着，身份照样回来");
+  }
 
   // 重启接回：执行器从起跑命令认回计划回合。
   {
