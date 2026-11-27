@@ -2,7 +2,7 @@
 // 收起时那根分段细条每段多宽。纯函数，组件在 ContextBreakdownRows.tsx。
 import type { ContextBreakdown, ContextBreakdownCategory, ContextBreakdownMcpServer } from "@navi/shared";
 
-/** CLI 的类别名 → 配色键 + 中文名。认不出的原样显示名字、按 kind 落到通用色，不丢。 */
+/** CLI 的类别名 → 配色键 + 中文名。认不出的原样显示名字、按 kind 落到通用色，不丢（几项认不出的会共用一个配色键，节点身份用原名）。 */
 const KNOWN: Record<string, { key: string; label: string }> = {
   "System prompt": { key: "system-prompt", label: "系统提示" },
   "System tools": { key: "system-tools", label: "系统工具" },
@@ -48,10 +48,10 @@ export function breakdownRows(breakdown: ContextBreakdown): BreakdownRow[] {
  * 返回各段占「用掉那一截」的比例(加起来是 1)，那一截多长由调用方按此刻的水位定 —— 分项是回合末
  * 的快照，水位每次请求都在涨，整根条跟着水位走、只是按快照的比例分色。
  */
-export function usedSegments(breakdown: ContextBreakdown): { key: string; part: number }[] {
+export function usedSegments(breakdown: ContextBreakdown): { name: string; key: string; part: number }[] {
   const used = breakdownRows(breakdown).filter((row) => row.kind === "used" && row.tokens > 0);
   const total = used.reduce((sum, row) => sum + row.tokens, 0);
-  return total > 0 ? used.map((row) => ({ key: row.key, part: row.tokens / total })) : [];
+  return total > 0 ? used.map((row) => ({ name: row.name, key: row.key, part: row.tokens / total })) : [];
 }
 
 /** 用掉的那一截占窗口多少（水位没有窗口时，细条退回按快照画）。 */

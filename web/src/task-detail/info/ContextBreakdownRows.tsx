@@ -30,7 +30,7 @@ export function ContextSegmentBar({ breakdown, fill }: { breakdown: ContextBreak
     <span className="insp-bar is-split" aria-hidden="true">
       <span className="insp-bar__used" style={{ transform: `scaleX(${Math.min(1, Math.max(0, fill))})` }}>
         {usedSegments(breakdown).map((segment) => (
-          <i key={segment.key} data-ctx={segment.key} style={{ flexGrow: segment.part }} />
+          <i key={segment.name} data-ctx={segment.key} style={{ flexGrow: segment.part }} />
         ))}
       </span>
     </span>
