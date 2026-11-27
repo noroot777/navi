@@ -13,13 +13,7 @@ import "../styles/conversation-find.css";
 export type ConversationFinder = {
   /** 会话正文那一块：只用来判断它此刻在不在屏幕上。 */
   region: () => HTMLElement | null;
-  /**
-   * 这条会话**归谁**：焦点、点击落在哪里算「正在用这一条」。是整个会话那一块（`FIND_SCOPE`：
-   * 标题行、正文、回复框、duet 顶上的议题），不只是正文 —— 在侧聊回复框里按 ⌘F 查的得是侧聊。
-   * 查找条自己（浮着时）也算。
-   */
-  owns: (node: Node) => boolean;
-  /** 归属那一块的外沿，几条会话套在一起（团队里打开执行者抽屉）时用它挑最里面那一条。 */
+  /** 会话所在的那一块（`FIND_SCOPE` 标的元素），归属认它，见下面的 `claimed`。 */
   scope: () => Element | null;
   isOpen: () => boolean;
   open: () => void;
@@ -32,7 +26,20 @@ export type ConversationFinder = {
  * 留一个空位（`FIND_SLOT`），查找条就画进那里；只认离会话最近的那一块，那一块没留空位（侧聊那样
  * 窄的面板）就浮在会话右上角。空位平时是空的、不占地方，按了 ⌘F 才有东西。
  */
-export const FIND_SCOPE = { "data-conversation-find-scope": "" } as const;
+/**
+ * 「正在用哪条会话」认的是最近一次点击 / 聚焦落在**哪个会话的组件树**里，不是落在哪块 DOM 里。
+ *
+ * 会话自己的控件不一定画在它那块 DOM 里：侧聊的「换一场 / 新开一场」portal 进了面板头，换一场的
+ * 列表、悬停卡、选区动作条、各种选择器 portal 进了 body。按 DOM 包含关系认，点了这些再按 ⌘F 就
+ * 查到了别的会话（审查第 1、2 轮）。React 的合成事件沿组件树冒泡、穿过 portal 回到创建它的会话，
+ * 所以在会话那一块上挂捕获阶段的 pointerdown / focus：外层先、里层后，最后写下的就是最里面那一条。
+ * 窗口上的原生监听在它们之前先清空 —— 点到任何会话之外（设置、终端、编辑器），就谁也不归。
+ */
+let claimed: Element | null = null;
+const claim = (event: { currentTarget: EventTarget }) => {
+  if (event.currentTarget instanceof Element) claimed = event.currentTarget;
+};
+export const FIND_SCOPE = { "data-conversation-find-scope": "", onPointerDownCapture: claim, onFocusCapture: claim } as const;
 export const FIND_SLOT = { "data-conversation-find-slot": "" } as const;
 
 /** 会话所在的那一块；没标 `FIND_SCOPE` 的（夹具、零散面板）就是正文外面那一层。 */
@@ -50,7 +57,6 @@ export function findSlotFor(element: Element | null): HTMLElement | null {
 }
 
 const finders = new Set<ConversationFinder>();
-let lastPointer: EventTarget | null = null;
 
 const isMac = () => /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 
@@ -86,19 +92,23 @@ function pick(target: EventTarget | null): ConversationFinder | null {
     return [{ finder, region }];
   });
   if (!candidates.length) return null;
-  for (const anchor of [target, document.activeElement, lastPointer]) {
-    if (!(anchor instanceof Node)) continue;
-    // 套在一起的几条会话都认得这个点时，给最里面那一条（抽屉里的会话，不是抽屉外面那条）。
-    const owner = candidates
-      .filter(({ finder }) => finder.owns(anchor))
-      .reduce<ConversationFinder | null>((inner, { finder }) => {
-        const outer = inner?.scope();
-        const next = finder.scope();
-        return !inner || (outer && next && outer !== next && outer.contains(next)) ? finder : inner;
-      }, null);
-    if (owner) return owner;
+  const owner = claimed?.isConnected ? claimed : null;
+  if (owner) {
+    // 认领的那一块就是某条会话的：它此刻看不见（被盖住了）就让给浏览器，不拿别的会话顶上 ——
+    // 人在用的是它，查到别处只会看错。
+    const own = [...finders].find((finder) => finder.scope() === owner);
+    if (own) return candidates.some(({ finder }) => finder === own) ? own : null;
+    // 那一块里没挂会话（比如抽屉里的任务正开着审查）：退到 DOM 上套着它的那几条里最里面的一条。
+    const mine = candidates
+        .filter(({ finder }) => finder.scope()?.contains(owner))
+        .reduce<ConversationFinder | null>((inner, { finder }) => {
+          const outer = inner?.scope();
+          const next = finder.scope();
+          return !inner || (outer && next && outer !== next && outer.contains(next)) ? finder : inner;
+        }, null);
+    if (mine) return mine;
   }
-  // 焦点和最近一次点击都不在任何一条会话里：给占地方最大的那一条（主会话，而不是旁边的侧聊）。
+  // 最近一次点击 / 聚焦不在任何一条会话里：给占地方最大的那一条（主会话，而不是旁边的侧聊）。
   const area = (region: HTMLElement) => {
     const rect = region.getBoundingClientRect();
     return rect.width * rect.height;
@@ -131,20 +141,22 @@ function onKeyDown(event: KeyboardEvent) {
   }
 }
 
-const onPointerDown = (event: PointerEvent) => { lastPointer = event.target; };
+// 窗口捕获阶段先于 React 的根监听：每次点击 / 聚焦先清空，落在哪条会话的组件树里再由它认领。
+const release = () => { claimed = null; };
 
 export function registerConversationFinder(finder: ConversationFinder): () => void {
   if (!finders.size) {
     window.addEventListener("keydown", onKeyDown, true);
-    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("pointerdown", release, true);
+    window.addEventListener("focusin", release, true);
   }
   finders.add(finder);
   return () => {
     finders.delete(finder);
     if (finders.size) return;
     window.removeEventListener("keydown", onKeyDown, true);
-    window.removeEventListener("pointerdown", onPointerDown, true);
-    lastPointer = null;
+    window.removeEventListener("pointerdown", release, true);
+    window.removeEventListener("focusin", release, true);
   };
 }
 

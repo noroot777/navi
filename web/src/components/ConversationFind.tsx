@@ -12,6 +12,20 @@ const RECOUNT_GAP_MS = 200;
 /** 打开一层折叠之后等它画完再量：onToggle → 状态 → 重画是异步的，旧的 Range 可能已经作废。 */
 const UNFOLD_SETTLE_MS = 60;
 
+type Found = SearchOccurrence & { root: number };
+
+/**
+ * 当前那一处所在的文本节点被整段改写之后，认回「同一个节点里的第几处」。节点已经不在了（整条
+ * 回复换掉）就退到「同一块正文里、原位置往后的第一处」。
+ */
+function sameSpotInNode(before: Found, previousList: readonly Found[], list: readonly Found[]): number {
+  const node = before.range.startContainer;
+  const nth = previousList.filter((occurrence) => occurrence.range.startContainer === node && occurrence.start < before.start).length;
+  const inNode = list.flatMap((occurrence, index) => occurrence.range.startContainer === node ? [index] : []);
+  if (inNode.length) return inNode[Math.min(nth, inNode.length - 1)]!;
+  return list.findIndex((occurrence) => occurrence.root === before.root && occurrence.start >= before.start);
+}
+
 /** 一处出现在屏幕上的位置；在关着的折叠块里时，用最外层那块看得见的折叠条代替。 */
 const placeOf = (occurrence: SearchOccurrence) =>
   (occurrence.closed.at(-1) ?? occurrence.range).getBoundingClientRect();
@@ -48,7 +62,7 @@ export function ConversationFind({
   const restoreFocus = useRef<Element | null>(null);
   const composing = useRef(false);
   /** `root`：在第几块正文里（会话流、议题……），配合 `start` 在那一块全文里的位置认出「同一处」。 */
-  const found = useRef<(SearchOccurrence & { root: number })[]>([]);
+  const found = useRef<Found[]>([]);
   const current = useRef(-1);
   const owner = useRef({});
   const extras = useRef(extraRoots);
@@ -133,7 +147,8 @@ export function ConversationFind({
 
   /** 会话自己变了（新回复、折叠开合）：重数，当前那一处尽量不变，视口不动。 */
   const searchKeep = useCallback(() => {
-    const before = found.current[current.current];
+    const previousList = found.current;
+    const before = previousList[current.current];
     const previous = before?.range;
     const previousIndex = current.current;
     recount();
@@ -142,10 +157,10 @@ export function ConversationFind({
     if (before && previous && list.length) {
       // 旧的 Range 是活的：前面插进来新节点它跟着挪，认它最准。可它所在的文本节点被整段改写
       // （流式回复往同一个节点里续字，React 直接换 nodeValue）时，它会塌回节点开头 —— 再拿它比，
-      // 当前那一处就会跳回这一段里更早的一处。塌了就改认「同一块正文里、同一个位置往后的第一处」：
-      // 续字只往后长，前面的位置不变。
+      // 当前那一处就会跳回这一段里更早的一处。塌了的 Range 还留在**同一个文本节点**里，就改认
+      // 「这个节点里的第几处」：前面别的回复同时在长、全文偏移整体后移，也认得回来。
       index = previous.collapsed
-        ? list.findIndex((occurrence) => occurrence.root === before.root && occurrence.start >= before.start)
+        ? sameSpotInNode(before, previousList, list)
         : list.findIndex((occurrence) => {
           try {
             return occurrence.range.compareBoundaryPoints(Range.START_TO_START, previous) >= 0;
@@ -205,7 +220,6 @@ export function ConversationFind({
   useEffect(() => registerConversationFinder({
     region: () => scrollRef.current?.parentElement ?? scrollRef.current,
     scope: () => conversationScope(scrollRef.current),
-    owns: (node) => !!bar.current?.contains(node) || !!conversationScope(scrollRef.current)?.contains(node),
     isOpen: () => openRef.current,
     open: show,
     close,
@@ -227,19 +241,18 @@ export function ConversationFind({
       }, RECOUNT_GAP_MS);
     };
     const observer = new MutationObserver(schedule);
+    for (const root of roots()) observer.observe(root, { childList: true, subtree: true, characterData: true });
     // 手动开合折叠块只改 open，不动子节点：也得重数，那一块里的命中才会跟着标出来 / 收掉。
-    // toggle 不冒泡，在捕获阶段听。
-    const watched = roots();
-    for (const root of watched) {
-      observer.observe(root, { childList: true, subtree: true, characterData: true });
-      root.addEventListener("toggle", schedule, true);
-    }
+    // 在整块会话上听（toggle 不冒泡，走捕获）：折叠块可能套在正文外面 —— duet 的议题就整个装在
+    // 一个 `<details>` 里，只在正文上听，开合它谁也不知道。
+    const scope = conversationScope(scrollRef.current);
+    scope?.addEventListener("toggle", schedule, true);
     return () => {
       observer.disconnect();
-      for (const root of watched) root.removeEventListener("toggle", schedule, true);
+      scope?.removeEventListener("toggle", schedule, true);
       window.clearTimeout(timer);
     };
-  }, [open, query, roots, searchKeep]);
+  }, [open, query, roots, scrollRef, searchKeep]);
 
   const onChange = (value: string) => {
     setQuery(value);

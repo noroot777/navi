@@ -9,7 +9,7 @@
 //   · Esc 关掉、标记收掉、焦点还回去；
 //   · 页面上有好几条会话时交给正在用的那一条，同一时间只开一条；
 //   · 一条会话都不在屏幕上（卸下了、被整块盖住）就不拦，浏览器自己的查找照常出来；
-//   · 归属认整块会话：在侧聊回复框里按 ⌘F 查的是侧聊；⌘G 跟 ⌘F 同样判归属，焦点在代码编辑器、
+//   · 归属认会话的组件树：在侧聊回复框里、点了侧聊画在别处（portal）的控件后按 ⌘F，查的都是侧聊；⌘G 跟 ⌘F 同样判归属，焦点在代码编辑器、
 //     别的会话里时不抢（审查第 1 轮 #1、#2）；
 //   · 手动开合折叠块，标记跟着变；相邻两段拼不出假命中；流式续字时当前那一处不跳回前面；
 //   · 查找条平时不画；按了才停进标题行里留的空位、在右边那排图标的左边（用户 2026-11-27 指的位置），
@@ -143,6 +143,14 @@ try {
   await fold.locator("summary").click();
   await page.waitForFunction(() => CSS.highlights.get("conversation-find")?.size === 1, null, { timeout: WAIT_TIMEOUT_MS });
 
+  // 折叠块套在正文外面（duet 的议题整个装在 `<details>` 里）：手动打开它，里面的命中也跟着标出来。
+  await input.fill("议题专用词");
+  await count.filter({ hasText: "/2" }).waitFor({ timeout: WAIT_TIMEOUT_MS });
+  assert.equal((await marks()).others, 0, "议题关着，里面那一处先不标");
+  await page.getByTestId("topic").locator("summary").click();
+  await page.waitForFunction(() => CSS.highlights.get("conversation-find")?.size === 1, null, { timeout: WAIT_TIMEOUT_MS });
+  await page.getByTestId("topic").evaluate((node) => { node.open = false; });
+
   // 相邻两段的字不连着：「甲乙」「丙丁」拼不出「乙丙」。
   await input.fill("甲乙");
   await count.filter({ hasText: "1/1" }).waitFor({ timeout: WAIT_TIMEOUT_MS });
@@ -157,7 +165,11 @@ try {
     await afterFrames(page);
   }
   assert.equal(await count.textContent(), "2/3");
-  await page.evaluate(() => window.fixture.rewrite("stream", "续写词甲，续写词乙，续写词丙。续写词丁。"));
+  // 前面那条回复同时在长（全文偏移整体后移二十多个字），当前这条又被整段改写：照样认得回第二处。
+  await page.evaluate(() => window.fixture.rewrite({
+    leftover: "看了一眼残留进程，议题专用词也提了。后来又补了一大段说明，把整体的位置往后推了。",
+    stream: "续写词甲，续写词乙，续写词丙。续写词丁。",
+  }));
   await count.filter({ hasText: "/4" }).waitFor({ timeout: WAIT_TIMEOUT_MS });
   assert.equal(await count.textContent(), "2/4", "续字之后当前那一处还是第二个");
   assert.equal(await page.evaluate(() => {
@@ -240,6 +252,21 @@ try {
   await bar.waitFor({ state: "detached", timeout: WAIT_TIMEOUT_MS });
   await page.keyboard.press("Escape");
   await sideBar.waitFor({ state: "detached", timeout: WAIT_TIMEOUT_MS });
+
+  // 侧聊自己的控件画在侧聊那一块外面（portal 进面板头、portal 进 body）：点它、或焦点落在它上面，
+  // 再按 ⌘F 查的仍是侧聊（审查第 2 轮）。
+  for (const [via, act] of [
+    ["点面板头里侧聊的按钮", () => page.getByTestId("side-head-button").click()],
+    ["焦点落在 body 里侧聊的列表项上", () => page.getByTestId("side-list-item").focus()],
+  ]) {
+    await feed.click({ position: { x: 20, y: 20 } });
+    await act();
+    assert.equal(await pressFind(), true, via);
+    await sideBar.waitFor({ timeout: WAIT_TIMEOUT_MS });
+    assert.equal(await bar.count(), 0, `${via}：查的是侧聊，不是主会话`);
+    await page.keyboard.press("Escape");
+    await sideBar.waitFor({ state: "detached", timeout: WAIT_TIMEOUT_MS });
+  }
 
   // ⌘G 跟 ⌘F 同样判归属：主会话开着查找时，焦点去了代码编辑器 / 侧聊回复框，这对键不归主会话。
   await page.evaluate(() => {
