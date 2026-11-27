@@ -15,7 +15,7 @@ const POLL_MS = 4_000;
 // 不用像那边一样筛「新鲜」:申请只活十分钟,过期了服务端自己就不再给。
 //
 // 申请递上来、被处理掉时服务端在事件流上报一声(pair.requests):当场重读,顶条和设置页一起跟上;
-// 人不在页面跟前时那一声还会弹成系统通知(lib/systemNotify.ts)。轮询留着兜事件流断开的那段。
+// 人不在页面跟前时还会弹成系统通知(lib/pairNotify.ts)。轮询留着兜事件流断开的那段。
 export function DevicePairingAlert({ notify }: { notify: (message: string) => void }) {
   // 多人模式没有设备配对(那边每个人凭自己的 key 登录),本机自用模式连别的设备都连不进来。
   const multi = useIsMultiUser();
