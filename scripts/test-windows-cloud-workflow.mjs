@@ -113,21 +113,21 @@ try {
   {
     const runner = join(temporary, "runner-signing");
     mkdirSync(runner, { recursive: true });
-    const secret = "dW50cnVzdGVkIGNvbW1lbnQ6IHJzaWduIGVuY3J5cHRlZCBzZWNyZXQga2V5";
-    const seen = withSigningKey({ GH_TOKEN: "t", WIN_UPDATER_PRIVATE_KEY: `${secret}\n`, RUNNER_TEMP: runner, OTHER: "1" }, (key, childEnv) => {
+    const secret = "qmEowTREgXY+e/AalqZkEISl/ii8GuSd0B3U5b34z+M=";
+    const seen = withSigningKey({ GH_TOKEN: "t", MAC_SPARKLE_PRIVATE_KEY: `${secret}\n`, RUNNER_TEMP: runner, OTHER: "1" }, (key, childEnv) => {
       assert.equal(readFileSync(key, "utf8"), secret);
       if (process.platform !== "win32") assert.equal(statSync(key).mode & 0o777, 0o600);
-      assert.equal(childEnv.WIN_UPDATER_PRIVATE_KEY, undefined, "子进程环境里没有私钥");
+      assert.equal(childEnv.MAC_SPARKLE_PRIVATE_KEY, undefined, "子进程环境里没有私钥");
       assert.equal(childEnv.OTHER, "1");
       return key;
     });
     assert.ok(!existsSync(seen), "用完即删");
-    assert.throws(() => withSigningKey({ GH_TOKEN: "t", WIN_UPDATER_PRIVATE_KEY: secret, RUNNER_TEMP: runner }, (key) => { throw new Error(`boom ${existsSync(key)}`); }), /boom true/);
+    assert.throws(() => withSigningKey({ GH_TOKEN: "t", MAC_SPARKLE_PRIVATE_KEY: secret, RUNNER_TEMP: runner }, (key) => { throw new Error(`boom ${existsSync(key)}`); }), /boom true/);
     assert.ok(!existsSync(join(runner, "navi-win-signing")), "失败也删");
-    assert.throws(() => withSigningKey({ GH_TOKEN: "t", RUNNER_TEMP: runner }, () => {}), /WIN_UPDATER_PRIVATE_KEY/);
-    assert.throws(() => withSigningKey({ WIN_UPDATER_PRIVATE_KEY: secret, RUNNER_TEMP: runner }, () => {}), /WIN_RELEASE_TOKEN/);
+    assert.throws(() => withSigningKey({ GH_TOKEN: "t", RUNNER_TEMP: runner }, () => {}), /MAC_SPARKLE_PRIVATE_KEY/);
+    assert.throws(() => withSigningKey({ MAC_SPARKLE_PRIVATE_KEY: secret, RUNNER_TEMP: runner }, () => {}), /MAC_RELEASE_TOKEN/);
     assert.throws(() => publishBundle(join(temporary, "bundle"), { version: "0.1.0", source, runId: "77", publish: false }), /演练不执行公开发布/);
-    console.log("✓ 私钥落成 0600 临时文件、子进程环境里没有它、成功失败都删；缺 Secret 直接停；publish=false 不发布");
+    console.log("✓ 私钥（与 mac 共用的 Secret）落成 0600 临时文件、子进程环境里没有它、成功失败都删；缺 Secret 直接停；publish=false 不发布");
   }
 
   // ── 工作流文件 ────────────────────────────────────────────────────────
@@ -145,11 +145,12 @@ try {
     }
     assert.match(publish, /needs: build/);
     assert.match(publish, /if: inputs\.publish/);
-    assert.deepEqual([...new Set(build.match(/secrets\.\w+/g))].sort(), ["secrets.WIN_RELEASE_TOKEN", "secrets.WIN_UPDATER_PRIVATE_KEY"]);
-    assert.match(build, /RELEASE_READY: \$\{\{ secrets\.WIN_RELEASE_TOKEN != '' && secrets\.WIN_UPDATER_PRIVATE_KEY != '' \}\}/, "构建一步只看 Secret 配没配，拿不到它的值");
+    assert.deepEqual([...new Set(build.match(/secrets\.\w+/g))].sort(), ["secrets.MAC_RELEASE_TOKEN", "secrets.MAC_SPARKLE_PRIVATE_KEY"]);
+    assert.match(build, /RELEASE_READY: \$\{\{ secrets\.MAC_RELEASE_TOKEN != '' && secrets\.MAC_SPARKLE_PRIVATE_KEY != '' \}\}/, "构建一步只看 Secret 配没配，拿不到它的值");
     const signStep = publish.slice(publish.indexOf("cloud-workflow.mjs publish"));
-    assert.match(signStep, /WIN_UPDATER_PRIVATE_KEY: \$\{\{ secrets\.WIN_UPDATER_PRIVATE_KEY \}\}/);
-    assert.equal((publish.match(/secrets\.WIN_UPDATER_PRIVATE_KEY/g) ?? []).length, 1, "私钥只给签名发布那一步");
+    assert.match(signStep, /MAC_SPARKLE_PRIVATE_KEY: \$\{\{ secrets\.MAC_SPARKLE_PRIVATE_KEY \}\}/);
+    assert.equal((publish.match(/secrets\.MAC_SPARKLE_PRIVATE_KEY/g) ?? []).length, 1, "私钥只给签名发布那一步");
+    assert.doesNotMatch(publish, /tauri-cli|cargo/, "签名用 node，发布那一步不装 tauri-cli");
     assert.ok(build.indexOf("smoke-installer.mjs") > build.indexOf("cloud-workflow.mjs build"), "构建后先冒烟");
     assert.ok(build.indexOf("upload-artifact") > build.indexOf("smoke-installer.mjs"), "冒烟过了才存原包");
     assert.match(publish, /Require original installer[\s\S]*test "\$RESTORE" = true/, "发布只用存下来的原包");

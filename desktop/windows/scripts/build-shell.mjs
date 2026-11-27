@@ -26,7 +26,7 @@
 //   NAVI_WIN_BUILD_VERSION           这一次的版本号（缺省 shell/tauri.conf.json 的 version）
 //   NAVI_WIN_FEED_URL                更新清单地址（缺省按 release.json 指向 raw.githubusercontent 上的那份；http 只给本地演练）
 //   NAVI_WIN_UPDATER_PUBLIC_KEY      编进壳的更新公钥（缺省 release.json 的 publicKey；本地演练用临时那一把）
-//   NAVI_WIN_UPDATER_KEY_FILE        签名私钥文件，给了就给安装包出 .sig（密码在 NAVI_WIN_UPDATER_KEY_PASSWORD，缺省空）
+//   NAVI_WIN_UPDATER_KEY_FILE        签名私钥文件（base64 的 Ed25519 种子，见 minisign.mjs），给了就给安装包出 .sig
 //   NAVI_WIN_REHEARSAL_ENV           本地演练：一组编进 exe 的环境变量（JSON），见 README「本地演练」
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -34,6 +34,7 @@ import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readEnv } from "../../../scripts/env.mjs";
+import { signFile } from "./minisign.mjs";
 import { feedURL, installerName, readConfig, sourceVersion } from "./release-state.mjs";
 
 export const TAURI_CLI = "2.12.6";
@@ -110,21 +111,10 @@ function main() {
   for (const stale of [installer, `${installer}.sig`]) rmSync(stale, { force: true });
   cpSync(setup, installer);
   const key = readEnv(process.env, "NAVI_WIN_UPDATER_KEY_FILE");
-  if (key) sign(installer, version, key);
+  if (key) writeFileSync(`${installer}.sig`, signFile(installer, version, readFileSync(key, "utf8")));
   say(`✓ ${OUT}`);
   say(`  ${installerName(version)}  ${(statSync(installer).size / 1048576).toFixed(1)} MB${key ? "（已签名）" : ""}`);
   say("  Navi\\Navi.exe + runtime\\  便携版（壳旁边的运行时只是发布源，服务从 %LOCALAPPDATA%\\Navi\\runtimes\\<sha256>\\ 跑）");
-}
-
-/** 用 tauri-cli 给安装包出 minisign 签名（签名里绑版本号，壳开了 requireSignedVersion）。 */
-export function sign(file, version, keyFile, { password = readEnv(process.env, "NAVI_WIN_UPDATER_KEY_PASSWORD") || "", env } = {}) {
-  const cargoEnv = env ?? (process.platform === "win32" ? process.env : crossEnv());
-  const cargo = process.platform === "win32" ? "cargo" : join(cargoEnv.CARGO_HOME, "bin", "cargo");
-  const childEnv = { ...cargoEnv, TAURI_SIGNING_PRIVATE_KEY_PATH: keyFile, TAURI_SIGNING_PRIVATE_KEY_PASSWORD: password };
-  delete childEnv.TAURI_SIGNING_PRIVATE_KEY;
-  const result = spawnSync(cargo, ["tauri", "signer", "sign", "--app-version", version, file], { env: childEnv, encoding: "utf8" });
-  if (result.status !== 0 || !existsSync(`${file}.sig`)) throw new Error(`给 ${file} 签名失败（退出码 ${result.status ?? result.signal}）`);
-  return readFileSync(`${file}.sig`, "utf8").trim();
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

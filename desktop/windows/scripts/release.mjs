@@ -21,8 +21,7 @@ import { parseArgs } from "node:util";
 import { readEnv } from "../../../scripts/env.mjs";
 import { GitHub, NO_TOKEN_HINT, resolveToken } from "../../shared/release-github.mjs";
 import { ReleaseStop, confirmDownloadable, putOnRelease } from "../../shared/release-publish.mjs";
-import { sign } from "./build-shell.mjs";
-import { verifySignature } from "./minisign.mjs";
+import { signFile, verifySignature } from "./minisign.mjs";
 import { assertNewer, feedURL, installerName, parseFeed, readConfig, renderFeed, tagFor } from "./release-state.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -35,7 +34,7 @@ const say = (line) => process.stdout.write(`${line}\n`);
 const die = (line) => { throw new ReleaseStop(line); };
 const sha256 = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
 
-export async function release({ installer, version, commit, keyFile, notes, local, baseURL, github, signer = sign }) {
+export async function release({ installer, version, commit, keyFile, notes, local, baseURL, github, signer = (file, v, key) => signFile(file, v, readFileSync(key, "utf8")) }) {
   const config = readConfig(CONFIG_PATH);
   installer = resolve(installer);
   if (basename(installer) !== installerName(version)) die(`安装包该叫 ${installerName(version)}，不是 ${basename(installer)}`);

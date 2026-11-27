@@ -49,10 +49,10 @@ jobs:
       - name: Check publish configuration without exposing credentials
         if: inputs.publish
         env:
-          RELEASE_READY: ${{ secrets.WIN_RELEASE_TOKEN != '' && secrets.WIN_UPDATER_PRIVATE_KEY != '' }}
+          RELEASE_READY: ${{ secrets.MAC_RELEASE_TOKEN != '' && secrets.MAC_SPARKLE_PRIVATE_KEY != '' }}
         run: |
           if [ "$RELEASE_READY" != true ]; then
-            echo '配置 WIN_RELEASE_TOKEN 和 WIN_UPDATER_PRIVATE_KEY Secrets 后再公开发布。' >&2
+            echo '配置 MAC_RELEASE_TOKEN 和 MAC_SPARKLE_PRIVATE_KEY Secrets 后再公开发布（与 mac 版共用）。' >&2
             exit 1
           fi
       - name: Validate request and locate recovery artifact
@@ -159,25 +159,11 @@ jobs:
           path: ${{ runner.temp }}/navi-win-release/payload
       - name: Verify recovery artifact
         run: node desktop/windows/scripts/cloud-workflow.mjs restore
-      - name: Restore tauri-cli for signing
-        continue-on-error: true
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
-        with:
-          path: ~/.cargo/bin/cargo-tauri.exe
-          key: win-downloads-v1-${{ hashFiles('package-lock.json', 'desktop/windows/shell/Cargo.lock', 'desktop/windows/scripts/build-shell.mjs', 'desktop/shared/runtime-bundle.mjs') }}
-          restore-keys: |
-            win-downloads-v1-
-      - name: Install tauri-cli without release credentials
-        run: |
-          cli=$(node --input-type=module -e 'console.log((await import("./desktop/windows/scripts/build-shell.mjs")).TAURI_CLI)')
-          if ! cargo tauri --version 2>/dev/null | grep -qx "tauri-cli $cli"; then
-            cargo install --locked tauri-cli --version "=$cli"
-          fi
       - name: Sign, verify against release.json and publish release and update feed
         run: node desktop/windows/scripts/cloud-workflow.mjs publish
         env:
-          GH_TOKEN: ${{ secrets.WIN_RELEASE_TOKEN }}
-          WIN_UPDATER_PRIVATE_KEY: ${{ secrets.WIN_UPDATER_PRIVATE_KEY }}
+          GH_TOKEN: ${{ secrets.MAC_RELEASE_TOKEN }}
+          MAC_SPARKLE_PRIVATE_KEY: ${{ secrets.MAC_SPARKLE_PRIVATE_KEY }}
       - name: Remove temporary signing material
         if: always()
         run: rm -rf "$RUNNER_TEMP/navi-win-signing"

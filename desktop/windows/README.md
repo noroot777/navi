@@ -130,7 +130,7 @@ Tauri updater（`tauri-plugin-updater`，`shell/src/update.rs`）。托盘「检
 - **安装包**在 [noroot777/navi](https://github.com/noroot777/navi) 的 Release `navi-win-v<版本>` 上，`Navi-<版本>-x64-setup.exe`。新用户下载安装的、更新用的是同一个文件。
 - **更新清单**是素材库 [noroot777/materials](https://github.com/noroot777/materials) 的 `navi/win/latest.json`（Tauri 的静态 JSON：版本、说明、日期、`windows-x86_64` 的地址和签名），壳里编的是它在 raw.githubusercontent 上的地址。
 
-**只靠 updater 签名**（minisign，ed25519）：公钥在 `release.json` 的 `publicKey`，编进壳；私钥只在 GitHub Secret 里。签名的可信注释里带着版本号（`--app-version`，壳开了 `requireSignedVersion`），拿旧版的合法签名配新清单也装不上。公钥随第一版发出去后**永远不能换**：已装的壳只认它。
+**只靠 updater 签名**（minisign，ed25519）：公钥在 `release.json` 的 `publicKey`，编进壳；私钥只在 GitHub Secret 里。钥匙和 mac 版是同一把 Ed25519：`publicKey` 由 `desktop/macos/release.json` 的 `publicKey` 算出来（minisign 只是外面多包一层，key id 取公钥 BLAKE2b-512 的前 8 字节，见 `scripts/minisign.mjs`），签名用的就是 Sparkle 私钥，由 node 按 tauri-cli `signer sign` 的格式签，不再需要 tauri-cli 的签名命令。签名的可信注释里带着版本号（`--app-version`，壳开了 `requireSignedVersion`），拿旧版的合法签名配新清单也装不上。公钥随第一版发出去后**永远不能换**：已装的壳只认它。
 
 查到新版就问：「现在更新」「跳过这一版」「以后再说」，关掉对话框按「以后再说」算；跳过的版本记在 `settings.json` 的 `skippedVersion`，自动检查不再问它，手动检查照样摆出来。点了更新，窗口盖上下载进度，下完验签，壳把安装包以 `/P /UPDATE` 交给系统、自己退出，安装包装完重开 Navi。验签不过、下不下来就不装、说清楚，现在这一版照常用。查一次最多 30 秒，下载最多 15 分钟、300 MB。壳收到字节就报一次心跳（至多一秒一次，有总长度才带百分比，没有就报收到多少），一分半没收到一个字节、或者壳那边过了期限没回话，控制器就叫壳收掉那一趟；下载那一屏的「取消」走同一条路。取消由壳裁决（`updateCancel` → `updateCancelResult`，按请求号认人，和「下完去装」抢同一把锁）：它说收掉了，页面才回来；它说已经在装（或者壳先报了「进了安装」），那一屏就改成「正在安装」、不再有取消按钮。整趟只有一个最终期限，哪个阶段都消耗不掉：到点还在下就叫壳收掉，再过 30 秒的余量不管停在哪儿都收场；壳认过的结局说「没装上」，壳没答、或者一直停在「正在安装」说「结果不明」（安装程序可能还在跑；壳在它结束前不会开始第二次安装）。请求号带着这一代控制器的标识，控制器退出时壳收掉还在下的那一趟。下更新、换到新版服务、按新设置重启服务三件事互斥（都要占窗口那一屏、都要动服务），一件在做，另外两件说明是谁占着、不开始。
 
@@ -171,24 +171,17 @@ npm run release:win -- 0.1.0
 ### 一次性配置
 
 1. 把 `release-win.yml` 合进 GitHub 的 `main`、启用 Actions。
-2. `noroot777/navi → Settings → Secrets and variables → Actions` 加两项 Repository secrets：
+2. Secrets 和 mac 版共用，不另加（见 `desktop/macos/README.md`「发版」）：
 
-| 名称 | 内容与权限 |
+| 名称 | Windows 用它做什么 |
 |---|---|
-| `WIN_RELEASE_TOKEN` | fine-grained PAT，只选 `navi`、`materials`，Contents: Read and write；传安装包、提交更新清单共用。可以和 `MAC_RELEASE_TOKEN` 是同一张。 |
-| `WIN_UPDATER_PRIVATE_KEY` | updater 私钥文件的全文（`cargo tauri signer generate` 出的那一行 base64，空密码）。 |
+| `MAC_RELEASE_TOKEN` | 传安装包、提交更新清单（同样是 `navi`、`materials` 两个仓库的 Contents 写权限）。 |
+| `MAC_SPARKLE_PRIVATE_KEY` | updater 签名。Sparkle 导出的 32 字节种子就是 minisign 要的那把 Ed25519 私钥；旧版 Sparkle 的 96 字节私钥推不回种子，签不了。 |
 
 3. 本地要有 `navi` Actions 读写权限的凭证（查找顺序同 mac：`GH_TOKEN` / `GITHUB_TOKEN` → `gh auth token` → git 的 github.com 凭证）。
 4. 先在 Actions 里 **Release Windows → Run workflow** 选 main、填版本和完整 SHA、关掉 `publish` 做一次云端构建演练。
 
-`release.json` 里那把公钥对应的私钥在开发机的 `~/.config/navi/win-updater.key`（权限 600，仓库之外）。交接：
-
-```bash
-gh secret set WIN_UPDATER_PRIVATE_KEY -R noroot777/navi < ~/.config/navi/win-updater.key
-# 再把这个文件存进密码管理器做离线备份，然后删掉本机这份
-```
-
-私钥不进仓库、不进日志：云端只在发布那一步写成 `RUNNER_TEMP` 下 0600 的临时文件，成败都删，不进产物、缓存和子进程环境（`cloud-workflow.mjs` 的 `withSigningKey`）。丢了私钥就再也发不出已装用户认的更新，只能让他们手动装新公钥的版本。
+私钥不进仓库、不进日志：云端只在发布那一步写成 `RUNNER_TEMP` 下 0600 的临时文件，成败都删，不进产物、缓存和子进程环境（`cloud-workflow.mjs` 的 `withSigningKey`）。丢了私钥就再也发不出已装用户认的更新，只能让他们手动装新公钥的版本——而且 mac 和 Windows 一起丢，泄露也是两边一起失守。
 
 ### 云端与恢复
 
@@ -206,7 +199,7 @@ node desktop/windows/scripts/release.mjs --installer <安装包> --version <v> -
 
 ### 本地演练
 
-`scripts/drill-build.mjs` 在 mac 上交叉编一旧一新两版（0.0.1 → 0.0.2）、用一把临时密钥签、本地出更新清单；`remote-smoke.mjs --install` 把它们送到测试机，经 explorer 跑 `scripts/install-check.mjs`：
+`scripts/drill-build.mjs` 在 mac 上交叉编一旧一新两版（0.0.1 → 0.0.2）、用一把临时密钥（node 现生成的 Ed25519）签、本地出更新清单；`remote-smoke.mjs --install` 把它们送到测试机，经 explorer 跑 `scripts/install-check.mjs`：
 
 ```bash
 WIN_REMOTE_KEY=… node desktop/windows/scripts/drill-build.mjs          # → desktop/windows/build/drill/payload

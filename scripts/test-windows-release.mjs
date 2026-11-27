@@ -1,16 +1,17 @@
 // Windows 发版的那一头（desktop/windows/scripts/release-state.mjs、minisign.mjs、release.mjs，在 mac 上也跑）：
 //   · 版本号只改 tauri.conf.json 那一行；更新清单读写成 Tauri updater 的格式，认不出的不当成「还没发过」
 //   · 签名按 minisign 验（拿一份 tauri-cli 真签出来的样本钉住格式）：换了文件、换了钥匙、改了版本都验不过
+//   · 签名由 node 按 tauri-cli 的格式签，钥匙是 Sparkle 导出的那种 Ed25519 种子；release.json 的公钥就是 mac 那把算出来的
 //   · 发布：签名验不过 release.json 的公钥就什么都不传；包先进草稿、下回核对、公开、确认下得下来，最后才推清单；
 //     清单里已是同一版同一包时不重签不重传，同一版换了包拒发；清单提交不上时包已公开、说清重跑
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, randomBytes, sign as edSign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { parsePublicKey, verifySignature } from "../desktop/windows/scripts/minisign.mjs";
+import { minisignPublicKey, parsePublicKey, readSigningKey, signFile, verifySignature } from "../desktop/windows/scripts/minisign.mjs";
 import { assertNewer, installerName, parseFeed, renderFeed, sourceVersion, withVersion } from "../desktop/windows/scripts/release-state.mjs";
 import { buildConfig } from "../desktop/windows/scripts/build-shell.mjs";
 
@@ -24,20 +25,14 @@ const SAMPLE = {
   signature: "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSdkljUWs4RUpZOXdLMUh1R2VaQTlHVXJwTEZHSC9UZ04wcnlGOWRHQXVnU1M2aUxWRTM1c0NRc0owMTc1TmtLeVdzdlpsblF2WWVzNHc5cXRrVVEvZnBYSDdCOEpBcGdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NjIyMTI5CWZpbGU6Zi5leGUJdmVyc2lvbjowLjAuMgo1RW5JS3NNVTBTRE1oUmw2VloyTW5DR0R1OVJKc3lwZGJSV3RJeFBtcUU0blRzNTZXREp5ajV2SXVJMktsdXFOOFM5L214ZUFVOUV3RURJd0MxMW5BZz09Cg==",
 };
 
-/** 一把测试用的 minisign 钥匙：签法与 tauri-cli 相同（BLAKE2b-512 预哈希 + trusted comment 里带版本）。 */
+/** 一把测试用的钥匙，存成 Sparkle generate_keys -x 导出的样子（base64 的 32 字节种子），用发版脚本自己的签名函数签。 */
 function testKey() {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const id = randomBytes(8);
-  const raw = publicKey.export({ format: "der", type: "spki" }).subarray(12);
-  return {
-    publicKey: b64(`untrusted comment: minisign public key: test\n${b64(Buffer.concat([Buffer.from("Ed"), id, raw]))}\n`),
-    sign(file, version) {
-      const signature = edSign(null, createHash("blake2b512").update(readFileSync(file)).digest(), privateKey);
-      const trusted = `timestamp:1\tfile:${basename(file)}\tversion:${version}`;
-      const global = edSign(null, Buffer.concat([signature, Buffer.from(trusted)]), privateKey);
-      return b64(`untrusted comment: signature from tauri secret key\n${b64(Buffer.concat([Buffer.from("ED"), id, signature]))}\ntrusted comment: ${trusted}\n${b64(global)}\n`);
-    },
-  };
+  const seed = Buffer.from(privateKey.export({ format: "jwk" }).d, "base64url");
+  const raw = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url");
+  const file = join(temporary, `key-${randomBytes(4).toString("hex")}`);
+  writeFileSync(file, `${b64(seed)}\n`);
+  return { file, seed, raw, publicKey: minisignPublicKey(raw), sign: (target, version) => signFile(target, version, readFileSync(file, "utf8")) };
 }
 
 try {
@@ -87,6 +82,20 @@ try {
     writeFileSync(file, "MZ probe");
     assert.equal(verifySignature(readFileSync(file), other.sign(file, "1.0.0"), other.publicKey, { version: "1.0.0" }).version, "1.0.0");
     console.log("✓ minisign：tauri-cli 真签的样本验得过；换文件、换钥匙、改版本、改 trusted comment 都验不过");
+
+    const mac = JSON.parse(readFileSync(new URL("../desktop/macos/release.json", import.meta.url), "utf8"));
+    assert.equal(release.publicKey, minisignPublicKey(mac.publicKey), "Windows 的公钥就是 mac 那把 Ed25519 算出来的：私钥共用 MAC_SPARKLE_PRIVATE_KEY");
+    const signed = other.sign(file, "1.0.0");
+    const rows = Buffer.from(signed, "base64").toString().split("\n");
+    assert.equal(rows[0], Buffer.from(SAMPLE.signature, "base64").toString().split("\n")[0], "和 tauri-cli 出的签名同一个样子");
+    assert.match(rows[2], /^trusted comment: timestamp:\d+\tfile:probe\.exe\tversion:1\.0\.0$/);
+    assert.equal(verifySignature(readFileSync(file), signed, other.publicKey).keyId, parsePublicKey(other.publicKey).keyId, "key id 由公钥推出，签名和公钥对得上");
+    assert.equal(minisignPublicKey(other.raw), minisignPublicKey(b64(other.raw)), "同一把公钥永远算出同一份");
+    assert.ok(readSigningKey(b64(Buffer.concat([other.seed, other.raw]))).publicKey.equals(other.raw), "种子 + 公钥的 64 字节也认");
+    assert.throws(() => readSigningKey(b64(Buffer.concat([other.seed, randomBytes(32)]))), /对不上/);
+    assert.throws(() => readSigningKey(b64(randomBytes(96))), /96 字节/, "旧版 Sparkle 的展开私钥推不回种子，拒");
+    assert.throws(() => signFile(file, "1.0.0", Buffer.from(SAMPLE.publicKey, "base64").toString()), /字节/, "不是 Ed25519 种子就拒");
+    console.log("✓ 签名：node 按 tauri-cli 的格式签，钥匙是 Sparkle 导出的种子；release.json 的公钥由 mac 的公钥算出；旧版 96 字节私钥拒");
   }
 
   // ── 发布 ──────────────────────────────────────────────────────────────
@@ -114,7 +123,7 @@ try {
   {
     const local = join(temporary, "feed");
     const file = installer("0.0.1");
-    const out = await quiet(() => release({ installer: file, version: "0.0.1", keyFile: "unused", local, baseURL: "http://10.0.0.2:8000", signer: key.sign, notes: "演练" }));
+    const out = await quiet(() => release({ installer: file, version: "0.0.1", keyFile: key.file, local, baseURL: "http://10.0.0.2:8000", notes: "演练" }));
     assert.equal(out.url, "http://10.0.0.2:8000/Navi-0.0.1-x64-setup.exe");
     const feed = parseFeed(readFileSync(join(local, "latest.json"), "utf8"));
     assert.equal(feed.version, "0.0.1");

@@ -5,7 +5,8 @@
 //   build      从那个提交构建安装包，连同清单（版本、提交、sha256）放进 payload/，供下一步存成恢复产物
 //   restore    用保存下来的原始产物（重跑 / 发布那一步），核对清单和安装包的 sha256
 //   verify     核对产物：清单与参数一致、安装包是 PE 文件、大小与 sha256 对得上
-//   publish    签名并发布（只在 publish=true 的那一步、拿到 Secret 之后）：私钥落成 0600 的临时文件，用完即删
+//   publish    签名并发布（只在 publish=true 的那一步、拿到 Secret 之后）：私钥落成 0600 的临时文件，用完即删。
+//              Secret 和 mac 版共用：MAC_RELEASE_TOKEN 传包、提交清单，MAC_SPARKLE_PRIVATE_KEY 签名（同一把 Ed25519，见 minisign.mjs）
 //
 // 构建那一步拿不到发布 Secret（release-win.yml 里只给 publish 那一步），所以构建出来的包不经签名就先存成恢复产物；
 // 签名只签这一份原包，重跑发布时也是同一份 —— 重新构建出来的字节不一样，签名就和已公开的那个对不上了。
@@ -112,17 +113,16 @@ export function buildBundle(directory, request, { root = ROOT, build = true } = 
 }
 
 export function withSigningKey(env, operation) {
-  if (!env.GH_TOKEN?.trim()) throw new Error("缺少 WIN_RELEASE_TOKEN Secret");
-  if (!env.WIN_UPDATER_PRIVATE_KEY?.trim()) throw new Error("缺少 WIN_UPDATER_PRIVATE_KEY Secret");
+  if (!env.GH_TOKEN?.trim()) throw new Error("缺少 MAC_RELEASE_TOKEN Secret");
+  if (!env.MAC_SPARKLE_PRIVATE_KEY?.trim()) throw new Error("缺少 MAC_SPARKLE_PRIVATE_KEY Secret");
   const keyDirectory = join(env.RUNNER_TEMP, "navi-win-signing");
   mkdirSync(keyDirectory, { recursive: true, mode: 0o700 });
   const key = join(keyDirectory, "updater.key");
   try {
-    writeFileSync(key, env.WIN_UPDATER_PRIVATE_KEY.trim(), { mode: 0o600, flag: "wx" });
+    writeFileSync(key, env.MAC_SPARKLE_PRIVATE_KEY.trim(), { mode: 0o600, flag: "wx" });
     const childEnv = { ...env };
-    delete childEnv.WIN_UPDATER_PRIVATE_KEY;
-    delete childEnv.WIN_UPDATER_KEY_PASSWORD;
-    return operation(key, childEnv, env.WIN_UPDATER_KEY_PASSWORD ?? "");
+    delete childEnv.MAC_SPARKLE_PRIVATE_KEY;
+    return operation(key, childEnv);
   } finally {
     rmSync(keyDirectory, { recursive: true, force: true });
   }
@@ -131,10 +131,10 @@ export function withSigningKey(env, operation) {
 export function publishBundle(directory, request, { env = process.env } = {}) {
   assert.equal(request.publish, true, "演练不执行公开发布");
   const { installer, manifest } = verifyBundle(directory, request);
-  return withSigningKey(env, (key, childEnv, password) => run(process.execPath, [
+  return withSigningKey(env, (key, childEnv) => run(process.execPath, [
     join(ROOT, "desktop/windows/scripts/release.mjs"),
     "--installer", installer, "--version", manifest.version, "--commit", manifest.source, "--key-file", key,
-  ], { env: { ...childEnv, NAVI_WIN_UPDATER_KEY_PASSWORD: password }, stdio: "inherit" }));
+  ], { env: childEnv, stdio: "inherit" }));
 }
 
 async function main() {

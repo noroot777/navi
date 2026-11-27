@@ -13,14 +13,14 @@
 //   · 两版的自带运行时内容不同（0.0.2 那份多一个标记文件、重新封清单），这样装了新版才真有「换运行时」可演练。
 // <id> 现在定下（测试机上的根目录名也编进了安装包），写在 payload\drill.json 里，remote-smoke 按它记账、收尾。
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_HOST, rexec } from "../../../scripts/win-remote/transport.mjs";
 import { sealRuntime } from "../../shared/runtime-store.mjs";
-import { crossEnv } from "./build-shell.mjs";
+import { minisignPublicKey } from "./minisign.mjs";
 import { remoteRootName } from "./remote-scratch.mjs";
 import { installerName } from "./release-state.mjs";
 
@@ -64,10 +64,10 @@ try {
   }
 
   // ── 临时更新钥匙 ──
-  const env = crossEnv();
+  const pair = generateKeyPairSync("ed25519");
   const key = join(keys, "drill.key");
-  run(join(env.CARGO_HOME, "bin", "cargo"), ["tauri", "signer", "generate", "--ci", "-p", "", "-w", key], { env, stdio: ["ignore", "ignore", "inherit"] });
-  const publicKey = readFileSync(`${key}.pub`, "utf8").trim();
+  writeFileSync(key, Buffer.from(pair.privateKey.export({ format: "jwk" }).d, "base64url").toString("base64"), { mode: 0o600 });
+  const publicKey = minisignPublicKey(Buffer.from(pair.publicKey.export({ format: "jwk" }).x, "base64url"));
 
   // ── 两版安装包 ──
   const rehearsal = JSON.stringify({
@@ -88,7 +88,7 @@ try {
   // ── 本地更新源：新版按临时私钥签、用临时公钥验过 ──
   run(process.execPath, [join(HERE, "release.mjs"), "--installer", join(payload, installerName(TO)), "--version", TO, "--key-file", key,
     "--local", join(payload, "feed"), "--base-url", `http://127.0.0.1:${FEED_PORT}/`, "--notes", "真机演练：只换壳，服务和终端不停。"], {
-    env: { ...process.env, ...env, NAVI_WIN_UPDATER_PUBLIC_KEY: publicKey },
+    env: { ...process.env, NAVI_WIN_UPDATER_PUBLIC_KEY: publicKey },
   });
   writeFileSync(join(payload, "drill.json"), `${JSON.stringify({ id, root, port: PORT, feedPort: FEED_PORT, from: FROM, to: TO }, null, 2)}\n`);
   say(`✓ ${payload}`);
