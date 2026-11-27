@@ -161,34 +161,65 @@ try {
     console.log("✓ 不认 / stdin 关了 / 进程没了：都是 null，从不抛");
   }
 
-  // ⑥ 等分项的那几秒里换了回合（CLI 自己开的，或者插话直接送进去）：这个结尾作废，不收台、不报结束、
-  //    分项不要，接着读流，新回合的结尾再收台；等的时候插话照收，不拒。
-  for (const how of ["cli", "steer"] as const) {
+  // ⑥ 一决定收台就不再收插话：等分项的那几秒里插话当场拒收、一个字不送（留在队列里由下一回合送）。
+  {
+    let sent = 0;
+    let rejected: unknown = null;
+    const fake = {
+      sessionId: "closing", commandLine: "x", launchCompact: null,
+      events: (async function* () { yield { kind: "turnEnd", epoch: 0 } as AgentEvent; })(),
+      epoch: () => 0, turnActive: () => false,
+      contextBreakdown: async () => {
+        await run.steer!("插一句").catch((error) => { rejected = error; });
+        return contextBreakdownFromClaude(USAGE, "t");
+      },
+      send: () => { sent += 1; return true; },
+      close: () => {}, kill: () => {}, interrupt: () => {},
+      cleanup: async () => ({ kind: "empty" }),
+    } as unknown as ResidentHandle;
+    const run = singleRunFromResident(fake);
+    const seen: string[] = [];
+    for await (const event of run.events) seen.push(event.kind);
+    assert.match(String(rejected), /当前回合已经结束/, "等分项时插话当场拒收");
+    assert.equal(sent, 0, "一个字都没送进去");
+    assert.deepEqual(seen, ["contextBreakdown", "done"]);
+  }
+  console.log("✓ 决定收台后插话当场拒收，不跟收台抢");
+
+  // ⑥b 等分项的那几秒里 CLI 自己开了下一回合（完成通知到了）：这个结尾作废，不收台、分项不要，重新收插话，
+  //     新回合结尾再问一次分项再收台。
+  {
     let epoch = 0;
     let active = false;
     let closed = false;
     let release: () => void = () => {};
     const nextTurn = new Promise<void>((resolve) => { release = resolve; });
+    let asks = 0;
+    let steerDuringNewTurn: Promise<void> | undefined;
     const fake = {
       sessionId: "race", commandLine: "race", launchCompact: null,
       events: (async function* () {
         yield { kind: "turnEnd", epoch: 0 } as AgentEvent;
         await nextTurn;
         yield { kind: "text", text: "新回合在干活" } as AgentEvent;
+        yield { kind: "turnEnd", interrupted: true } as AgentEvent; // 插话打断出来的那个结尾
         active = false;
-        yield { kind: "turnEnd", epoch: 1 } as AgentEvent;
+        yield { kind: "turnEnd", epoch: 2 } as AgentEvent;
       })(),
       epoch: () => epoch,
       turnActive: () => active,
       contextBreakdown: async () => {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        if (how === "cli") { epoch = 1; active = true; }
-        else await run.steer!("插一句");
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        release();
+        asks += 1;
+        if (asks === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          epoch = 1;
+          active = true;
+          release();
+        }
         return contextBreakdownFromClaude(USAGE, "t");
       },
-      send: () => { epoch = 1; active = true; return true; },
+      steer: async (_text: unknown, onInterrupted?: () => void) => { onInterrupted?.(); epoch = 2; },
+      send: () => true,
       close: () => { closed = true; },
       kill: () => {}, interrupt: () => {},
       cleanup: async () => ({ kind: "empty" }),
@@ -198,13 +229,18 @@ try {
     let closedBeforeNewTurnEnded = false;
     for await (const event of run.events) {
       seen.push(event.kind);
-      if (event.kind === "text") closedBeforeNewTurnEnded = closed;
+      if (event.kind === "text") {
+        closedBeforeNewTurnEnded = closed;
+        steerDuringNewTurn = run.steer!("新回合里插一句");
+      }
     }
-    assert.equal(closedBeforeNewTurnEnded, false, `${how}：新回合在干活时没被收台`);
-    assert.deepEqual(seen, ["text", "contextBreakdown", "done"], `${how}：旧结尾的分项不要，新回合结尾照常问一次再收台`);
+    await steerDuringNewTurn;
+    assert.equal(closedBeforeNewTurnEnded, false, "新回合在干活时没被收台");
+    assert.deepEqual(seen, ["text", "contextBreakdown", "done"], "旧结尾的分项不要，新回合结尾照常问一次再收台");
+    assert.equal(asks, 2);
     assert.equal(closed, true);
   }
-  console.log("✓ 等分项时换了回合：不截断新回合，插话照收，新回合结尾再收台");
+  console.log("✓ 等分项时 CLI 开了新回合：不截断，重新收插话，新回合结尾再收台");
 
   // ⑦ 收台的授权与收台同一步：消费方拿到分项后去写库（慢），那时 stdin 已经关了，不会是先交分项、
   //    等写库的空档里再凭旧核对收台。
@@ -226,77 +262,7 @@ try {
     assert.deepEqual(seen, [["contextBreakdown", true], ["done", true]], "先关 stdin，再交分项和结束");
   }
 
-  // ⑧ 插话已经收下、还在准备正文时分项先回来了：等它送完（开了新回合），不收台、不让它送进一个关掉的 stdin。
-  {
-    let epoch = 0;
-    let active = false;
-    let closed = false;
-    let sentWhileClosed: boolean | null = null;
-    let steered: Promise<void> | undefined;
-    let release: () => void = () => {};
-    const nextTurn = new Promise<void>((resolve) => { release = resolve; });
-    const fake = {
-      sessionId: "pending-steer", commandLine: "x", launchCompact: null,
-      events: (async function* () {
-        yield { kind: "turnEnd", epoch: 0 } as AgentEvent;
-        await nextTurn;
-        active = false;
-        yield { kind: "turnEnd", epoch: 1 } as AgentEvent;
-      })(),
-      epoch: () => epoch,
-      turnActive: () => active,
-      contextBreakdown: async () => {
-        // 等分项时插话进来，准备正文要 50ms，分项 10ms 就回来了。
-        steered = run.steer!("插一句", () => new Promise((resolve) => setTimeout(resolve, 50)));
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        return contextBreakdownFromClaude(USAGE, "t");
-      },
-      send: () => { sentWhileClosed = closed; epoch = 1; active = true; release(); return true; },
-      close: () => { closed = true; },
-      kill: () => {}, interrupt: () => {},
-      cleanup: async () => ({ kind: "empty" }),
-    } as unknown as ResidentHandle;
-    const run = singleRunFromResident(fake);
-    const seen: string[] = [];
-    for await (const event of run.events) seen.push(event.kind);
-    await steered;
-    assert.equal(sentWhileClosed, false, "插话在 stdin 关之前送了进去");
-    assert.deepEqual(seen, ["contextBreakdown", "done"], "旧结尾作废，新回合结尾才收台");
-    assert.equal(closed, true);
-  }
-  console.log("✓ 收台与最后一次核对同一步：先关 stdin 再交分项；在途插话先落地");
-
-  // ⑨ 等在途插话有终点：停止当场放行；准备一直不完就到点收台，那条插话发送失败（投递层退回排队）。
-  for (const how of ["kill", "deadline"] as const) {
-    let closed = false;
-    let releasePrep: () => void = () => {};
-    const prep = new Promise<void>((resolve) => { releasePrep = resolve; });
-    let steered: Promise<void> | undefined;
-    const fake = {
-      sessionId: `stuck-${how}`, commandLine: "x", launchCompact: null,
-      events: (async function* () { yield { kind: "turnEnd", epoch: 0 } as AgentEvent; })(),
-      epoch: () => 0, turnActive: () => false,
-      contextBreakdown: async () => {
-        steered = run.steer!("插一句", () => prep);
-        if (how === "kill") setTimeout(() => run.kill(), 30);
-        return null;
-      },
-      send: () => !closed,
-      close: () => { closed = true; }, kill: () => {}, interrupt: () => {},
-      cleanup: async () => ({ kind: "empty" }),
-    } as unknown as ResidentHandle;
-    const run = singleRunFromResident(fake, undefined, undefined, undefined, 200);
-    const started = Date.now();
-    const seen: string[] = [];
-    for await (const event of run.events) seen.push(event.kind);
-    const ms = Date.now() - started;
-    assert.deepEqual(seen, ["done"]);
-    assert.equal(closed, true);
-    assert.ok(how === "kill" ? ms < 150 : ms >= 190 && ms < 1_000, `${how}：${ms}ms 收台`);
-    releasePrep();
-    await assert.rejects(steered!, /没收下/, `${how}：迟到的插话送不进关掉的 stdin，交回投递层`);
-  }
-  console.log("✓ 等在途插话有终点：停止当场放行，准备不完到点收台、迟到的插话交回投递层");
+  console.log("✓ 先关 stdin 再交分项和结束");
 
   // ⑤ 两头的解析：回包缺分项表或窗口就当没取到；落库那份读回来一致，坏的当没有。
   {
