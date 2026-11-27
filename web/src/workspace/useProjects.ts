@@ -14,6 +14,8 @@ import { useCatchUp, useCatchUpLink } from "../lib/useCatchUp.ts";
 // 本页自己写项目（保存设置、新建、删除）走 `apply`（排序走 `commit`，见那里）：照写，然后补排一趟读取。写入那一刻还在途的
 // 那一发不再作数（它可能早于这次写入），由补排的那一趟接上。`setLocal` 只给不该触发重读的
 // 派生字段（项目体检）用。
+type Save = { request: () => Promise<unknown>; onError: (reason: unknown) => void };
+
 export function useProjects(onFirstLoad: (rows: ProjectView[]) => void) {
   const [projects, setProjects] = useState<ProjectView[]>([]);
   const [ready, setReady] = useState(false);
@@ -22,6 +24,7 @@ export function useProjects(onFirstLoad: (rows: ProjectView[]) => void) {
   const [lagging, setLagging] = useState(false);
   const loaded = useRef(false);
   const writes = useRef(0);
+  const saving = useRef<{ running: boolean; next: Save | null }>({ running: false, next: null });
   const onFirstLoadRef = useRef(onFirstLoad);
   onFirstLoadRef.current = onFirstLoad;
 
@@ -29,7 +32,8 @@ export function useProjects(onFirstLoad: (rows: ProjectView[]) => void) {
     const writesAtStart = writes.current;
     try {
       const rows = await api.projects(signal);
-      if (writes.current !== writesAtStart) return true;
+      // 本页有写入还没落地（saving），读到的可能早于它；或者读的途中本页写过：都不作数，由写入收尾那一趟接上。
+      if (saving.current.running || writes.current !== writesAtStart) return true;
       setProjects(rows);
       setError(null);
       setLagging(false);
@@ -61,17 +65,30 @@ export function useProjects(onFirstLoad: (rows: ProjectView[]) => void) {
     setProjects(update);
     void catchUp.run();
   }, [catchUp]);
-  // 先照写、等请求落地再读：`apply` 那趟读会跟请求赛跑，跑赢了就把旧顺序读回来闪一下。
-  // 请求在途期间起的读在两次计数之间，落地时一律作废，由收尾那一趟接上；请求失败也靠它读回真值。
-  const commit = useCallback(async (update: SetStateAction<ProjectView[]>, request: () => Promise<unknown>) => {
+  // 整份写入（项目先后）：页面先照写，请求排成一条队、同一时刻只有一发在途；在途时再来的只留最新一份，
+  // 前一发落地再发它。整份顺序在服务端按到达先后覆盖，并发发出去就成了「谁晚到谁算数」—— 网络一慢，
+  // 先发的旧意图晚到，就把最后一次调整盖掉。队排空之后才重读一次对账（失败也靠它读回真值），
+  // 排着队的这段时间里读回来的一律不作数（见 read）。
+  const commit = useCallback((update: SetStateAction<ProjectView[]>, request: () => Promise<unknown>, onError: (reason: unknown) => void) => {
     writes.current += 1;
     setProjects(update);
-    try {
-      await request();
-    } finally {
+    const lane = saving.current;
+    lane.next = { request, onError };
+    if (lane.running) return;
+    lane.running = true;
+    void (async () => {
+      for (let save = lane.next; save; save = lane.next) {
+        lane.next = null;
+        try {
+          await save.request();
+        } catch (reason) {
+          save.onError(reason);
+        }
+      }
+      lane.running = false;
       writes.current += 1;
       void catchUp.run();
-    }
+    })();
   }, [catchUp]);
   return { projects, ready, error, lagging, apply, commit, setLocal: setProjects };
 }

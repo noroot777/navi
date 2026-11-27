@@ -164,8 +164,8 @@ export function WorkspaceShell() {
   const reorderProjects = useCallback((projectIds: string[]) => {
     const rank = new Map(projectIds.map((id, index) => [id, index]));
     const sorted = (rows: ProjectView[]) => [...rows].sort((a, b) => (rank.get(a.id) ?? rank.size) - (rank.get(b.id) ?? rank.size));
-    commitProjects(sorted, () => api.reorderProjects(projectIds))
-      .catch((error) => notify(error instanceof Error ? `项目顺序没存上：${error.message}` : "项目顺序没存上"));
+    commitProjects(sorted, () => api.reorderProjects(projectIds),
+      (error) => notify(error instanceof Error ? `项目顺序没存上：${error.message}` : "项目顺序没存上"));
   }, [commitProjects, notify]);
   const terminal = useTerminalDock({ project: currentProject, enabled: canUseTerminal, notify });
   const remoteReturns = useRemoteReturns(notify);

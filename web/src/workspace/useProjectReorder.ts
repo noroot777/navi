@@ -10,7 +10,9 @@ const DRAG_THRESHOLD = 4;
 const EDGE = 28;
 const EDGE_STEP = 8;
 
-type Pending = { id: string; pointerId: number; startY: number };
+// 一次按下到松手是一个手势。`dragged`：这次挪过阈值、已经算拖了 —— 拖动被 Esc 撤销之后手势还没完，
+// 剩下的移动不再接着拖，松手时那一下 click 照样得吞掉（它是拖动的收尾，不是点选）。
+type Gesture = { id: string; pointerId: number; startY: number; dragged: boolean };
 
 export function useProjectReorder({
   ids,
@@ -25,20 +27,31 @@ export function useProjectReorder({
 }) {
   const [draft, setDraft] = useState<string[] | null>(null);
   const [dragging, setDragging] = useState<string | null>(null);
-  const pending = useRef<Pending | null>(null);
+  const gesture = useRef<Gesture | null>(null);
   const draftRef = useRef<string[] | null>(null);
   const pointerY = useRef(0);
   // 拖完松手时指针底下那一行会收到一次 click，不能把它当成「切到这个项目」。
   const swallowClick = useRef(false);
 
-  const stop = useCallback(() => {
-    pending.current = null;
+  // 撤掉这一次拖动排出来的顺序。手势本身留着到松手（只有没拖过的才直接丢）。
+  const abort = useCallback(() => {
+    if (gesture.current && !gesture.current.dragged) gesture.current = null;
     draftRef.current = null;
     setDraft(null);
     setDragging(null);
   }, []);
 
-  useEffect(() => { if (!enabled) stop(); }, [enabled, stop]);
+  // 手势结束：拖过的（放下的也好、撤销的也好）吞掉随后那一下 click。
+  const finish = useCallback(() => {
+    const ended = gesture.current;
+    gesture.current = null;
+    abort();
+    if (!ended?.dragged) return;
+    swallowClick.current = true;
+    window.setTimeout(() => { swallowClick.current = false; }, 0);
+  }, [abort]);
+
+  useEffect(() => { if (!enabled) abort(); }, [enabled, abort]);
 
   // 指针落在哪一格：数一数除被拖那行以外、中线在指针上方的行有几行。
   const placeAt = useCallback((id: string, y: number) => {
@@ -60,11 +73,12 @@ export function useProjectReorder({
 
   useEffect(() => {
     const move = (event: globalThis.PointerEvent) => {
-      const start = pending.current;
+      const start = gesture.current;
       if (!start || event.pointerId !== start.pointerId) return;
       pointerY.current = event.clientY;
       if (!draftRef.current) {
-        if (Math.abs(event.clientY - start.startY) < DRAG_THRESHOLD) return;
+        if (start.dragged || Math.abs(event.clientY - start.startY) < DRAG_THRESHOLD) return;
+        start.dragged = true;
         draftRef.current = ids;
         setDraft(ids);
         setDragging(start.id);
@@ -73,17 +87,13 @@ export function useProjectReorder({
       placeAt(start.id, event.clientY);
     };
     const up = (event: globalThis.PointerEvent) => {
-      const start = pending.current;
-      if (!start || event.pointerId !== start.pointerId) return;
+      if (gesture.current?.pointerId !== event.pointerId) return;
       const finished = draftRef.current;
-      stop();
-      if (!finished) return;
-      swallowClick.current = true;
-      window.setTimeout(() => { swallowClick.current = false; }, 0);
-      if (finished.some((value, i) => value !== ids[i])) onCommit(finished);
+      finish();
+      if (finished && finished.some((value, i) => value !== ids[i])) onCommit(finished);
     };
     const cancel = (event: globalThis.PointerEvent) => {
-      if (pending.current?.pointerId === event.pointerId) stop();
+      if (gesture.current?.pointerId === event.pointerId) finish();
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -93,7 +103,7 @@ export function useProjectReorder({
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", cancel);
     };
-  }, [ids, onCommit, placeAt, stop]);
+  }, [finish, ids, onCommit, placeAt]);
 
   // 列表比菜单高时，拖到上下边缘就往那边滚，滚动中照样重新算落点。
   useEffect(() => {
@@ -123,17 +133,17 @@ export function useProjectReorder({
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopPropagation();
-      stop();
+      abort();
     };
     window.addEventListener("keydown", escape, true);
     return () => window.removeEventListener("keydown", escape, true);
-  }, [dragging, stop]);
+  }, [dragging, abort]);
 
   const rowProps = (id: string) => ({
     "data-project-id": id,
     onPointerDown: (event: PointerEvent<HTMLElement>) => {
       if (!enabled || event.button !== 0 || event.pointerType === "touch") return;
-      pending.current = { id, pointerId: event.pointerId, startY: event.clientY };
+      gesture.current = { id, pointerId: event.pointerId, startY: event.clientY, dragged: false };
       pointerY.current = event.clientY;
     },
     onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
