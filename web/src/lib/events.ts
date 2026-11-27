@@ -9,6 +9,14 @@ const eventListeners = new Set<EventListener>();
 const connectionListeners = new Set<ConnectionListener>();
 let eventSource: EventSource | null = null;
 let connected = false;
+/**
+ * 服务端每 15 秒推一次 ping（server/src/routes.ts 的 /api/events）。服务卡住时连接不断、也不报错，
+ * EventSource 自己永远发现不了 —— 页面只能从「好久没收到东西」看出来：报断开、换一条连接重连，
+ * 新连接答上来（onopen）就算恢复。卡多久都只是等，不撤页面（mac 壳也一样，见 BrowserWindowController）。
+ */
+const STALE_AFTER_MS = 40_000;
+let lastHeard = 0;
+let watchdog: ReturnType<typeof setInterval> | null = null;
 
 function publishConnection(next: boolean) {
   connected = next;
@@ -16,25 +24,48 @@ function publishConnection(next: boolean) {
   for (const listener of connectionListeners) listener(next);
 }
 
-function ensureConnection() {
-  if (eventSource) return;
+function heard() {
+  lastHeard = Date.now();
+}
+
+function openEventSource() {
+  heard();
   eventSource = new EventSource("/api/events");
-  eventSource.onopen = () => publishConnection(true);
+  eventSource.onopen = () => {
+    heard();
+    publishConnection(true);
+  };
   eventSource.onerror = () => publishConnection(false);
+  eventSource.addEventListener("ping", heard);
   eventSource.onmessage = (message) => {
+    heard();
     try {
       const event = JSON.parse(message.data) as ServerEvent;
       for (const listener of eventListeners) listener(event);
     } catch {
-      // 心跳或非 JSON 消息无需进入应用状态。
+      // 非 JSON 消息无需进入应用状态。
     }
   };
+}
+
+function ensureConnection() {
+  if (eventSource) return;
+  openEventSource();
+  watchdog = setInterval(() => {
+    if (!eventSource || Date.now() - lastHeard < STALE_AFTER_MS) return;
+    // 系统睡眠醒来时也会走到这里：那条连接多半已经死了，重连一次正好。
+    eventSource.close();
+    publishConnection(false);
+    openEventSource();
+  }, 5_000);
 }
 
 function releaseConnection() {
   if (eventListeners.size || connectionListeners.size || !eventSource) return;
   eventSource.close();
   eventSource = null;
+  if (watchdog) clearInterval(watchdog);
+  watchdog = null;
   connected = false;
 }
 

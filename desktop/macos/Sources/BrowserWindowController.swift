@@ -321,7 +321,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
   /// 窗口只对认过的那一份服务开着页面。导航（刷新、前进后退、页面自己跳转）放行前各认一次
   /// （WebViewBridge），已经载好的页面自己发的请求、SSE 不经过导航 —— 它们落到新来的那一份上会被
-  /// 实例号挡下（见 `bind`），但页面会一直报错。所以页面在的时候还要定时认：不是自己那份了就撤掉页面、说清楚。
+  /// 实例号挡下（见 `bind`），但页面会一直报错。所以页面在的时候还要定时认：答出来的不是自己那份、
+  /// 连接被拒（没人听了）才撤掉页面、说清楚；只是没答上不算（见 `checkInstance`）。
   private func startInstanceGuard() {
     guard NaviConfig.isLocal, guardTimer == nil else { return }
     guardTimer = Timer.scheduledTimer(withTimeInterval: Self.instanceGuardInterval, repeats: true) { [weak self] timer in
@@ -344,10 +345,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         guard let self, self.guardTimer === timer else { return }
         self.guardProbing = false
         if case .unreachable = probe {
-          // 服务忙时连续几秒答不出探活，一个超时不能证明端口换了人。
+          // 没答上（超时、半路断了）说明端口上有人、只是这会儿答不上来 —— 连着多少次都证明不了换了人。
+          // 页面留着：慢的请求、断了的 SSE 由页面自己等、自己重连，跟浏览器里用 web 版一样；
+          // 一直不答时页面自己的连接状态会报断开（web/src/lib/events.ts 的心跳）。换没换人等它下一次答出来再认。
           self.unreachableProbes += 1
           RuntimeLog.record("probe.miss", RuntimeLog.fields(of: probe).merging(["streak": self.unreachableProbes]) { a, _ in a })
-          if self.unreachableProbes < 3 { return }
+          return
         }
         guard let instance = NaviHealth.ours(probe) else {
           RuntimeLog.record("page.takedown", RuntimeLog.fields(of: probe).merging(["via": "guard", "streak": self.unreachableProbes]) { a, _ in a })
