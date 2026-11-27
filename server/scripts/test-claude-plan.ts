@@ -18,7 +18,7 @@ process.env.NAVI_DB = join(root, "navi.db");
 process.env.NAVI_RUNS_DIR = join(root, "runs");
 const { ClaudeExecutor } = await import("../src/executors/claude.js");
 const { ClaudePlanGate, CLAUDE_PLAN_ARGS, claudePlansDir, planFilesMarker, planSafeExtraArgs, plansDirOfCommandLine } = await import("../src/executors/claude-plan-gate.js");
-const { planImplementText, planTurnInput, resolvePlanTurn, PLAN_IMPLEMENT_TEXT } = await import("../src/plan-turn.js");
+const { PLAN_COPY_HINT, planImplementText, planTurnInput, resolvePlanTurn, PLAN_IMPLEMENT_TEXT } = await import("../src/plan-turn.js");
 const { nativeCliCommand } = await import("../src/skills.js");
 const { inputStartsExecution } = await import("../src/task-continuation-entry.js");
 const { PLANNING_TURN } = await import("../src/run-prompts.js");
@@ -352,11 +352,23 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   writeFileSync(join(plansDir, "fake-session.md"), "# 交出之后偷偷改的");
   const implement = await resolvePlanTurn("task", "claude", slash("/plan implement plan:toolu_exit"), "/plan implement plan:toolu_exit", null, null);
   assert.equal(implement.question, false);
-  assert.equal(implement.text, planImplementText("# 假计划\n\n先读后改"));
+  // 卡上原文另存一份文件给它复制：计划就是要交的文档时，逐字重写一遍要好几分钟（qfix1xZNymhT）。
+  const snapshot = join(root, "runs", "task", "plans", "plan_toolu_exit.md");
+  assert.equal(readFileSync(snapshot, "utf8"), "# 假计划\n\n先读后改\n", "另存的就是卡上原文，不是交出之后改过的计划文件");
+  assert.equal(implement.text, planImplementText("# 假计划\n\n先读后改", snapshot));
+  assert.ok(implement.text.endsWith(PLAN_COPY_HINT(snapshot)), "实施正文告诉它那份文件在哪、什么时候该复制");
   assert.doesNotMatch(implement.text, /偷偷改/);
   assert.equal(implement.shown, PLAN_IMPLEMENT_LABEL, "卡上原文只交给模型，会话里记「实施此计划」");
   await assert.rejects(resolvePlanTurn("task", "claude", slash("/plan implement plan:older"), "/plan implement plan:older", null, null), /新版本/, "取原文就是实施预检");
-  assert.deepEqual(await resolvePlanTurn("task", "codex", parseCliCommand("codex", "/plan implement"), "/plan implement", null, null), { question: false, text: "/plan implement", shown: PLAN_IMPLEMENT_LABEL }, "codex 那一路照旧原样透传");
+  assert.deepEqual(await resolvePlanTurn("task", "codex", parseCliCommand("codex", "/plan implement"), "/plan implement", null, null), { question: false, text: "/plan implement", shown: PLAN_IMPLEMENT_LABEL }, "codex 找不到计划时照旧原样透传");
+  // codex 的计划只在它自己的会话里：同样另存一份，原文不再贴（它的会话里有），只告诉它文件在哪。
+  await db.insert(sessions).values({ id: "session-codex", taskId: "task", role: "single", agentType: "codex", executor: "codex", executorId: null, runOwnerUserId: null, cwd: root, startedAt: at, turnStartedAt: at, endedAt: at, exitStatus: 0 });
+  writeFileSync(sessionTracePath("task", "session-codex"), JSON.stringify({ at, turnStartedAt: at, event: { kind: "plan", id: "codex-plan", text: "# codex 的计划", status: "complete" } }) + "\n");
+  const codexImplement = await resolvePlanTurn("task", "codex", parseCliCommand("codex", "/plan implement"), "/plan implement", null, null);
+  const codexSnapshot = join(root, "runs", "task", "plans", "codex-plan.md");
+  assert.equal(readFileSync(codexSnapshot, "utf8"), "# codex 的计划\n");
+  assert.deepEqual(codexImplement, { question: false, text: `/plan implement\n\n${PLAN_COPY_HINT(codexSnapshot)}`, shown: PLAN_IMPLEMENT_LABEL });
+  await db.delete(sessions).where(eq(sessions.id, "session-codex"));
   // 记录里最新一条不是完整卡（老版本留下的退回草稿）就不能实施
   appendFileSync(sessionTracePath("task", "session"), JSON.stringify({ at, turnStartedAt: at, event: { kind: "plan", id: "plan:toolu_exit", text: "", status: "streaming", delta: true } }) + "\n");
   await assert.rejects(assertPlanReady("task", "claude", null, null, "plan:toolu_exit"), /没有已完成的计划/);
