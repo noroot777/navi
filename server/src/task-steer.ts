@@ -160,6 +160,7 @@ async function deliverNativeSteer(
     previous = await clearPreviousDirectionState(message.taskId, false);
     await reservation.deliver(turnText, now(), {
       promptText: turnText + DIRECTION_PROTOCOL(previous.clearedDirectionToken),
+      directionToken: previous.clearedDirectionToken,
       beforeSend: reservation.agentType === "claude"
         ? () => discardLateDirectionState(
             message.taskId,

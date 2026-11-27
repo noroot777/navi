@@ -433,3 +433,13 @@ export async function restorePreviousCompletionState(
     .returning({ id: tasks.id });
   if (restored.length && previous.memoryConfirmed) confirmDone(taskId, previous.clearedDirectionEpoch);
 }
+
+/**
+ * 运行中的这一轮已经被引导到了别的方向上，`direction` 是被换下来的那一个。消费方据此认出「这是
+ * 旧方向迟到的东西」而作废它，不当成故障；任务不在跑了、或者库里压根没有方向身份，都不算。
+ */
+export async function directionSuperseded(taskId: string, direction: string | null): Promise<boolean> {
+  const row = (await db.select({ status: tasks.status, activeDirectionToken: tasks.activeDirectionToken })
+    .from(tasks).where(eq(tasks.id, taskId))).at(0);
+  return row?.status === "running" && row.activeDirectionToken !== null && row.activeDirectionToken !== direction;
+}

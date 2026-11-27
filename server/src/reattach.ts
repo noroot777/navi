@@ -240,6 +240,7 @@ export async function reattachRunningTasks(): Promise<Set<string>> {
         nativeSteer: nativeSteerBinding({
           taskId: task.id, sessionId: sess.id, role: sess.role as SessionRole,
           agentType: sess.agentType as AgentType, cwd: sess.cwd ?? "", userId: task.ownerUserId, out,
+          plan: adoptedHandle.planTurn,
         }),
       })
         .catch((err) => console.error(`[navi] 接管 ${task.id} 的消费循环出错:`, err))

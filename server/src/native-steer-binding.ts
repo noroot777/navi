@@ -13,7 +13,7 @@ export function nativeSteerBinding(input: {
   cwd: string;
   userId?: string | null;
   out: NodeJS.WritableStream;
-  /** 这一轮是计划模式回合（runs.ts `planSteerTarget`）。重启接回时认不出来，不传。 */
+  /** 这一轮是计划模式回合（runs.ts `planSteerTarget`）。重启接回时由执行器认（`RunHandle.planTurn`）。 */
   plan?: boolean;
 }): NonNullable<SingleRunArgs["nativeSteer"]> {
   const { taskId, sessionId, role, agentType, cwd, userId, out } = input;

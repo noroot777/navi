@@ -15,6 +15,7 @@ import type { AgentEvent, AgentType, SessionRole, TurnOutcome } from "@navi/shar
 import { eq, sql } from "drizzle-orm";
 import { db } from "./db/index.js";
 import { tasks, sessions } from "./db/schema.js";
+import { directionSuperseded } from "./task-steer-direction-state.js";
 import { closeSessionTurns, recordTurnSpan } from "./session-turns.js";
 import { scanForTitle } from "./auto-title.js";
 import { applyAutoTitle } from "./auto-title-apply.js";
@@ -137,6 +138,9 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
     activeTurnToken: tasks.activeTurnToken, activeDirectionToken: tasks.activeDirectionToken })
     .from(tasks).where(eq(tasks.id, taskId))).at(0);
   const nativeTurn = !!taskRow?.nativeTurn;
+  // 这条流**此刻读到的输出**属于哪个方向。原生引导会在回合中途换方向，换在流里的边界上
+  // （`RunHandle.steer` 的 onBoundary），不是送达那一刻：那时旧方向说到一半的话可能还排在流里。
+  let direction = taskRow?.activeDirectionToken ?? null;
   let goalStartPending = !!taskRow?.goalTurn;
   const verifyRound = taskRow?.verifyRound ?? null;
   const executionEventId = role === "single" && !nativeTurn
@@ -254,6 +258,7 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
         flushTraceText(Number.isFinite(boundary) ? new Date(boundary - 1).toISOString() : undefined);
       },
       record: a.nativeSteer.record,
+      steered: (token) => { direction = token; },
       plan: a.nativeSteer.plan,
     });
   }
@@ -383,8 +388,16 @@ async function consumeRunStream(a: SingleRunArgs, markStreamDrained: () => void)
           question: event.questions.length === 1 ? event.questions[0]!.question : "请确认以下问题",
           options: event.questions.length === 1 ? event.questions[0]!.options : undefined,
           items: event.questions.length > 1 ? event.questions : undefined,
-          currentTurn: { token: taskRow.activeTurnToken, directionToken: taskRow.activeDirectionToken },
-        })) throw new Error("执行器的澄清问题未能保存，请重试当前回合");
+          currentTurn: { token: taskRow.activeTurnToken, directionToken: direction },
+        })) {
+          // 用户已经引导到新方向、这一问还是旧方向在问：它跟被引导撤下的那些旧状态一样作废，
+          // 不是这一轮出了故障。
+          if (await directionSuperseded(taskId, direction)) {
+            console.warn(`[navi] 任务 ${taskId} 的旧方向提问在引导之后才读到，已作废`);
+            continue;
+          }
+          throw new Error("执行器的澄清问题未能保存，请重试当前回合");
+        }
         continue;
       }
       // 「此刻还在等上游」只有这里数得准:正文要到下一条非正文事件才冲进 trace,落盘产物

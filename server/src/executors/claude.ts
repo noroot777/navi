@@ -311,10 +311,12 @@ export class ClaudeExecutor implements AgentExecutor {
       // 接回的是计划回合：还没回的权限请求照样要有人回，否则 CLI 一直等着。接管拿不到起跑时的环境
       // 和配置，计划文件目录用起跑时记在 commandLine 上的那个。
       const plansDir = plansDirOfCommandLine(opts.commandLine);
-      return singleRunFromResident(
+      const handle = singleRunFromResident(
         this.residentFromChild(child, opts.sessionId, opts.commandLine, compact, settingsCleanup, opts.cwd, opts.images, true, opts.consumed, undefined, plansDir),
         detached,
       );
+      handle.planTurn = plansDir !== undefined;
+      return handle;
     }
     return {
       sessionId: opts.sessionId,

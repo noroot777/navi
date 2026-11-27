@@ -70,7 +70,14 @@ export interface RunHandle {
   kill(): void;
   // 单飞当前回合的原生引导通道。存在时调用方把新 user 消息送进同一个活动回合，
   // 不结束任务、不释放单飞锁；回合自然结束后这根通道随 RunHandle 一起关闭。
-  steer?(text: SteerText, beforeSend?: () => void | Promise<void>): Promise<void>;
+  // `onBoundary` = 事件流读到「此后的输出都归这条新消息」那一处时同步调一次（在那之后的第一条
+  // 事件交出去之前）：旧方向说到一半的话可能还排在流里，按送达时刻切会把它们算到新方向头上。
+  steer?(text: SteerText, beforeSend?: () => void | Promise<void>, onBoundary?: () => void): Promise<void>;
+  /**
+   * 这个进程跑的是计划模式回合。只有接管旧进程时由执行器从起跑事实里认回来（目前 claude 的
+   * commandLine 带着计划参数），起跑方自己知道、不靠它。
+   */
+  planTurn?: boolean;
   command?(command: CliCommand): Promise<string>;
   goal?(): CliGoal | null;
   goalStarted?(): boolean;

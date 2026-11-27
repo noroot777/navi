@@ -5,6 +5,7 @@ import type { CliCommand, CliGoal } from "@navi/shared/cli-commands";
 import { RECONCILE_TURN_ROLE, claimNonTurn, claimOwnTurnWhenReady, releaseTurn, whenTurnIdle } from "./turn-lock.js";
 import { acknowledgeStartReceipt, registerStartReceipt } from "./task-start-receipt.js";
 import { markTaskActionsDirty } from "./task-actions-dirty.js";
+import { bus } from "./bus.js";
 
 // 回合占位锁那一半(单飞锁、几种不是回合的预占、起跑冻结、等这一轮跑完再续跑)住在
 // turn-lock.ts —— 两摊各自的使用方几乎不重叠,挤在一个文件里已经过了 700 行上限
@@ -29,7 +30,7 @@ export { continueWhenIdle } from "./turn-idle-delivery.js";
 
 export interface Killable {
   kill(): void;
-  steer?(text: SteerText, beforeSend?: () => void | Promise<void>): Promise<void>;
+  steer?(text: SteerText, beforeSend?: () => void | Promise<void>, onBoundary?: () => void): Promise<void>;
   command?(command: CliCommand): Promise<string>;
   goal?(): CliGoal | null;
   /**
@@ -46,11 +47,12 @@ export type StopSettle = "canceled" | "paused";
 const handles = new Map<string, Set<Killable>>();
 const stopping = new Map<string, StopSettle>();
 type NativeSteerTarget = {
-  handle: Killable & { steer(text: SteerText, beforeSend?: () => void | Promise<void>): Promise<void> };
+  handle: Killable & Required<Pick<Killable, "steer">>;
   agentType: AgentType;
   prepare(text: string): string | Promise<string>;
   beforeDeliver?(at: string): void | Promise<void>;
   record(text: string, at: string): void;
+  steered?(directionToken: string): void;
   plan: boolean;
 };
 const nativeSteerTargets = new Map<string, NativeSteerTarget>();
@@ -80,7 +82,7 @@ export function nativeCommandRun(taskId: string): Killable | null {
 }
 
 export function untrackRun(taskId: string, h: Killable): void {
-  if (nativeSteerTargets.get(taskId)?.handle === h) nativeSteerTargets.delete(taskId);
+  if (nativeSteerTargets.get(taskId)?.handle === h) setNativeSteerTarget(taskId, null);
   const set = handles.get(taskId);
   if (!set) return;
   set.delete(h);
@@ -171,19 +173,33 @@ export function bindNativeSteer(
     prepare?(text: string): string | Promise<string>;
     beforeDeliver?(at: string): void | Promise<void>;
     record(text: string, at: string): void;
+    /** 事件流越过这次引导的边界（`Killable.steer` 的 onBoundary）：此后的输出归这个新方向。 */
+    steered?(directionToken: string): void;
     /** 这一轮是计划模式回合（见 `planSteerTarget`）。 */
     plan?: boolean;
   },
 ): void {
   if (!handle.steer || !handles.get(taskId)?.has(handle)) return;
-  nativeSteerTargets.set(taskId, {
-    handle: handle as Killable & { steer(text: SteerText, beforeSend?: () => void | Promise<void>): Promise<void> },
+  setNativeSteerTarget(taskId, {
+    handle: handle as NativeSteerTarget["handle"],
     agentType: input.agentType,
     prepare: input.prepare ?? ((text) => text),
     beforeDeliver: input.beforeDeliver,
     record: input.record,
+    steered: input.steered,
     plan: !!input.plan,
   });
+}
+
+/**
+ * 换掉 / 撤掉引导目标的唯一入口。计划回合能不能引导只认这张表（`planSteerTarget`），库里没有
+ * 一行跟着变 —— 所以这里一变就让托盘重拉一次，否则绑定前读到的「不能引导」会一直挂着。
+ */
+function setNativeSteerTarget(taskId: string, target: NativeSteerTarget | null): void {
+  const wasPlan = !!nativeSteerTargets.get(taskId)?.plan;
+  if (target) nativeSteerTargets.set(taskId, target);
+  else nativeSteerTargets.delete(taskId);
+  if (wasPlan !== !!target?.plan) bus.publish({ type: "task.pendingMessages", taskId });
 }
 
 /**
@@ -205,6 +221,8 @@ export type NativeSteerReservation = {
   deliver(text: string, at: string, opts?: {
     beforeSend?: () => void | Promise<void>;
     promptText?: string;
+    /** 这条消息开的新方向：事件流越过引导边界时交给消费方（`bindNativeSteer` 的 steered）。 */
+    directionToken?: string;
   }): Promise<void>;
   cancel(): void;
 } | { kind: "busy" } | { kind: "unsupported" };
@@ -237,7 +255,9 @@ export function reserveNativeSteerTask(taskId: string): NativeSteerReservation {
         }
         await target.beforeDeliver?.(at);
         // prepare **惰性传进去**:执行器保证它在 ACK 与发送前清理都跑完之后、写 stdin 之前才调用。
-        await target.handle.steer(() => target.prepare(opts?.promptText ?? text), opts?.beforeSend);
+        const direction = opts?.directionToken;
+        await target.handle.steer(() => target.prepare(opts?.promptText ?? text), opts?.beforeSend,
+          direction === undefined ? undefined : () => target.steered?.(direction));
         // provider 已确认收到以后，消息就已经是真实投递；实时广播失败不能把它退回队列
         // 再投一次，否则同一句会进入模型两遍。
         try { target.record(text, at); } catch (error) {
