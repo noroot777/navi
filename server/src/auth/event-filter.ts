@@ -90,6 +90,8 @@ export function makeEventFilter(actor: Actor): {
       if (ev.type === "task.reads") return ev.ownerUserId === ownerIdOf(actor);
       // 系统通知只弹给任务主人（多人模式），主人也得看得见这个任务（下面按任务照常核）。别人的任务看得见也不弹。
       if (ev.type === "task.notify" && multiUser && ev.ownerUserId !== ownerIdOf(actor)) return false;
+      // 设备申请：放谁进来归机主本人（remote-access-routes.ts ownerRefusal 同一个判据），回合凭证不收。多人模式没有配对。
+      if (ev.type === "pair.requests") return !multiUser && actor.kind === "single";
       if (unrestricted) return true;
       // 挂在项目上、不挂在任务上的事件：直接按项目可见性判。
       if (ev.type === "project.updated") return !!visible?.has(ev.projectId);

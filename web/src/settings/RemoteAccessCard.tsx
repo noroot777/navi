@@ -5,7 +5,9 @@ import { Button, StatusChip } from "../components/ui.tsx";
 import { CopyButton } from "../components/CopyButton.tsx";
 import { QrCode } from "../components/QrCode.tsx";
 import { authApi } from "../lib/authApi.ts";
+import { coalescedReader, type CoalescedReader } from "../lib/coalescedReader.ts";
 import { PAIR_REQUESTS_CHANGED_EVENT, isLoopbackPage, pairLink, seenLabel } from "../lib/pairing.ts";
+import { dropPairRequest } from "../lib/pairRequests.ts";
 import { ConfirmDialog } from "../task-detail/ConfirmDialog.tsx";
 import { reportPageReload } from "../lib/runtimeLog.ts";
 
@@ -33,34 +35,28 @@ export function RemoteAccessCard({ notify }: { notify: (message: string) => void
   // 出码那一刻名册里已有的设备:之后多出来的那台就是刚扫进来的。
   const knownDevices = useRef<Set<string>>(new Set());
 
-  // 轮询的读和写操作各走各的请求，谁后回来谁落到界面上：一次读发出之后又有了更新的读、或者做成了
-  // 一次写（移除、换密钥），它带回来的就是旧的 —— 不丢掉的话，刚移除的设备、旧密钥会闪回来一下。
-  const epoch = useRef(0);
+  // 轮询的读和写操作各走各的请求。轮询走单飞（lib/coalescedReader.ts）：读得慢也不会被下一轮作废，网络慢时卡片照样更新。
+  // 做成一次写（移除、换密钥）时把在路上的读作废：它带回来的是写之前的样子，不丢掉的话刚移除的设备、旧密钥会闪回来一下。
+  const reader = useRef<CoalescedReader | null>(null);
   const settle = useCallback((next: RemoteAccessView) => {
-    epoch.current += 1;
+    reader.current?.invalidate();
     setView(next);
   }, []);
 
-  const reload = useCallback(async () => {
-    const mine = ++epoch.current;
-    try {
-      const next = await authApi.remoteAccess();
-      if (mine === epoch.current) setView(next);
-    } catch {
-      // 轮询失败不反复打扰;首次读不到时整张卡不出,下一轮自己补上。
-    }
-  }, []);
-
   useEffect(() => {
-    void reload();
-    const timer = window.setInterval(() => void reload(), POLL_MS);
+    const own = coalescedReader(() => authApi.remoteAccess(), setView);
+    reader.current = own;
+    const reload = () => own.reload();
+    reload();
+    const timer = window.setInterval(reload, POLL_MS);
     window.addEventListener(PAIR_REQUESTS_CHANGED_EVENT, reload);
     return () => {
       window.clearInterval(timer);
       window.removeEventListener(PAIR_REQUESTS_CHANGED_EVENT, reload);
-      epoch.current += 1;
+      own.close();
+      reader.current = null;
     };
-  }, [reload]);
+  }, []);
 
   // 码五分钟过期:面板还开着就悄悄换一个,不让人对着一张废码扫半天。
   useEffect(() => {
@@ -97,6 +93,9 @@ export function RemoteAccessCard({ notify }: { notify: (message: string) => void
   const decide = (requestId: string, name: string, decision: "approve" | "deny") => act(async () => {
     try {
       await authApi.decidePair(requestId, decision);
+      // 决定之前发出的读会把这张带回来：卡片这边作废在路上的那次，整页共用的名单（顶条、系统通知）先拿掉它。
+      reader.current?.invalidate();
+      dropPairRequest(requestId);
       notify(decision === "approve" ? `「${name}」可以用这台 Navi 了` : "已拒绝");
     } finally {
       window.dispatchEvent(new Event(PAIR_REQUESTS_CHANGED_EVENT));

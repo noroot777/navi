@@ -9,9 +9,11 @@
 import type { AgentType, DuetConsensusBy, QuestionItem, Task, TaskStage, TaskStatus } from "./index.ts";
 import type { SessionRole, TurnInterruption, TurnOutcome } from "./session.ts";
 import type { ContextUsage, TokenUsage, UsageAccountingMark } from "./usage.ts";
+import type { ContextBreakdown } from "./context-breakdown.ts";
 import type { NativeWorkEvent } from "./native-work.ts";
 import type { MonitorWakeData } from "./monitor-wake.ts";
 import type { TimelineNotice } from "./timeline-notice.ts";
+import type { PairRequestView } from "./multiuser.ts";
 import type { SystemResume } from "./system-resume.ts";
 
 // ── HITL gates (§7) ──────────────────────────────────────────────────────────
@@ -94,6 +96,9 @@ export type AgentEvent =
   // 上下文**水位**(不是流水,区别见 shared/src/usage.ts 的 ContextUsage)。每回合至多
   // 一条,恒在该回合的 turnEnd/done 之前。落库是**覆盖**不是累加。
   | { kind: "context"; context: ContextUsage }
+  // 上下文**分项**(见 shared/src/context-breakdown.ts):回合末向 CLI 问来的那张表,只有 claude 给得出。
+  // 跟水位一样覆盖式落在会话行上、不进 trace;直播里它一到,展示端重读会话行。
+  | { kind: "contextBreakdown"; breakdown: ContextBreakdown }
   // 这一步工具调用**写到了哪里**:执行器从原生事件的结构化参数里当场取出(写文件/改文件
   // 工具的目标路径、命令的工作目录),趁它还没被截短。只给服务端记「任务写过的位置」
   // (server/src/task-writes.ts),生成物面板靠它认出「这份文件是它亲手写的」。不进 trace、
@@ -215,6 +220,10 @@ export type ServerEvent =
       subtitle: string;
       body: string;
     }
+  // 自用模式：等机主点头的设备申请变了（server/src/auth/remote-pairing.ts）。opened = 刚递上来的那一张，null = 有一张被处理掉了。
+  // 只推给机主本人（event-filter）。页面按它当场重读名单（顶条、设置页、系统通知都按读回的名单走，web/src/lib/pairRequests.ts），
+  // 不靠这一声本身：它是一次性的，断线期间的那几声收不到。
+  | { type: "pair.requests"; opened: PairRequestView | null }
   | { type: "task.title"; taskId: string; title: string; updatedAt: string }
   // 提问态变化（§Team）：agent 调 ask_question 提问、或答复把它清空。task.status
   // 只带状态字段，question 不跟着走 —— 少了这条事件，卡片要等下次全量拉取才出现/

@@ -282,6 +282,12 @@ export function useConversation(
         });
         refreshSessions();
       }
+      // 上下文分项只是会话行上的一份快照(回合末才到,常常晚过回合收口):重读会话行就够,不进正文组装 ——
+      // 进了就会在收过口的回合后面多出一颗空气泡。
+      if (event.type === "agent.event" && event.taskId === taskId && event.event.kind === "contextBreakdown") {
+        refreshSessions();
+        return;
+      }
       if (event.type === "agent.event" && event.taskId === taskId) {
         const step = event.event;
         if (step.kind !== "context") {

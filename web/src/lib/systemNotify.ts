@@ -1,5 +1,6 @@
-// 系统通知的客户端那一半。什么时候弹、弹什么字由服务端定（server/src/system-notify.ts，SSE 上的 task.notify），
+// 系统通知的客户端那一半。任务那一类什么时候弹、弹什么字由服务端定（server/src/system-notify.ts，SSE 上的 task.notify），
 // 这里只管弹出来、点了回到那个任务。
+// 另一类是新设备申请连进这台 Navi，何时弹、弹什么在 lib/pairNotify.ts，弹出来同样走这里（showSystemNotice）。
 //
 // 弹到哪儿：
 //   · mac app、Windows app：交给壳（desktop/macos/Sources/SystemNotifications.swift、desktop/windows/shell/src/notify.rs）。
@@ -100,6 +101,17 @@ function show(notice: Shown): void {
     openNoticeTarget(notice.projectId, notice.taskId);
     shown.close();
   };
+}
+
+/** 弹一条（开关开着才弹）。回交没交给系统：系统那边不收（权限中途被收回、原生桥这一下不在）是 false，调用方可以下次再试。 */
+export function showSystemNotice(notice: Shown): boolean {
+  if (!systemNotifyEnabled()) return false;
+  try {
+    show(notice);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** 整个页面听一份（App 里挂一次）。前后脚到的几条攒一下，多了合成一条（lib/noticeBatch.ts）。返回退订。 */

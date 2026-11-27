@@ -279,7 +279,7 @@ export function createAssembler(sessions: readonly Session[]) {
       const sessionId = envelope.sessionId;
       const seq = envelope.seq;
       if (event.kind === "context") { liveContext.set(sessionId, event.context); return; }
-      if (event.kind === "session") return;
+      if (event.kind === "session" || event.kind === "contextBreakdown") return;
       const turn = envelope.turnStartedAt ?? null;
       if (seq === undefined) {
         // 带身份的回合里没带号的不是记录：回合收口记成事实；别的（执行器簿记）盘上没有，刷新以后也不会有，不画。

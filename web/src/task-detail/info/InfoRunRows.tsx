@@ -8,7 +8,8 @@ import { addUsage, formatTokens, formatTokensExact, hasContext, hasUsage, usageT
 import { taskCreationLabel } from "@navi/shared/task-origin";
 import { createPortal } from "react-dom";
 import { AgentIcon } from "../../components/AgentIcon.tsx";
-import { ContextMeterPanel, contextMeterView } from "../../components/ContextMeterChip.tsx";
+import { ContextMeterPanel, contextMeterView, contextPanelWidth } from "../../components/ContextMeterChip.tsx";
+import { categoryTone, hasBreakdown } from "../../components/contextBreakdown.ts";
 import { HoverTip, useHoverTip } from "../../components/HoverTip.tsx";
 import { InspCopy, InspRow } from "../../inspector/parts.tsx";
 import { useDismissable } from "../../lib/useDismissable.ts";
@@ -60,7 +61,7 @@ function ContextValue({ facts }: { facts: InfoRunFacts }) {
   const [editing, setEditing] = useState(true);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const place = usePanelPlacement(triggerRef, panelRef, { minWidth: editing ? 296 : 224, minHeight: 108, fallbackHeight: 180, enabled: open });
+  const place = usePanelPlacement(triggerRef, panelRef, { minWidth: editing ? 296 : contextPanelWidth(facts.session), minHeight: 108, fallbackHeight: 180, enabled: open });
   useDismissable({ enabled: open, containerRef: panelRef, onClose: () => setOpen(false), restoreFocusRef: triggerRef });
   useLayoutEffect(() => {
     if (open) panelRef.current?.focus();
@@ -71,11 +72,17 @@ function ContextValue({ facts }: { facts: InfoRunFacts }) {
   }
   const view = contextMeterView(context);
   const remain = view.remain;
+  const breakdown = facts.session?.contextBreakdown;
   return (
     <>
       {remain !== null && (
         <span className={`insp-bar${remain <= 15 ? " is-low" : ""}`} aria-hidden="true">
-          <i style={{ transform: `scaleX(${Math.min(1, Math.max(0, 1 - remain / 100))})` }} />
+          {/* 长度是此刻的水位;有分项时这一截按回合末那张表的各份切开(进红区就整截变红,不切)。 */}
+          <i style={{ transform: `scaleX(${Math.min(1, Math.max(0, 1 - remain / 100))})` }}>
+            {remain > 15 && hasBreakdown(breakdown) && breakdown.categories.filter((c) => c.kind === "used" && c.tokens > 0).map((c) => (
+              <b key={c.name} className={`is-${categoryTone(c)}`} style={{ flexGrow: c.tokens }} />
+            ))}
+          </i>
         </span>
       )}
       <span className={facts.compacting ? "insp-live" : "insp-num"} aria-label={facts.compacting ? "正在压缩上下文" : view.spoken}>
