@@ -18,7 +18,7 @@ WIN_REMOTE_KEY=… node desktop/windows/scripts/remote-smoke.mjs --reclaim   # �
 `scripts/bundle-runtime.mjs` 组装的目录与仓库同形（布局写在脚本顶部）：
 
 - `node/node.exe`：固定版本的 node（版本与 mac 一致，在 `desktop/shared/runtime-bundle.mjs`；win-x64 zip 的 sha256 写死在脚本里，下载后校验，缓存里的也每次重验）；
-- `shared`、`server/dist`、`mcp/dist`、`web/dist`：先跑一遍 `npm run build`（`NAVI_WIN_SKIP_BUILD=1` 跳过）；
+- `shared`、`server/dist`、`mcp/dist`、`web/dist`：先跑一遍 `npm run build`，检出里的依赖跟 `package-lock.json` 对不上时先 `npm install`（`NAVI_WIN_SKIP_BUILD=1` 两步都跳过）；
 - `node_modules`：server 与 mcp 的生产依赖，按 win32-x64 装（`--os=win32 --cpu=x64 --ignore-scripts`，npm 取自那份 node 包），不编译任何东西。node-pty 只留它自带的 `prebuilds/win32-x64`（含 `conpty.node` 和 `conpty/conpty.dll`、`OpenConsole.exe`）。
 
 下载的 node 和装好的依赖缓存在 `build/cache/`（`NAVI_WIN_CACHE` 可换），lockfile、各 workspace 的 package.json、node 版本或 `scripts/win-deps.mjs` 变了才重装。

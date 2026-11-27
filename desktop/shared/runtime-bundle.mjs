@@ -36,8 +36,31 @@ export async function sha256Of(file) {
   return hash.digest("hex");
 }
 
+/**
+ * 检出里已装的依赖（npm 装完记在 node_modules/.package-lock.json）跟 package-lock.json 对不上的包名；
+ * 一次都没装过返回 null。拉了新代码、清单里新增或换了版本的包还没装，`npm run build` 就会找不到它。
+ * 可选依赖（别的平台的原生包）本来就不一定装，不算。
+ */
+export function staleDependencies(repo = REPO) {
+  const read = (file) => { try { return JSON.parse(readFileSync(join(repo, file), "utf8")).packages ?? {}; } catch { return null; } };
+  const wanted = read("package-lock.json");
+  const installed = read("node_modules/.package-lock.json");
+  if (!wanted) die(`${join(repo, "package-lock.json")} 读不出来`);
+  if (!installed) return null;
+  return Object.entries(wanted).filter(([path, want]) => {
+    if (!path.includes("node_modules/") || want.optional) return false;
+    const have = installed[path];
+    return want.link ? !have?.link || have.resolved !== want.resolved : have?.version !== want.version;
+  }).map(([path]) => path.slice(path.lastIndexOf("node_modules/") + "node_modules/".length));
+}
+
 export function buildProducts({ skip }) {
   if (!skip) {
+    const stale = staleDependencies();
+    if (!stale || stale.length) {
+      say(`▶ npm install（${stale ? `检出里的依赖跟 package-lock.json 对不上：${stale.slice(0, 5).join("、")}${stale.length > 5 ? ` 等 ${stale.length} 个` : ""}` : "检出里还没装过依赖"}）`);
+      run("npm", ["install", "--no-audit", "--no-fund"], { cwd: REPO, shell: process.platform === "win32" });
+    }
     say("▶ npm run build");
     run("npm", ["run", "build"], { cwd: REPO, shell: process.platform === "win32" });
   }

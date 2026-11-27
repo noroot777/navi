@@ -15,7 +15,7 @@ bash desktop/macos/build.sh --dmg       # 另出一份拖拽安装的 build/Navi
 `scripts/bundle-runtime.mjs` 把下面这些装进 `Contents/Resources/app`（布局与仓库同形）：
 
 - `node/bin/node`：固定版本的 node（版本与 sha256 写死在脚本顶部，下载后校验，对不上就不用）；
-- `shared`、`server/dist`、`mcp/dist`、`web/dist`：先跑一遍 `npm run build`（`NAVI_MAC_SKIP_BUILD=1` 跳过）；
+- `shared`、`server/dist`、`mcp/dist`、`web/dist`：先跑一遍 `npm run build`，检出里的依赖跟 `package-lock.json` 对不上时先 `npm install`（`NAVI_MAC_SKIP_BUILD=1` 两步都跳过）；
 - `node_modules`：server 与 mcp 的生产依赖，用自带 node 装，node-pty 按它重编。
 
 下载的 node 和装好的依赖缓存在 `build/cache/`，lockfile、各 workspace 的 package.json 或 node 版本变了才重装。
