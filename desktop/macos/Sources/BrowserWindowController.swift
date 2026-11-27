@@ -457,6 +457,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     NSWorkspace.shared.open(webView.url.map(NaviConfig.browserURL) ?? NaviConfig.baseURL)
   }
 
+  /// 「设置…」（⌘,）：网页里那条正门（WorkspaceShell 的 openSettingsHome，项目下拉里那颗「设置」和 G S
+  /// 也走它）由页面自己开，这里只递一声 `navi:open-settings`，不另拼一条设置页的路由。
+  func showSettings() {
+    showWindow(nil)
+    if window?.isMiniaturized == true { window?.deminiaturize(nil) }
+    NSApp.activate(ignoringOtherApps: true)
+    webView.evaluateJavaScript("window.dispatchEvent(new CustomEvent('navi:open-settings'))", completionHandler: nil)
+  }
+
   @objc func goBack(_ sender: Any?) { webView.goBack() }
   @objc func goForward(_ sender: Any?) { webView.goForward() }
 

@@ -440,9 +440,17 @@ export function WorkspaceShell() {
     setNotes(null);
     setPaletteOpen(false);
   };
-  // 设置页的正门：项目下拉里那颗「设置」和快捷键 G S 共用它。分开写迟早漂成两个落点，
+  // 设置页的正门：项目下拉里那颗「设置」、快捷键 G S 和桌面版菜单的「设置…」共用它。分开写迟早漂成两个落点，
   // 而按钮上标着的键位一旦和按钮本身各去各的地方，那行 kbd 就成了句假话。
   const openSettingsHome = () => openSettings();
+  // macOS 桌面版菜单里的「设置…」（⌘,）递来的一声（desktop/macos BrowserWindowController.showSettings）。
+  const openSettingsHomeRef = useRef(openSettingsHome);
+  openSettingsHomeRef.current = openSettingsHome;
+  useEffect(() => {
+    const open = () => openSettingsHomeRef.current();
+    window.addEventListener("navi:open-settings", open);
+    return () => window.removeEventListener("navi:open-settings", open);
+  }, []);
   const openComposer = (draft?: ComposerDraft) => {
     if (!requireProject("新建任务")) return;
     setRemoteSelection(null);

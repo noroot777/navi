@@ -104,6 +104,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     urls.forEach(controller.open(link:))
   }
 
+  /// 挂在 AppDelegate 而不是窗口上：窗口关着（⌘W 之后 app 还常驻）时菜单照样按得动，按了把窗口叫回来。
+  @objc func openSettings(_ sender: Any?) {
+    windowController?.showSettings()
+  }
+
   @objc func toggleOtherDevices(_ sender: NSMenuItem) {
     RemoteAccessSwitch.toggle(windowController)
   }
@@ -139,6 +144,8 @@ extension AppDelegate: NSMenuItemValidation {
       item.title = ServedInstance.networkPending ? "允许其他设备访问（重启服务后生效）" : "允许其他设备访问"
       return NaviConfig.isLocal && !RemoteAccessSwitch.busy
     }
+    // 页面没载进来（服务在起、离线页、首启）时没有能接这一声的设置页。
+    if item.action == #selector(openSettings(_:)) { return windowController?.hasPresentedPage == true }
     // 只有本机那份才有「替这台机器的 CLI 接 MCP」这回事。
     if item.action == #selector(checkHostMcp(_:)) { return NaviConfig.isLocal }
     // 只在有一次更新排着（等任务跑完、或上次没装成）时出现。
@@ -193,6 +200,8 @@ enum MainMenu {
       pending.isHidden = true
       menu.addItem(pending)
     }
+    menu.addItem(.separator())
+    menu.addItem(item("设置…", #selector(AppDelegate.openSettings(_:)), ","))
     menu.addItem(.separator())
     menu.addItem(item("登录时启动 Navi 服务", #selector(AppDelegate.toggleLoginService(_:))))
     menu.addItem(item("允许其他设备访问", #selector(AppDelegate.toggleOtherDevices(_:))))
