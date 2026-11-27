@@ -103,13 +103,14 @@ function show(notice: Shown): void {
   };
 }
 
-/** 弹一条（开关开着才弹）。 */
-export function showSystemNotice(notice: Shown): void {
-  if (!systemNotifyEnabled()) return;
+/** 弹一条（开关开着才弹）。回交没交给系统：系统那边不收（权限中途被收回、原生桥这一下不在）是 false，调用方可以下次再试。 */
+export function showSystemNotice(notice: Shown): boolean {
+  if (!systemNotifyEnabled()) return false;
   try {
     show(notice);
+    return true;
   } catch {
-    // 系统那边不收（权限中途被收回、原生桥这一下不在）：这一条就不弹了，页面上照样摆着。
+    return false;
   }
 }
 

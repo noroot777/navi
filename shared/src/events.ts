@@ -209,8 +209,9 @@ export type ServerEvent =
       subtitle: string;
       body: string;
     }
-  // 自用模式：等机主点头的设备申请变了（server/src/auth/remote-pairing.ts）。opened = 刚递上来的那一张，客户端据此弹系统通知；
-  // null = 有一张被处理掉了。只推给机主本人（event-filter）。顶条和设置页按它当场重读名单，不等下一轮轮询。
+  // 自用模式：等机主点头的设备申请变了（server/src/auth/remote-pairing.ts）。opened = 刚递上来的那一张，null = 有一张被处理掉了。
+  // 只推给机主本人（event-filter）。页面按它当场重读名单（顶条、设置页、系统通知都按读回的名单走，web/src/lib/pairRequests.ts），
+  // 不靠这一声本身：它是一次性的，断线期间的那几声收不到。
   | { type: "pair.requests"; opened: PairRequestView | null }
   | { type: "task.title"; taskId: string; title: string; updatedAt: string }
   // 提问态变化（§Team）：agent 调 ask_question 提问、或答复把它清空。task.status
